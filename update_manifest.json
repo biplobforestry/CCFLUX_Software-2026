@@ -1,6 +1,6 @@
 {
-  "latest_version": "1.0.0",
-  "released_utc": "2026-07-31T00:00:00Z",
-  "notice": "",
+  "latest_version": "1.0.1",
+  "released_utc": "2026-08-03T22:00:00Z",
+  "notice": "Temporary test release used to verify the update notification.",
   "download_url": "https://uni-koeln.sciebo.de/s/CCFLUX"
 }
