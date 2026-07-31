@@ -23,8 +23,21 @@ from .exceptions import (
 )
 
 PROJECT_SCHEMA_VERSION = 1
+PROJECT_SUFFIX = ".ccflux"
+# Projects are named after the flight, so several campaign projects sitting in
+# one folder — or attached to one message — stay distinguishable without being
+# opened. Both earlier fixed names still open unchanged.
 PROJECT_FILENAME = "flight_project.ccflux"
 LEGACY_PROJECT_FILENAME = "flight_project.json"
+
+
+def project_filename_for(flight_id: str) -> str:
+    """The .ccflux filename for one flight, e.g. ``Flight_2707.ccflux``."""
+    safe = "".join(
+        character if character.isalnum() or character in "-_." else "_"
+        for character in str(flight_id).strip()
+    ).strip("._")
+    return f"{safe or 'flight_project'}{PROJECT_SUFFIX}"
 
 # A .ccflux is a deflate-compressed archive so one file can be handed to a
 # colleague complete. Older plain-JSON projects still open unchanged.
@@ -171,7 +184,25 @@ class FlightProject:
 
     @property
     def project_file(self) -> Path:
-        return self.flight_output_root / "project" / PROJECT_FILENAME
+        return self.flight_output_root / "project" / project_filename_for(
+            self.flight_id
+        )
+
+    @property
+    def superseded_project_files(self) -> tuple[Path, ...]:
+        """Earlier fixed-name files for this same flight.
+
+        Saving removes them once the flight-named file is written. Leaving them
+        would put two projects for one flight in the folder, and only one of
+        them would be current.
+        """
+        folder = self.flight_output_root / "project"
+        current = self.project_file
+        return tuple(
+            candidate
+            for candidate in (folder / PROJECT_FILENAME, folder / LEGACY_PROJECT_FILENAME)
+            if candidate != current and candidate.exists()
+        )
 
     def validate(self, *, require_raw_folder: bool = True) -> None:
         if not self.flight_id.strip():
@@ -371,6 +402,13 @@ class FlightProjectStore:
             except OSError:
                 pass
             raise ProjectFileError(f"Could not save project: {destination}") from exc
+        # Only after the new file is safely in place. A failed save must never
+        # leave the flight without a project.
+        for superseded in project.superseded_project_files:
+            try:
+                superseded.unlink()
+            except OSError:
+                pass  # A read-only disk is not a reason to fail a good save.
         return destination
 
     @staticmethod

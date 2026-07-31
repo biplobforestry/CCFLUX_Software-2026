@@ -101,7 +101,7 @@ def test_moved_project_reanchors_its_stored_output_paths(tmp_path: Path):
     shutil.copytree(project.flight_output_root, moved_root / "Flight_2707")
 
     reopened = store.load_project(
-        moved_root / "Flight_2707" / "project" / "flight_project.ccflux"
+        moved_root / "Flight_2707" / "project" / "Flight_2707.ccflux"
     )
 
     assert reopened.flight_output_root == moved_root / "Flight_2707"

@@ -28,6 +28,7 @@ from core.enums import DetectionStatus, ProcessingStatus
 from core.flight_project import (
     LEGACY_PROJECT_FILENAME,
     PROJECT_FILENAME,
+    PROJECT_SUFFIX,
     FlightProject,
     FlightProjectStore,
     InstrumentProjectState,
@@ -1170,19 +1171,22 @@ class DashboardScanBackend:
                 and not name.startswith(".")
                 and depth < 8
             ]
-            selected_name = (
-                PROJECT_FILENAME
-                if PROJECT_FILENAME in filenames
-                else (
-                    LEGACY_PROJECT_FILENAME
-                    if LEGACY_PROJECT_FILENAME in filenames
-                    else None
-                )
+            # Projects are named after their flight, so discovery has to match
+            # the suffix rather than one fixed name. The legacy JSON name is
+            # still accepted, but only when no .ccflux sits beside it — that
+            # pair is one project written twice, not two projects.
+            found = sorted(
+                name for name in filenames
+                if name.casefold().endswith(PROJECT_SUFFIX)
+                and not name.startswith(".")
             )
-            if selected_name is not None:
-                project_files.append(current_path / selected_name)
-                if len(project_files) >= 500:
-                    break
+            if not found and LEGACY_PROJECT_FILENAME in filenames:
+                found = [LEGACY_PROJECT_FILENAME]
+            for name in found:
+                project_files.append(current_path / name)
+            if len(project_files) >= 500:
+                del project_files[500:]
+                break
 
         projects: list[dict[str, object]] = []
         invalid = 0

@@ -107,7 +107,7 @@ def test_legacy_json_project_can_be_loaded_and_next_save_uses_ccflux(
     migrated = store.save_project(opened.project, overwrite=True)
 
     assert opened.project.project_id == project.project_id
-    assert migrated.name == "flight_project.ccflux"
+    assert migrated.name == f"{opened.project.flight_id}.ccflux"
     assert migrated.is_file()
 
 

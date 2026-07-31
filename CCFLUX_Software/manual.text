@@ -104,15 +104,24 @@ overlaps the Time Filter.
 
 **Save .ccflux** stores selected folders, flight identity, time-filter state, instrument configuration, processing history, completed-job state, output references, and page-specific workflow state.
 
+The project is named after its flight and written to `<Output Folder>/<Flight ID>/project/<Flight ID>.ccflux` — for example `Flight_2707.ccflux` — so that several campaign projects can sit in one folder and be told apart without being opened. A project saved by an earlier version under the fixed name `flight_project.ccflux` is renamed on the next save; only one project file per flight is kept.
+
 **Load .ccflux** searches the selected location for saved projects and restores the chosen Flight Project. Raw data are not copied into the .ccflux file; the referenced input folders must remain accessible.
+
+The folder-selection window opens in front of the browser. If you do not see it, check for a Finder window behind the browser and bring it forward.
 
 ## 7. Software updates and privacy
 
 The **Update** button reports whether a newer release has been published.
 
-* On start-up, and when the button is pressed, CC-FLUX requests one small file
-  from GitHub. If a newer version exists, the button turns green and reads
-  **Update available**, and a short notice appears once.
+* On start-up, CC-FLUX requests one small file from GitHub. If a newer version
+  exists, the button turns green and reads **Update available**, and a short
+  notice appears once.
+* Pressing the button shows the result of that start-up check, which is why it
+  opens immediately. **Check Again** in the dialog contacts GitHub again and
+  reports the outcome, so a release published while the software was running
+  can be found without restarting it. If the server cannot be reached, the
+  dialog says so rather than presenting the earlier answer as fresh.
 * **Nothing is downloaded or installed automatically.** The dialog links to
   the release page at https://github.com/biplobforestry/CCFLUX_Software-2026. Finish any processing and save your Flight Project before
   updating, so that a project written by one version is not reopened by another

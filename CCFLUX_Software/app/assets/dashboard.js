@@ -136,16 +136,19 @@
     }
   }
 
-  async function refreshUpdateStatus(announce) {
+  async function refreshUpdateStatus(announce, { force = false } = {}) {
     try {
-      updateStatus = await api('/api/update/status');
+      // Without force the backend answers from the launch-time check, so the
+      // dialog opens instantly. Check Again contacts the server for real.
+      updateStatus = await api(`/api/update/status${force ? '?refresh=1' : ''}`);
     } catch (_) {
-      return;                       // never let a failed check disturb the GUI
+      return false;                 // never let a failed check disturb the GUI
     }
     renderUpdateButton();
     if (announce && updateStatus.update_available) {
       showToast(`Version ${updateStatus.latest_version} is available.`);
     }
+    return true;
   }
 
   function updateDialogHtml() {
@@ -169,12 +172,41 @@
         target="_blank" rel="noopener">Open the download page</a></p>`;
   }
 
+  function renderUpdateDialog() {
+    modalBody.innerHTML = updateDialogHtml()
+      + `<div class="scan-actions">
+           <button class="btn" id="recheckUpdate">Check Again</button>
+           <button class="btn" id="closeUpdate">Close</button>
+         </div>
+         <p class="muted" id="recheckOutcome"></p>`;
+    document.getElementById('closeUpdate').onclick = () => modal.classList.remove('show');
+    document.getElementById('recheckUpdate').onclick = async () => {
+      const button = document.getElementById('recheckUpdate');
+      const outcome = document.getElementById('recheckOutcome');
+      const previous = updateStatus ? updateStatus.latest_version : null;
+      button.disabled = true;
+      button.textContent = 'Checking...';
+      // The cached answer is discarded first, so a check that fails reports a
+      // failure rather than redisplaying the launch-time result as if fresh.
+      const reached = await refreshUpdateStatus(false, { force: true });
+      renderUpdateDialog();
+      const note = document.getElementById('recheckOutcome');
+      if (!reached || !updateStatus.checked) {
+        note.textContent = 'The update server could not be reached. The previous '
+          + 'result is shown; the software works normally without this check.';
+      } else if (updateStatus.latest_version && updateStatus.latest_version !== previous) {
+        note.textContent = `Checked just now — the published version changed to `
+          + `${updateStatus.latest_version}.`;
+      } else {
+        note.textContent = 'Checked just now.';
+      }
+    };
+  }
+
   document.getElementById('softwareUpdateBtn').addEventListener('click', async () => {
     await refreshUpdateStatus(false);
     modalTitle.textContent = 'Software Update';
-    modalBody.innerHTML = updateDialogHtml()
-      + '<div class="scan-actions"><button class="btn" id="closeUpdate">Close</button></div>';
-    document.getElementById('closeUpdate').onclick = () => modal.classList.remove('show');
+    renderUpdateDialog();
     modal.classList.add('show');
   });
 
