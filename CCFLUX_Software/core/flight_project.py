@@ -323,7 +323,7 @@ class FlightProjectStore:
         return destination
 
     def load_project(self, project_file: Path) -> FlightProject:
-        path = Path(project_file)
+        path = Path(project_file).resolve(strict=False)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -333,19 +333,53 @@ class FlightProjectStore:
             project.validate(require_raw_folder=False)
         except (KeyError, TypeError, ValueError, ProjectValidationError) as exc:
             raise ProjectFileError(f"Invalid project file: {path}: {exc}") from exc
-        expected_locations = {
-            project.project_file.resolve(strict=False),
-            (
-                project.flight_output_root
-                / "project"
-                / LEGACY_PROJECT_FILENAME
-            ).resolve(strict=False),
-        }
-        if path.resolve(strict=False) not in expected_locations:
-            raise ProjectFileError(
-                "Project file location does not match its saved output folder and Flight ID"
-            )
+        self.rebase_output_paths(project, path)
         return project
+
+    @staticmethod
+    def rebase_output_paths(project: FlightProject, project_file: Path) -> bool:
+        """Re-anchor saved output paths onto wherever the project now lives.
+
+        A project records absolute paths from the machine that saved it. Opening
+        used to require the file to still sit at exactly that path, so any
+        project that was moved, copied to another disk, or shared with a
+        colleague refused to open. The on-disk layout is self-describing —
+        ``<output folder>/<flight id>/project/<file>`` — so the output root is
+        derived from the file's own location instead, and every stored output
+        path below the old root is re-pointed at the new one.
+
+        Raw input paths are deliberately left untouched: they belong to the
+        recipient's own disks, and ``detect_changed_raw_files`` reports them as
+        missing so the operator is told to re-select and rescan.
+
+        Returns True when paths were re-anchored.
+        """
+        if project_file.parent.name != "project":
+            # Not the documented layout; keep the saved paths rather than guess.
+            return False
+        flight_root = project_file.parent.parent
+        if flight_root.name != project.flight_id:
+            return False
+        previous_root = project.flight_output_root.resolve(strict=False)
+        if previous_root == flight_root.resolve(strict=False):
+            return False
+
+        def rebase(value: Path) -> Path:
+            try:
+                relative = Path(value).resolve(strict=False).relative_to(previous_root)
+            except ValueError:
+                return Path(value)
+            return flight_root / relative
+
+        project.output_folder_path = flight_root.parent
+        project.output_locations = {
+            key: rebase(value) for key, value in project.output_locations.items()
+        }
+        for state in project.detected_instruments.values():
+            state.output_locations = [
+                rebase(value) for value in state.output_locations
+            ]
+        return True
 
     def validate_project(
         self, project: FlightProject, *, require_raw_folder: bool = True

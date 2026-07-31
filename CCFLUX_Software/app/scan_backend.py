@@ -3645,8 +3645,19 @@ class DashboardScanBackend:
             if selection.available_end is not None:
                 selected_end = min(selected_end, selection.available_end) if selected_end else selection.available_end
         if selected_start is not None and selected_end is not None and selected_start >= selected_end:
+            # Naming the two intervals turns an unexplained refusal into
+            # something the operator can act on — most often the delivery is
+            # from a different day than the flight.
+            display_name = self._instruments[instrument_id].display_name
             raise RuntimeError(
-                f"The selected Time Filter does not overlap {instrument_id} data"
+                f"The selected Time Filter "
+                f"({_iso(self._time_state.selected_analysis_start)} to "
+                f"{_iso(self._time_state.selected_analysis_end)} UTC) does not "
+                f"overlap the {display_name} data "
+                f"({_iso(selection.raw_start) if selection else None} to "
+                f"{_iso(selection.raw_end) if selection else None} UTC). "
+                f"Change the Time Filter, or select the {display_name} delivery "
+                "recorded during this flight."
             )
         return selected_start, selected_end
 
@@ -4426,6 +4437,13 @@ class DashboardScanBackend:
             noseboom_points = tuple(
                 self._instruments["noseboom"].quicklook.get("points", ())
             )
+            # Level 1 already intersects the global filter with FLIR's own
+            # coverage. Level 2 previously read the raw global interval outside
+            # the lock, so the two levels could analyse different windows.
+            selected_start, selected_end = self._instrument_processing_interval(
+                "flir"
+            )
+            flir_coverage = self._time_state.instruments.get("flir")
         if report is None or project is None:
             raise RuntimeError("Flight scan and project state are required")
         paths: list[Path] = []
@@ -4462,15 +4480,24 @@ class DashboardScanBackend:
             min(8 * 1024 * 1024, limits.memory_bytes // max(1, limits.worker_count * 8)),
         )
         tasks = []
-        total_bytes = sum(path.stat().st_size for path in paths)
+        total_bytes = 0
         for path in paths:
-            for start in range(0, path.stat().st_size, chunk_bytes):
-                tasks.append((path, start, min(start + chunk_bytes, path.stat().st_size), 4096))
+            # One stat per file: a multi-gigabyte export produces thousands of
+            # chunks, and this was previously re-stat-ing the file for each one.
+            size = path.stat().st_size
+            total_bytes += size
+            for start in range(0, size, chunk_bytes):
+                tasks.append((path, start, min(start + chunk_bytes, size), 4096))
         entries = []
         scanned = 0
         for index, task in enumerate(tasks, 1):
             context.check_cancelled()
-            bytes_done, _, part = module.scan_one_byte_range(task)
+            # FLIR_Processing_pipeline.scan_one_byte_range returns
+            # (minimum, maximum, count, bytes_scanned, entries) — five values.
+            # This unpacked three, which is the shape of the *other* legacy
+            # module (FLIR_Quick_look, used by the Level 1 adapter), so Level 2
+            # raised "too many values to unpack" on its very first chunk.
+            _, _, _, bytes_done, part = module.scan_one_byte_range(task)
             scanned += bytes_done
             entries.extend(part)
             context.report_progress(
@@ -4478,20 +4505,32 @@ class DashboardScanBackend:
                 f"Indexing FLIR frames {index}/{len(tasks)}",
             )
         entries.sort(key=lambda item: (item[0], str(item[1]), item[2]))
-        start = self._time_state.selected_analysis_start
-        end = self._time_state.selected_analysis_end
-        if start and end:
+        indexed_frame_count = len(entries)
+        if selected_start and selected_end:
+            # A naive frame timestamp used to be stamped with the filter's own
+            # zone and compared without conversion, so an export written with a
+            # real UTC offset was filtered against the wrong instant.
             entries = [
                 item for item in entries
-                if (parsed := module.parse_timestamp(item[0])) is not None
-                and start <= parsed.replace(tzinfo=parsed.tzinfo or start.tzinfo) <= end
+                if (parsed := _flir_frame_utc(module, item[0])) is not None
+                and selected_start <= parsed <= selected_end
             ]
+        context.report_progress(
+            30,
+            f"Selected {len(entries):,} of {indexed_frame_count:,} indexed FLIR frames",
+        )
         if not entries:
-            raise RuntimeError("No FLIR frames fall inside the selected analysis interval")
-        output_dir = project.flight_output_root / "processed" / "flir" / "level2"
+            raise RuntimeError(
+                _flir_selection_failure_message(
+                    indexed_frame_count, flir_coverage, selected_start, selected_end
+                )
+            )
+        # Every other instrument writes into a timestamped run folder. FLIR
+        # Level 2 used one fixed path and refused to start when it existed, so
+        # the routine could only ever be run once per project.
+        output_dir = self._run_output_root(project, "flir") / "level2"
+        output_dir.mkdir(parents=True, exist_ok=True)
         output_file = output_dir / "flir_radiometric_temperature_statistics.csv"
-        if output_file.exists():
-            raise FileExistsError(f"FLIR Level 2 output already exists: {output_file}")
         context.report_progress(32, "Radiometric conversion and frame statistics")
         processed = module.calculate_selected_window(
             entries,
@@ -4768,6 +4807,38 @@ class DashboardScanBackend:
         # the diagnostics log, and must not block dashboard polling.
         if checkpoint_due:
             self._checkpoint_project()
+
+
+def _flir_frame_utc(module, timestamp: str) -> datetime | None:
+    """Parse a FLIR frame timestamp and normalise it to UTC for comparison."""
+    parsed = module.parse_timestamp(timestamp)
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _flir_selection_failure_message(
+    indexed_frame_count: int,
+    coverage: object,
+    selected_start: datetime | None,
+    selected_end: datetime | None,
+) -> str:
+    """Explain an empty FLIR selection with the ranges the operator can act on."""
+    available_start = getattr(coverage, "raw_start", None)
+    available_end = getattr(coverage, "raw_end", None)
+    detail = (
+        f"The FLIR export covers {_iso(available_start)} to {_iso(available_end)} UTC"
+        if available_start and available_end
+        else f"{indexed_frame_count:,} FLIR frame(s) were indexed"
+    )
+    return (
+        "No FLIR frame falls inside the selected Time Filter "
+        f"({_iso(selected_start)} to {_iso(selected_end)} UTC). "
+        f"{detail}. Change the Time Filter to an interval the FLIR export "
+        "covers, or select the FLIR export recorded during this flight."
+    )
 
 
 def _balanced_worker_count(system) -> int:
