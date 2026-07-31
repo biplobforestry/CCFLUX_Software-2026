@@ -172,6 +172,20 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 "/campaign-main-airship.svg": "campaign-main-airship.svg",
             }[path]
             self._send_file(self.server.dashboard_file.with_name(asset_name))
+        elif path.startswith("/logos/"):
+            # Partner logos are bundled so the dashboard renders with no network
+            # access. Resolve and containment-check before serving.
+            name = path.removeprefix("/logos/")
+            directory = (self.server.dashboard_file.parent / "logos").resolve()
+            asset = (directory / name).resolve()
+            if (
+                Path(name).name != name
+                or not asset.is_relative_to(directory)
+                or not asset.is_file()
+            ):
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "Unknown logo"})
+            else:
+                self._send_file(asset)
         elif path == "/vendor/leaflet/leaflet.js":
             self._send_file(
                 self.server.dashboard_file.parent / "vendor" / "leaflet" / "leaflet.js"

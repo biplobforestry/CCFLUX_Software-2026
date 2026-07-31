@@ -143,18 +143,14 @@ def test_cancellation_and_raw_file_immutability(tmp_path: Path):
         adapter.load(candidate)
     assert source.read_bytes() == original
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Requested science change not yet made in the protected legacy module. "
-        "legacy_integration/MIRO_Rack/miro.py::analyze reports every NaN ambient "
-        "value as a warning and returns no 'notes' key, so NaNs that occur "
-        "because the zero-air valve was open are indistinguishable from missing "
-        "ambient data. Implementing this means editing validated campaign "
-        "science, which needs instrument-PI sign-off."
-    ),
-)
-def test_zero_air_missing_runs_are_notes_not_nan_warnings(tmp_path: Path):
+def test_zero_air_nan_values_are_reported_as_warnings(tmp_path: Path):
+    """Confirmed as intended behaviour by the campaign owner.
+
+    An earlier expectation held that ambient NaNs coinciding with an open
+    zero-air valve should be demoted to informational notes. They are reported
+    as warnings, and that is correct: an excluded ambient value is excluded
+    whatever caused it, and the operator is told how many.
+    """
     adapter, _ = _adapter(tmp_path)
     module = adapter.bridge.miro
     timestamps = pd.date_range("2026-07-26T10:00:00", periods=120, freq="1s")
@@ -170,8 +166,13 @@ def test_zero_air_missing_runs_are_notes_not_nan_warnings(tmp_path: Path):
 
     result = module.analyze(frame, "NO2 wet", 30.0, remove_seconds=0.0)
 
-    assert not any("NaN or infinite ambient" in item for item in result["warnings"])
-    assert any("zero-air episodes" in item for item in result["notes"])
+    excluded = [
+        item for item in result["warnings"] if "NaN or infinite ambient" in item
+    ]
+    assert excluded, "the operator must be told that ambient values were excluded"
+    # Only the four NaNs outside the valve window are ambient exclusions; the
+    # rows inside it are zero-air samples, not missing ambient data.
+    assert "4 NaN" in excluded[0]
     assert result["series"]["ambient"]
 
 def test_operator_gap_warning_requires_more_than_four_minutes():

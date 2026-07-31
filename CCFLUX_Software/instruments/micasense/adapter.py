@@ -233,6 +233,38 @@ class MicaSenseLevel1Adapter(InstrumentBase):
                 f"Metadata batch {batch_number}: {completed}/{len(files)} images",
             )
 
+        # Every instrument processes only what falls inside the operator's
+        # selected interval. MicaSense previously evaluated the whole delivery
+        # regardless of the Time Filter, so its capture counts and completeness
+        # did not describe the same flight window as every other instrument.
+        selected_start = _as_utc(options.get("analysis_start"))
+        selected_end = _as_utc(options.get("analysis_end"))
+        excluded_by_time = 0
+        undated = 0
+        if selected_start is not None or selected_end is not None:
+            selected_records = []
+            for record in self._records:
+                stamp = _as_utc(record.get("timestamp"))
+                if stamp is None:
+                    # An image with no readable acquisition time cannot be
+                    # placed in the flight; keep it and say so rather than
+                    # silently assuming it belongs.
+                    undated += 1
+                    selected_records.append(record)
+                    continue
+                if (selected_start is not None and stamp < selected_start) or (
+                    selected_end is not None and stamp > selected_end
+                ):
+                    excluded_by_time += 1
+                    continue
+                selected_records.append(record)
+            if not selected_records:
+                raise ValueError(
+                    "No MicaSense image falls inside the selected Time Filter "
+                    f"({_iso(selected_start)} to {_iso(selected_end)} UTC)."
+                )
+            self._records = selected_records
+
         self._captures = _capture_rows(self._records)
         complete = sum(row["complete"] for row in self._captures)
         incomplete = len(self._captures) - complete
@@ -250,6 +282,16 @@ class MicaSenseLevel1Adapter(InstrumentBase):
             warnings.append(f"{len(corrupt)} corrupt or unreadable TIFF file(s) detected.")
         if small:
             warnings.append(f"{len(small)} unusually small TIFF file(s) detected.")
+        if excluded_by_time:
+            warnings.append(
+                f"{excluded_by_time} image(s) outside the selected Time Filter "
+                "were excluded from this evaluation."
+            )
+        if undated:
+            warnings.append(
+                f"{undated} image(s) have no readable acquisition time and were "
+                "retained without time filtering."
+            )
         missing_gps = sum(not record["gps_present"] for record in self._records)
         missing_exposure = sum(not record["exposure_present"] for record in self._records)
         if missing_gps:
@@ -638,6 +680,30 @@ def _image_sources(images: Sequence[Any]) -> list[SourceFile]:
         SourceFile(Path(_asset_source(image)), size_bytes=_asset_size(image))
         for image in images
     ]
+
+
+def _as_utc(value: Any) -> datetime | None:
+    """Normalise an option or record timestamp to UTC.
+
+    Campaign convention: MicaSense records UTC, so a naive EXIF value is read
+    as UTC rather than discarded.
+    """
+    if isinstance(value, datetime):
+        parsed = value
+    elif value:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
 
 
 def _parse_timestamp(metadata: Mapping[str, Any]) -> datetime | None:

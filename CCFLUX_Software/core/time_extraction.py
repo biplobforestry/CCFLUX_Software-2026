@@ -5,11 +5,12 @@ from __future__ import annotations
 import csv
 import io
 import re
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Iterable, Iterator, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 from zoneinfo import ZoneInfo
 
 from PIL import ExifTags, Image, UnidentifiedImageError
@@ -372,10 +373,7 @@ class TimestampExtractor:
         elif instrument_id == "flir":
             self._flir(path, accumulator)
         elif instrument_id == "micasense":
-            accumulator.warnings.append(
-                f"{instrument_id}: no confirmed camera timestamp field or EXIF "
-                "tag is configured; filesystem modification times were not used."
-            )
+            self._micasense(path, accumulator)
         else:
             self._delimited(
                 path,
@@ -422,6 +420,67 @@ class TimestampExtractor:
                 timezone_name="Europe/Berlin",
             )
         )
+
+    def _micasense(self, path: Path, accumulator: _Accumulator) -> None:
+        """Read EXIF acquisition time from a TIFF, or from TIFFs inside a ZIP.
+
+        MicaSense deliveries arrive either as loose TIFFs or as one ZIP per
+        capture. Without this the instrument reported no UTC coverage at all,
+        so the Time Filter could not include it and its images were evaluated
+        outside the selected interval. Campaign convention is UTC.
+        """
+        suffix = path.suffix.casefold()
+        if suffix in {".tif", ".tiff"}:
+            value = _exif_original_datetime(path)
+            if value is None:
+                accumulator.missing += 1
+                return
+            if _is_unset_camera_clock(value):
+                accumulator.invalid += 1
+                accumulator.warnings.append(_UNSET_CLOCK_WARNING)
+                return
+            accumulator.timestamp_columns.add("EXIF DateTimeOriginal")
+            accumulator.observe(
+                _RawTimestamp(
+                    value, 1, path, format_hint="%Y:%m:%d %H:%M:%S", assume_utc=True
+                )
+            )
+            return
+        if suffix != ".zip":
+            return
+        try:
+            with zipfile.ZipFile(path) as archive:
+                members = [
+                    name for name in archive.namelist()
+                    if name.casefold().endswith((".tif", ".tiff"))
+                ]
+                # One capture holds a band per file with the same trigger time;
+                # the first and last bound the archive without unpacking it all.
+                for row_number, name in enumerate(
+                    sorted(members)[:1] + sorted(members)[-1:], start=1
+                ):
+                    with archive.open(name) as member:
+                        value = _exif_original_datetime(io.BytesIO(member.read()))
+                    if value is None:
+                        continue
+                    if _is_unset_camera_clock(value):
+                        accumulator.invalid += 1
+                        accumulator.warnings.append(_UNSET_CLOCK_WARNING)
+                        continue
+                    accumulator.timestamp_columns.add("EXIF DateTimeOriginal")
+                    accumulator.observe(
+                        _RawTimestamp(
+                            value,
+                            row_number,
+                            path,
+                            format_hint="%Y:%m:%d %H:%M:%S",
+                            assume_utc=True,
+                        )
+                    )
+        except (OSError, zipfile.BadZipFile, ValueError) as exc:
+            accumulator.warnings.append(
+                f"{path}: MicaSense archive could not be inspected: {exc}"
+            )
 
     def _flir(self, path: Path, accumulator: _Accumulator) -> None:
         """Read confirmed UTC timestamps from the edges of a FLIR JSON stream."""
@@ -628,6 +687,43 @@ class TimestampExtractor:
                 accumulator.warnings.append(
                     f"{path}: no SIF datetime [UTC] column or raw record time found"
                 )
+
+
+def _is_unset_camera_clock(value: str) -> bool:
+    """Whether an EXIF stamp is a factory default rather than a real time.
+
+    A camera powered up without a clock write dates its frames from the epoch.
+    Reporting those as coverage would place the instrument decades away from
+    the flight and make it look non-overlapping, which is worse than reporting
+    no coverage at all and saying why.
+    """
+    text = str(value).strip()
+    for prefix_length, separator in ((4, ":"), (4, "-")):
+        head = text[:prefix_length]
+        if head.isdigit() and text[prefix_length:prefix_length + 1] == separator:
+            return int(head) < 2000
+    return False
+
+
+_UNSET_CLOCK_WARNING = (
+    "MicaSense EXIF acquisition times predate 2000, so the camera clock was "
+    "not set. The images cannot be placed on the flight timeline and are "
+    "processed without time filtering."
+)
+
+
+def _exif_original_datetime(source: Any) -> str | None:
+    """Return the raw EXIF DateTimeOriginal string, or None when absent."""
+    try:
+        with Image.open(source) as image:
+            exif = {
+                ExifTags.TAGS.get(tag, str(tag)): value
+                for tag, value in image.getexif().items()
+            }
+    except (OSError, ValueError, UnidentifiedImageError):
+        return None
+    value = exif.get("DateTimeOriginal") or exif.get("DateTime")
+    return str(value) if value else None
 
 
 def _detect_delimiter(header: str) -> str:

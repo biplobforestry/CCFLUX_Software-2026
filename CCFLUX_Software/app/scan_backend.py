@@ -3842,6 +3842,9 @@ class DashboardScanBackend:
         )
         if not paths:
             raise RuntimeError("No selected MIRO source files are available")
+        paths = self._deliveries_for_interval(
+            "miro", paths, selected_start, selected_end
+        )
         estimated_peak = max(
             sum(path.stat().st_size for path in paths) * 8,
             256 * 1024 * 1024,
@@ -3941,6 +3944,9 @@ class DashboardScanBackend:
         )
         if not paths:
             raise RuntimeError("No selected Picarro source files are available")
+        paths = self._deliveries_for_interval(
+            "picarro", paths, selected_start, selected_end
+        )
         output_root = self._run_output_root(project, "picarro")
         result = rack_bridge.process_picarro_from_main(
             source_paths=paths,
@@ -4199,6 +4205,7 @@ class DashboardScanBackend:
             for path in candidate.all_matching_files
         ))
         if not paths: raise RuntimeError("No selected SIF raw files are available")
+        paths = self._deliveries_for_interval("sif", paths, start, end)
         self.resource_manager.admit_task(
             max(sum(path.stat().st_size for path in paths) * 12, 512 * 1024 * 1024),
             self._resource_limits, task_name="AirFloX SIF spectral processing",
@@ -4289,6 +4296,9 @@ class DashboardScanBackend:
         with self._lock:
             report, project = self._report, self._flight_project
             limits = self._resource_limits
+            selected_start, selected_end = self._instrument_processing_interval(
+                "micasense"
+            )
         if report is None or project is None:
             raise RuntimeError("Flight scan and project state are required")
         candidates = [
@@ -4348,7 +4358,13 @@ class DashboardScanBackend:
                 "Confirmed Flight Folder scan candidate",
             )
         )
-        result = adapter.process_quicklook(loaded, {})
+        result = adapter.process_quicklook(
+            loaded,
+            {
+                "analysis_start": selected_start,
+                "analysis_end": selected_end,
+            },
+        )
         outputs = adapter.export_results(
             result, adapter.output_root, ("csv", "json")
         )
@@ -4462,6 +4478,79 @@ class DashboardScanBackend:
                 ]
             project.output_locations["flir_browser"] = quicklook_path
         return JobOutcome(warning=result.warnings[0] if result.warnings else None)
+
+    # Per-file coverage is only worth measuring when a delivery is split across
+    # files and the whole set is small enough to inspect cheaply. A single file
+    # is used as-is, and a very large set is left alone rather than read twice.
+    DELIVERY_SELECTION_MAX_FILES = 64
+    DELIVERY_SELECTION_MAX_BYTES = 2 * 1024 * 1024 * 1024
+
+    def _deliveries_for_interval(
+        self,
+        instrument_id: str,
+        paths: Sequence[Path],
+        selected_start: datetime | None,
+        selected_end: datetime | None,
+    ) -> tuple[Path, ...]:
+        """Drop source files whose own UTC coverage misses the selected interval.
+
+        A campaign folder can hold more than one delivery for the same
+        instrument — an earlier flight, a bench run, a re-export. Every adapter
+        already filters record by record, so this changes no science; it stops
+        unrelated files being read at all and, more importantly, stops a
+        wrong-day delivery quietly widening an instrument's reported coverage.
+
+        Anything that cannot be judged is kept. Being unable to read a file's
+        timestamps is not evidence that it belongs to a different flight.
+        """
+        paths = tuple(paths)
+        if (
+            len(paths) < 2
+            or selected_start is None
+            or selected_end is None
+            or len(paths) > self.DELIVERY_SELECTION_MAX_FILES
+        ):
+            return paths
+        try:
+            total = sum(path.stat().st_size for path in paths)
+        except OSError:
+            return paths
+        if total > self.DELIVERY_SELECTION_MAX_BYTES:
+            return paths
+
+        extractor = TimestampExtractor()
+        kept: list[Path] = []
+        dropped: list[str] = []
+        for path in paths:
+            coverage = extractor.extract_instrument(instrument_id, (path,))
+            start, end = coverage.utc_start_time, coverage.utc_end_time
+            if start is None or end is None:
+                kept.append(path)
+                continue
+            if end < selected_start or start > selected_end:
+                dropped.append(
+                    f"{path.name} ({_iso(start)} to {_iso(end)} UTC)"
+                )
+                continue
+            kept.append(path)
+        if not kept:
+            raise RuntimeError(
+                f"No {instrument_id} source file covers the selected Time Filter "
+                f"({_iso(selected_start)} to {_iso(selected_end)} UTC). "
+                "Found: " + "; ".join(dropped)
+            )
+        if dropped:
+            self.logger.log(
+                LogLevel.WARNING,
+                "delivery-selection",
+                (
+                    f"Excluded {len(dropped)} {instrument_id} source file(s) "
+                    "outside the selected Time Filter: " + "; ".join(dropped)
+                ),
+                instrument=instrument_id,
+                processing_step="delivery-selection",
+            )
+        return tuple(kept)
 
     def _flir_exports_for_interval(
         self,
