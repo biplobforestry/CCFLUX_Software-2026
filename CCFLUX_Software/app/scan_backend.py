@@ -43,6 +43,8 @@ from core.processing_manager import (
     ProcessingContext,
     ProcessingJob,
     ProcessingScheduler,
+    WorkerGroup,
+    worker_group_capacities,
 )
 from core.camera_level2 import (
     level2_capability_snapshot,
@@ -74,6 +76,18 @@ INTEGRATED_PROCESSING_JOB_IDS = frozenset({
     "flir_quick",
     "gopro_quick",
 })
+
+# Job states after which no further update arrives, so the project must be
+# persisted immediately rather than waiting for the next throttled checkpoint.
+TERMINAL_PROCESSING_STATUSES = frozenset({
+    ProcessingStatus.COMPLETE,
+    ProcessingStatus.WARNING,
+    ProcessingStatus.FAILED,
+    ProcessingStatus.CANCELLED,
+})
+
+# Minimum wall-clock gap between checkpoints triggered by progress reports.
+PROGRESS_CHECKPOINT_INTERVAL_SECONDS = 5.0
 
 DEFAULT_SIF_OPTIONS: dict[str, object] = {
     "modes": ["FULL", "FLUO"],
@@ -367,8 +381,7 @@ class DashboardScanBackend:
         )
         self.resource_manager = ResourceManager(logger=self.logger)
         system = self.resource_manager.system
-        safe_workers = system.safely_available_workers
-        balanced_workers = min(safe_workers, max(1, system.total_logical_cores // 4))
+        balanced_workers = _balanced_worker_count(system)
         balanced_ram_target = min(
             system.safely_available_ram_bytes,
             max(1, int(system.total_ram_bytes * 0.25)),
@@ -438,6 +451,7 @@ class DashboardScanBackend:
         self._miro_rack_bridge: object | None = None
         self._hatchbox_view_lock = threading.RLock()
         self._sif_options = dict(DEFAULT_SIF_OPTIONS)
+        self._last_checkpoint_monotonic = 0.0
 
     def attach_miro_rack_bridge(self, bridge: object) -> None:
         """Connect shared MIRO/Picarro browser science to queue processing."""
@@ -2075,7 +2089,14 @@ class DashboardScanBackend:
         elif format_name == "txt":
             table.to_csv(target, index=False, sep="\t", encoding="utf-8")
         else:
-            table.to_excel(target, index=False, engine="openpyxl")
+            try:
+                table.to_excel(target, index=False, engine="openpyxl")
+            except ImportError as exc:
+                raise RuntimeError(
+                    "XLSX download requires the openpyxl library, which is missing "
+                    "from this environment. Restart CC-FLUX with the launcher so it "
+                    "can install the dependency, or download CSV or TXT instead."
+                ) from exc
         self.logger.log(
             LogLevel.SUCCESS,
             "noseboom-export",
@@ -2373,9 +2394,17 @@ class DashboardScanBackend:
         with self._lock:
             self._resource_limits = limits
             self._resources_auto_selected = False
+            # A scheduler fixes its per-group capacities at construction, so a
+            # cached one would keep the previous allocation and silently ignore
+            # this change. Processing is idle here, so it is safe to retire it
+            # and let the next dispatch rebuild it with the new limits.
+            retired_scheduler = self._scheduler
+            self._scheduler = None
             if self._flight_project is not None:
                 self._flight_project.cpu_allocation = limits.worker_count
                 self._flight_project.ram_allocation_bytes = limits.memory_bytes
+        if retired_scheduler is not None:
+            retired_scheduler.shutdown(wait=False)
         self.logger.log(
             LogLevel.INFO,
             "resource-manager",
@@ -2586,6 +2615,16 @@ class DashboardScanBackend:
             if self._selected_output_folder is None or self._flight_project is None:
                 raise ValueError(
                     "Select an Output Folder before remote-sensing processing"
+                )
+            # Camera products run in their own pool. Dispatching into a pool
+            # with no capacity would leave every job queued forever in silence.
+            worker_count = self._resource_limits.worker_count
+            if worker_group_capacities(worker_count)[WorkerGroup.CAMERA_METADATA] < 1:
+                raise ValueError(
+                    "Remote-sensing camera products run in a dedicated worker pool "
+                    f"that has no capacity with {worker_count} CPU worker(s). "
+                    "Raise the CPU allocation to at least 2 workers in Resources, "
+                    "then start Remote Sensing again."
                 )
             start = self._time_state.selected_analysis_start
             end = self._time_state.selected_analysis_end
@@ -3426,9 +3465,7 @@ class DashboardScanBackend:
         system = self.resource_manager.system
         minimum_workers = 1
         maximum_workers = system.safely_available_workers
-        recommended_workers = min(
-            maximum_workers, max(minimum_workers, system.total_logical_cores // 4)
-        )
+        recommended_workers = _balanced_worker_count(system)
         minimum_ram = min(GIB, system.safely_available_ram_bytes)
         recommended_ram_target = min(
             system.safely_available_ram_bytes,
@@ -4692,6 +4729,14 @@ class DashboardScanBackend:
         return JobOutcome(warning=warning)
 
     def _on_job_update(self, job: ProcessingJob) -> None:
+        """Publish job state cheaply; persist to disk only when it is worth it.
+
+        The scheduler calls this on every ``report_progress``, several times a
+        second per running job. Checkpointing each one rewrote the whole project
+        file and re-exported the whole diagnostics log while holding ``_lock``,
+        which is the same lock every dashboard poll needs. Terminal states are
+        still written immediately, so nothing recoverable is lost on a crash.
+        """
         with self._lock:
             if job.status in {
                 ProcessingStatus.COMPLETE,
@@ -4712,7 +4757,35 @@ class DashboardScanBackend:
                         dict.fromkeys(state.warnings + [job.current_step])
                     )
             self._sync_project_queue_state()
+            now = time.monotonic()
+            checkpoint_due = job.status in TERMINAL_PROCESSING_STATUSES or (
+                now - self._last_checkpoint_monotonic
+                >= PROGRESS_CHECKPOINT_INTERVAL_SECONDS
+            )
+            if checkpoint_due:
+                self._last_checkpoint_monotonic = now
+        # Deliberately outside the lock: this writes the project file and copies
+        # the diagnostics log, and must not block dashboard polling.
+        if checkpoint_due:
             self._checkpoint_project()
+
+
+def _balanced_worker_count(system) -> int:
+    """Default CPU allocation that still staffs the camera-metadata pool.
+
+    ``worker_group_capacities`` only gives the camera-metadata group a worker
+    from two workers upwards. A one-worker default therefore let Remote Sensing
+    enqueue camera jobs into a pool that could never run them, leaving them
+    waiting forever with no error. Machines with two logical cores still end up
+    with a single worker; ``start_remote_sensing`` reports that explicitly.
+    """
+    return max(
+        1,
+        min(
+            system.safely_available_workers,
+            max(2, system.total_logical_cores // 4),
+        ),
+    )
 
 
 def _iso(value: datetime | None) -> str | None:

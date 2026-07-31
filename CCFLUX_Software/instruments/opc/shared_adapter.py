@@ -11,9 +11,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-import matplotlib.colors as mcolors
-import matplotlib.pyplot as plt
-import pandas as pd
+import matplotlib
+
+# Figures are rendered from processing worker threads in a server process. A
+# GUI backend (Tk is present for the native folder dialogs) is not thread-safe
+# and aborts on macOS, so the non-interactive backend is selected before pyplot
+# is imported. This also applies to the legacy OPC module loaded by the bridge,
+# which is imported lazily and therefore always after this line.
+matplotlib.use("Agg")
+
+import matplotlib.colors as mcolors  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import pandas as pd  # noqa: E402
 
 from core.detector import InputCandidate
 from core.enums import DetectionStatus, ProcessingStatus

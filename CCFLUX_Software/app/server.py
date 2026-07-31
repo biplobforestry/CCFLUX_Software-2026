@@ -44,6 +44,26 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     server: DashboardHTTPServer
 
     def do_GET(self) -> None:  # noqa: N802
+        try:
+            self._route_get()
+        except ConnectionError:
+            # The browser closed the tab or navigated away mid-response; there
+            # is no socket left to report an error on.
+            return
+        except FileNotFoundError as exc:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            # Routes such as the Noseboom export raise ValueError as their
+            # normal "not processed yet" signal; the operator must see the
+            # message rather than a dropped connection.
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        except Exception:
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "The local application could not complete the request"},
+            )
+
+    def _route_get(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
         if path in {"/", "/index.html"}:
@@ -483,6 +503,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 ).start()
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "Route not found"})
+        except ConnectionError:
+            return
         except (KeyError, TypeError, ValueError, RuntimeError) as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except Exception:
