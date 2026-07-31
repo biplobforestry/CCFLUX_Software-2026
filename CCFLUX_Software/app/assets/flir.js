@@ -93,6 +93,25 @@
     }catch(error){$('statusText').textContent=`FLIR view failed: ${error.message}`;$('statusText').style.color='var(--danger)';}
     finally{$('busy').classList.remove('show');}
   }
+  function formatBytes(value){const n=Number(value)||0;if(n<1024)return `${n} B`;if(n<1048576)return `${(n/1024).toFixed(1)} KB`;return `${(n/1048576).toFixed(1)} MB`;}
+  async function showExports(){
+    const modal=$('exportModal'),list=$('exportList');
+    list.innerHTML='<p class="muted">Looking for FLIR products…</p>';
+    modal.classList.add('show');
+    try{
+      const response=await api('/api/flir/exports');
+      const exports=response.exports||[];
+      list.innerHTML=exports.length?exports.map(item=>`<div class="export-row">
+        <div class="grow"><strong>${item.name}</strong><small>${item.description}</small></div>
+        <span class="muted">${formatBytes(item.size_bytes)}</span>
+        <a class="btn" href="${item.url}" download>Download</a>
+      </div>`).join(''):'<p class="muted">No FLIR product has been written yet. Run the FLIR metadata check, and Level 2 for temperature.</p>';
+    }catch(error){
+      list.innerHTML=`<p class="muted">Could not list FLIR products: ${error.message}</p>`;
+    }
+  }
+  $('exportBtn').onclick=showExports;
+  $('exportClose').onclick=()=>$('exportModal').classList.remove('show');
   $('refreshBtn').onclick=load;$('mapMetric').onchange=renderMap;$('resetMapBtn').onclick=()=>{if(map&&mapBounds?.isValid())map.fitBounds(mapBounds,{padding:[30,30],maxZoom:17});};
   document.querySelectorAll('[data-view]').forEach(link=>link.onclick=event=>{event.preventDefault();showView(link.dataset.view);});
   document.querySelectorAll('[data-fullscreen]').forEach(button=>button.onclick=async()=>{await $(button.dataset.fullscreen).closest('.chart-card').requestFullscreen();setTimeout(()=>Plotly.Plots.resize($(button.dataset.fullscreen)),120);});

@@ -156,3 +156,44 @@ def test_task_georeferences_and_records_provenance():
     assert "process_one_temperature" in source
     assert "scan_timestamps" in source
     assert "inspect_all_headers" in source
+
+
+def test_export_listing_describes_the_post_processing_table(tmp_path):
+    """The Export button must offer the file downstream correction needs."""
+    backend = DashboardScanBackend(tmp_path)
+    run = tmp_path / "Flight_2707" / "processed" / "flir" / "runs" / "x" / "level2"
+    run.mkdir(parents=True)
+    for name in ("temperature_frames.csv", "frame_health.csv", "summary.json"):
+        (run / name).write_text("a,b\n1,2\n", encoding="utf-8")
+    (run / "thumbnail.png").write_bytes(b"\x89PNG")
+    backend._instruments["flir"].output_files = [
+        str(run / n) for n in
+        ("temperature_frames.csv", "frame_health.csv", "summary.json", "thumbnail.png")
+    ]
+
+    exports = backend.flir_exports()
+    names = {item["name"] for item in exports}
+
+    assert "temperature_frames.csv" in names
+    assert "frame_health.csv" in names
+    # Images are not a data export.
+    assert "thumbnail.png" not in names
+    table = next(i for i in exports if i["name"] == "temperature_frames.csv")
+    assert "calibration constants" in table["description"]
+    assert "Noseboom" in table["description"]
+    assert table["url"].endswith("download=1")
+    assert table["size_bytes"] > 0
+
+
+def test_flir_page_offers_export_and_an_interactive_temperature_map():
+    assets = Path(__file__).parents[1] / "app" / "assets"
+    html = (assets / "flir.html").read_text(encoding="utf-8")
+    script = (assets / "flir.js").read_text(encoding="utf-8")
+
+    assert 'id="exportBtn"' in html and 'id="exportModal"' in html
+    assert "/api/flir/exports" in script
+    # The map is a Leaflet canvas coloured by a chosen temperature statistic,
+    # the same treatment as the Noseboom map.
+    assert 'id="thermalMap"' in html and 'id="mapMetric"' in html
+    assert "L.circleMarker" in script and "fitBounds" in script
+    assert "temperature_interpretation" in script

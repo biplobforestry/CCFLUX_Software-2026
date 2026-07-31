@@ -4830,6 +4830,43 @@ class DashboardScanBackend:
             )
         return tuple(kept)
 
+    def flir_exports(self) -> list[dict[str, object]]:
+        """Downloadable FLIR products, newest run first.
+
+        Environment correction is applied downstream, so the export must carry
+        everything that calculation needs: raw DN statistics, all ten
+        calibration constants, the matched Noseboom position, and the mode and
+        provenance under which the temperatures were produced.
+        """
+        with self._lock:
+            files = [Path(value) for value in self._instruments["flir"].output_files]
+        described = {
+            "temperature_frames.csv": (
+                "Per-frame temperature and raw DN statistics, calibration "
+                "constants, matched Noseboom position — the post-processing table"
+            ),
+            "frame_health.csv": "Header health for every frame in the export",
+            "acquisition_gaps.csv": "Acquisition gaps beyond the threshold",
+            "timestamp_index.csv": "Byte-offset index for fast re-runs",
+            "summary.json": "Acquisition and processing summary",
+            "flir_browser.json": "Saved workspace for this page",
+        }
+        exports: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for path in reversed(files):
+            if path.name in seen or not path.is_file():
+                continue
+            if path.suffix.casefold() not in {".csv", ".json"}:
+                continue
+            seen.add(path.name)
+            exports.append({
+                "name": path.name,
+                "description": described.get(path.name, "FLIR product"),
+                "size_bytes": path.stat().st_size,
+                "url": f"/api/flir/asset/{path.name}?download=1",
+            })
+        return exports
+
     def update_flir_level2_options(
         self, request: Mapping[str, object] | None
     ) -> dict[str, object]:

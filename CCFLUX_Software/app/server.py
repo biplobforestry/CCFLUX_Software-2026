@@ -213,6 +213,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, self.server.backend.gopro_media_status())
         elif path == "/api/flir":
             self._send_json(HTTPStatus.OK, self.server.backend.flir_view())
+        elif path == "/api/flir/exports":
+            self._send_json(HTTPStatus.OK, {"exports": self.server.backend.flir_exports()})
         elif path.startswith("/api/flir/asset/"):
             name = path.removeprefix("/api/flir/asset/")
             try:
