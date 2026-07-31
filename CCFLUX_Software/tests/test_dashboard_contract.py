@@ -83,7 +83,9 @@ def test_editable_information_documents_are_wired():
     assert "uni-koeln.sciebo.de/s/CCFLUX" in products
     assert "e.pfannerstill@fz-juelich.de" in products
     assert "g.gkatzelis@fz-juelich.de" in products
-    assert "3 August 2026 after 22:00 UTC" in update
+    # The update notice is operator-editable and is intentionally empty
+    # until there is something to announce; only the wiring is asserted.
+    assert (ASSETS / "software_update.txt").is_file()
     assert "Distribution folder structure" in manual_text
     assert "Instrument descriptions" in manual_text
 
