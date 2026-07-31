@@ -1,0 +1,100 @@
+(() => {
+  'use strict';
+  const $=id=>document.getElementById(id);
+  const plotConfig={responsive:true,displaylogo:false,scrollZoom:true,doubleClick:'reset',toImageButtonOptions:{format:'png',scale:2}};
+  const thermalPalette=['#30123b','#3b63e8','#2ec7c9','#6ce34f','#f6c445','#e7352d'];
+  const metricLabels={
+    temperature_median_c:'Median temperature [°C]',
+    temperature_mean_c:'Mean temperature [°C]',
+    temperature_max_c:'Maximum temperature [°C]',
+    temperature_min_c:'Minimum temperature [°C]'
+  };
+  let payload=null,map=null,mapLayers=[],mapBounds=null;
+
+  async function api(url){const response=await fetch(url,{cache:'no-store'});if(!response.ok)throw new Error(`Request failed (${response.status})`);return response.json();}
+  function finite(value){return Number.isFinite(Number(value));}
+  function layout(title,xTitle,yTitle,extra={}) {
+    const base={title:{text:title,x:.5,font:{size:18}},paper_bgcolor:'#f7fafc',plot_bgcolor:'#fff',font:{family:'Arial, sans-serif',size:14,color:'#172431'},margin:{l:92,r:46,t:68,b:76},xaxis:{title:xTitle,gridcolor:'#dce5ea',automargin:true},yaxis:{title:yTitle,gridcolor:'#dce5ea',automargin:true,separatethousands:true,exponentformat:'none'},legend:{orientation:'h',y:1.14,x:0},hovermode:'closest'};
+    return {...base,...extra,xaxis:{...base.xaxis,...(extra.xaxis||{})},yaxis:{...base.yaxis,...(extra.yaxis||{})}};
+  }
+  function quantile(values,fraction){const sorted=values.map(Number).filter(Number.isFinite).sort((a,b)=>a-b);if(!sorted.length)return null;return sorted[Math.round((sorted.length-1)*fraction)];}
+  function color(value,low,high){const position=Math.max(0,Math.min(1,(Number(value)-low)/Math.max(high-low,1e-12)))*(thermalPalette.length-1),left=Math.floor(position),right=Math.min(thermalPalette.length-1,left+1),mix=position-left;const a=thermalPalette[left].match(/\w\w/g).map(v=>parseInt(v,16)),b=thermalPalette[right].match(/\w\w/g).map(v=>parseInt(v,16));return `rgb(${a.map((v,i)=>Math.round(v*(1-mix)+b[i]*mix)).join(',')})`;}
+  function summaryCard(name,value,note=''){return `<div class="summary"><span>${name}</span><strong>${value}</strong>${note?`<small>${note}</small>`:''}</div>`;}
+  function renderSummary(){
+    const summary=payload.summary||{},temperatures=payload.temperature_records||[],mapped=payload.map_points||[];
+    const medians=temperatures.map(row=>row.temperature_median_c).filter(finite);
+    $('summaryGrid').innerHTML=[
+      summaryCard('Selected FLIR frames',Number(summary.frame_count||0).toLocaleString(),`${payload.utc_start||'—'} to ${payload.utc_end||'—'}`),
+      summaryCard('Radiometric frames',temperatures.length.toLocaleString(),payload.temperature_available?'Temperature conversion complete':'Level 2 required'),
+      summaryCard('Mapped frames',mapped.length.toLocaleString(),payload.matching_method||'Noseboom UTC matching pending'),
+      summaryCard('Median apparent temperature',medians.length?`${quantile(medians,.5).toFixed(2)} °C`:'—','Uncorrected FLIR Planck temperature')
+    ].join('');
+  }
+  function renderAcquisition(){
+    const intervals=(payload.acquisition_intervals_seconds||[]).map(Number).filter(Number.isFinite);
+    Plotly.react('acquisitionPlot',[{type:'scattergl',mode:'lines',x:intervals.map((_,index)=>index+2),y:intervals,name:'Frame interval',line:{color:'#d55e00',width:1.4},hovertemplate:'Frame %{x}<br>Interval %{y:.6f} s<extra></extra>'}],layout('FLIR frame-to-frame acquisition timing','Frame number','Interval [s]'),plotConfig);
+    const gaps=(payload.gaps||[]),x=gaps.map((_,index)=>index+1),y=gaps.map(row=>Number(row.gap_seconds||row.seconds||row.duration_seconds)).map(value=>Number.isFinite(value)?value:null);
+    Plotly.react('gapPlot',[{type:'bar',x,y,name:'Gap duration',marker:{color:'#8c2d78'},hovertemplate:'Gap %{x}<br>%{y:.6f} s<extra></extra>'}],layout(gaps.length?'Detected FLIR acquisition gaps':'No threshold-exceeding FLIR acquisition gaps','Gap number','Duration [s]'),plotConfig);
+  }
+  function renderTemperaturePlots(){
+    const rows=(payload.temperature_records||[]).filter(row=>row.timestamp_utc);
+    const x=rows.map(row=>row.timestamp_utc);
+    const traces=[
+      ['temperature_min_c','Minimum','#2c7fb8'],['temperature_median_c','Median','#111111'],
+      ['temperature_mean_c','Mean','#e69f00'],['temperature_max_c','Maximum','#d55e00']
+    ].map(([key,name,shade])=>({type:'scattergl',mode:'lines',x,y:rows.map(row=>row[key]),name,line:{color:shade,width:name==='Median'?2.2:1.35},connectgaps:false,hovertemplate:`UTC %{x}<br>${name}: %{y:.4f} °C<extra></extra>`}));
+    Plotly.react('temperatureTimePlot',traces,layout('FLIR frame temperature statistics','Recorded UTC','Apparent temperature [°C]'),plotConfig);
+    const medians=rows.map(row=>row.temperature_median_c).filter(finite);
+    Plotly.react('temperatureDistributionPlot',[{type:'histogram',x:medians,nbinsx:50,marker:{color:'#e76f51',line:{color:'#7a2719',width:.5}},hovertemplate:'Temperature %{x:.3f} °C<br>Frames %{y}<extra></extra>'}],layout('Distribution of frame-median temperature','Apparent temperature [°C]','Frame count'),plotConfig);
+    Plotly.react('temperatureVariabilityPlot',[{type:'scattergl',mode:'lines',x,y:rows.map(row=>row.temperature_std_c),name:'Within-frame standard deviation',line:{color:'#6a4c93',width:1.6},hovertemplate:'UTC %{x}<br>Standard deviation %{y:.4f} °C<extra></extra>'}],layout('Within-frame thermal variability','Recorded UTC','Temperature standard deviation [°C]'),plotConfig);
+  }
+  function ensureMap(){
+    if(map)return;
+    map=L.map('thermalMap',{zoomControl:true,preferCanvas:true}).setView([47.64,9.38],10);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors',crossOrigin:true}).addTo(map);
+  }
+  function renderMap(){
+    ensureMap();mapLayers.forEach(layer=>layer.removeFrom(map));mapLayers=[];
+    const metric=$('mapMetric').value,points=(payload.map_points||[]).filter(point=>finite(point.latitude)&&finite(point.longitude)&&finite(point[metric]));
+    $('interpretation').textContent=payload.temperature_interpretation||'';
+    if(!points.length){$('mapNote').textContent=payload.temperature_reason||'No georeferenced FLIR temperature frames are available.';$('mapLegend').hidden=true;mapBounds=null;return;}
+    const values=points.map(point=>Number(point[metric])),low=quantile(values,.02),highCandidate=quantile(values,.98),high=highCandidate>low?highCandidate:low+1;
+    const step=Math.max(1,Math.ceil(points.length/4000)),shown=points.filter((_,index)=>index%step===0),renderer=L.canvas({padding:.5,tolerance:8});
+    const route=L.polyline(shown.map(point=>[point.latitude,point.longitude]),{renderer,color:'#17212b',weight:2,opacity:.58,interactive:false}).addTo(map);mapLayers.push(route);
+    shown.forEach(point=>{
+      const value=Number(point[metric]);
+      const marker=L.circleMarker([point.latitude,point.longitude],{renderer,radius:4,color:'#071827',weight:.45,fillColor:color(value,low,high),fillOpacity:.92});
+      marker.bindPopup(`<strong>FLIR frame ${point.frame_id}</strong><br>${point.timestamp_utc}<br>Latitude: ${Number(point.latitude).toFixed(6)}<br>Longitude: ${Number(point.longitude).toFixed(6)}<br>Altitude: ${finite(point.altitude_m)?Number(point.altitude_m).toFixed(2)+' m':'n/a'}<br>${metricLabels[metric]}: ${value.toFixed(3)}<br>Mean: ${finite(point.temperature_mean_c)?Number(point.temperature_mean_c).toFixed(3)+' °C':'n/a'}<br>Range: ${finite(point.temperature_min_c)&&finite(point.temperature_max_c)?Number(point.temperature_min_c).toFixed(3)+'–'+Number(point.temperature_max_c).toFixed(3)+' °C':'n/a'}<br>Noseboom time difference: ${Number(point.time_delta_seconds).toFixed(3)} s`);
+      marker.addTo(map);mapLayers.push(marker);
+    });
+    mapBounds=L.latLngBounds(shown.map(point=>[point.latitude,point.longitude]));
+    if(mapBounds.isValid())map.fitBounds(mapBounds,{padding:[30,30],maxZoom:17});
+    $('legendTitle').textContent=metricLabels[metric];$('legendLow').textContent=`${low.toFixed(2)} °C`;$('legendHigh').textContent=`${high.toFixed(2)} °C`;$('mapLegend').hidden=false;
+    $('mapNote').textContent=`${points.length.toLocaleString()} georeferenced frames · displaying ${shown.length.toLocaleString()} interactive points`;
+  }
+  function renderGallery(){
+    const thumbnails=payload.thumbnails||[];
+    $('gallery').innerHTML=thumbnails.length?thumbnails.map((item,index)=>`<figure class="thermal-frame"><a href="${item.url}" target="_blank" rel="noopener"><img src="${item.url}" alt="Representative FLIR frame ${index+1}" loading="lazy"></a><figcaption>${item.caption||`Representative FLIR frame ${index+1}`}</figcaption></figure>`).join(''):'<div class="empty-state">No representative FLIR frames have been generated.</div>';
+  }
+  function pathView(){return location.pathname.includes('temperature-map')?'temperature':location.pathname.includes('temperature-plots')?'temperature-plots':location.pathname.includes('gallery')?'gallery':'overview';}
+  function showView(view,push=true){
+    document.querySelectorAll('[data-section]').forEach(card=>card.hidden=card.dataset.section!==view);
+    document.querySelectorAll('[data-view]').forEach(link=>link.classList.toggle('active',link.dataset.view===view));
+    if(push)history.pushState({view},'',`/flir/${view==='temperature'?'temperature-map':view}`);
+    setTimeout(()=>{document.querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));if(view==='temperature'&&map){map.invalidateSize(false);if(mapBounds?.isValid())map.fitBounds(mapBounds,{padding:[30,30],maxZoom:17});}},80);
+  }
+  async function load(){
+    $('busy').classList.add('show');
+    try{
+      const response=await api('/api/flir');$('flightName').textContent=response.flight_id||'No project';
+      if(!response.ready){const message=response.message||response.processing_step||'FLIR metadata quick processing is required';$('statusText').textContent=message;$('summaryGrid').innerHTML=summaryCard('FLIR workspace','Not ready',message);return;}
+      payload=response.data;$('statusDot').classList.add('ready');$('statusText').textContent=response.temperature_ready?'FLIR temperature products and Noseboom map loaded':'FLIR acquisition products loaded · Level 2 temperature processing is pending';
+      renderSummary();renderAcquisition();renderTemperaturePlots();renderGallery();renderMap();showView(pathView(),false);
+    }catch(error){$('statusText').textContent=`FLIR view failed: ${error.message}`;$('statusText').style.color='var(--danger)';}
+    finally{$('busy').classList.remove('show');}
+  }
+  $('refreshBtn').onclick=load;$('mapMetric').onchange=renderMap;$('resetMapBtn').onclick=()=>{if(map&&mapBounds?.isValid())map.fitBounds(mapBounds,{padding:[30,30],maxZoom:17});};
+  document.querySelectorAll('[data-view]').forEach(link=>link.onclick=event=>{event.preventDefault();showView(link.dataset.view);});
+  document.querySelectorAll('[data-fullscreen]').forEach(button=>button.onclick=async()=>{await $(button.dataset.fullscreen).closest('.chart-card').requestFullscreen();setTimeout(()=>Plotly.Plots.resize($(button.dataset.fullscreen)),120);});
+  addEventListener('popstate',()=>showView(pathView(),false));addEventListener('resize',()=>document.querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot)));load();
+})();

@@ -1,0 +1,218 @@
+{
+  "schema_version": 1,
+  "pattern_sets": [
+    {
+      "pattern_id": "noseboom",
+      "likely_folder_names": ["2026*", "Noseboom", "NOSEBOOM", "noseboom", "influxdb"],
+      "filename_prefixes": [],
+      "filename_suffixes": [],
+      "file_extensions": [".csv"],
+      "required_csv_columns": ["Airflow_UTCcorr_Nanoseconds_ns"],
+      "optional_csv_columns": [
+        "TIMESTAMP",
+        "INS_Filter_LLHPos_Latitude_deg",
+        "INS_Filter_LLHPos_Longitude_deg",
+        "GNSSRecv1_LLHPos_Latitude_deg",
+        "GNSSRecv1_LLHPos_Longitude_deg",
+        "WIND_vWind_x_m/s",
+        "WIND_vWind_y_m/s",
+        "WIND_vWind_z_m/s",
+        "WIND_vWind_m/s",
+        "WIND_dir_deg",
+        "Airflow_Flow_OAT_degC",
+        "Airflow_Flow_rel_humidity_",
+        "Airflow_Sensor_pstat_hPa"
+      ],
+      "metadata_keys": [],
+      "camera_exif_tags": [],
+      "header_text": [],
+      "exclusion_patterns": ["*_noseboom_gimbal_sif_log.csv"]
+    },
+    {
+      "pattern_id": "miro",
+      "likely_folder_names": ["MIRO", "miro", "Miro"],
+      "filename_prefixes": [],
+      "filename_suffixes": [],
+      "file_extensions": [".txt", ".tdms"],
+      "required_csv_columns": ["t-stamp"],
+      "optional_csv_columns": [
+        "VValve 0",
+        "CO wet",
+        "N2O wet",
+        "H2O wet",
+        "NO wet",
+        "NO2 wet",
+        "CH4 wet",
+        "SO2 wet",
+        "NH3 wet",
+        "O3 wet",
+        "CO2 wet"
+      ],
+      "metadata_keys": [],
+      "camera_exif_tags": [],
+      "header_text": ["t-stamp"],
+      "exclusion_patterns": []
+    },
+    {
+      "pattern_id": "picarro",
+      "likely_folder_names": ["Picarro", "picarro", "PICARRO"],
+      "filename_prefixes": [],
+      "filename_suffixes": [],
+      "file_extensions": [".dat"],
+      "required_csv_columns": ["DATE", "TIME"],
+      "optional_csv_columns": ["CO2_sync", "CO2_dry_sync", "CH4_sync", "CH4_dry_sync", "H2O_sync"],
+      "metadata_keys": [],
+      "camera_exif_tags": [],
+      "header_text": ["DATE", "TIME"],
+      "exclusion_patterns": []
+    },
+    {
+      "pattern_id": "opc_hbx4",
+      "likely_folder_names": ["2026*", "HATCH-BOX"],
+      "filename_prefixes": ["OPC_HBX4"],
+      "filename_suffixes": [".csv"],
+      "file_extensions": [".csv"],
+      "required_csv_columns": [
+        "_time",
+        "Bin0_X4_1", "Bin1_X4_1", "Bin2_X4_1", "Bin3_X4_1",
+        "Bin4_X4_1", "Bin5_X4_1", "Bin6_X4_1", "Bin7_X4_1",
+        "Bin8_X4_1", "Bin9_X4_1", "Bin10_X4_1", "Bin11_X4_1",
+        "Bin12_X4_1", "Bin13_X4_1", "Bin14_X4_1", "Bin15_X4_1",
+        "Bin16_X4_1", "Bin17_X4_1", "Bin18_X4_1", "Bin19_X4_1",
+        "Bin20_X4_1", "Bin21_X4_1", "Bin22_X4_1", "Bin23_X4_1",
+        "SFR_X4_1", "SP_X4_1", "RejectGlitch_X4_1", "RejectRatio_X4_1",
+        "Laser_status_X4_1", "opc_pm1_1", "opc_pm2.5_1", "opc_pm10_1",
+        "opc_temperature_degC", "RH_OPC_%"
+      ],
+      "optional_csv_columns": [],
+      "metadata_keys": [],
+      "camera_exif_tags": [],
+      "header_text": [],
+      "exclusion_patterns": ["hbx4_evaluated.csv", "paired_comparison.csv"]
+    },
+    {
+      "pattern_id": "opc_hbx5",
+      "likely_folder_names": ["2026*", "HATCH-BOX"],
+      "filename_prefixes": ["OPC_HBX5"],
+      "filename_suffixes": [".csv"],
+      "file_extensions": [".csv"],
+      "required_csv_columns": [
+        "_time",
+        "Bin0_X5_1", "Bin1_X5_1", "Bin2_X5_1", "Bin3_X5_1",
+        "Bin4_X5_1", "Bin5_X5_1", "Bin6_X5_1", "Bin7_X5_1",
+        "Bin8_X5_1", "Bin9_X5_1", "Bin10_X5_1", "Bin11_X5_1",
+        "Bin12_X5_1", "Bin13_X5_1", "Bin14_X5_1", "Bin15_X5_1",
+        "Bin16_X5_1", "Bin17_X5_1", "Bin18_X5_1", "Bin19_X5_1",
+        "Bin20_X5_1", "Bin21_X5_1", "Bin22_X5_1", "Bin23_X5_1",
+        "SFR_X5_1", "SP_X5_1", "RejectGlitch_X5_1", "RejectRatio_X5_1",
+        "Laser_status_X5_1", "opc_pm1_in_1", "opc_pm2.5_in_1",
+        "opc_pm10_in_1", "opc_inlet_temp_degC", "RH_OPC_in_%"
+      ],
+      "optional_csv_columns": [],
+      "metadata_keys": [],
+      "camera_exif_tags": [],
+      "header_text": [],
+      "exclusion_patterns": ["hbx5_evaluated.csv", "paired_comparison.csv"]
+    },
+    {
+      "pattern_id": "partector",
+      "likely_folder_names": ["2026*", "HATCH-BOX"],
+      "filename_prefixes": ["partector"],
+      "filename_suffixes": [".csv"],
+      "file_extensions": [".csv"],
+      "required_csv_columns": ["_time"],
+      "optional_csv_columns": [
+        "time_", "time__1", "number", "number_1", "diam", "diam_1",
+        "LDSA", "LDSA_1", "mass", "mass_1", "flow", "flow_1",
+        "RH", "RH_1", "T", "T_1", "P", "P_1", "error", "error_1"
+      ],
+      "metadata_keys": [],
+      "camera_exif_tags": [],
+      "header_text": [],
+      "exclusion_patterns": ["qc_records.csv", "cleaned_valid_records.csv", "sessions.csv"]
+    },
+    {
+      "pattern_id": "ins_gimbal",
+      "likely_folder_names": ["2026*", "HATCH-BOX"],
+      "filename_prefixes": ["Gremsy_T3V3_Gimbal"],
+      "filename_suffixes": [".csv"],
+      "file_extensions": [".csv"],
+      "required_csv_columns": [
+        "_time",
+        "gimbal_acc_x_counts", "gimbal_acc_y_counts", "gimbal_acc_z_counts",
+        "gimbal_gyro_x_counts", "gimbal_gyro_y_counts", "gimbal_gyro_z_counts"
+      ],
+      "optional_csv_columns": [
+        "gimbal_pitch_deg", "gimbal_roll_deg", "gimbal_yaw_deg",
+        "gimbal_yaw_absolute_deg", "gimbal_downfacing_ok_binary"
+      ],
+      "metadata_keys": [],
+      "camera_exif_tags": [],
+      "header_text": [],
+      "exclusion_patterns": [
+        "evaluated_full_flight.csv", "*_gimbal_sif_log.csv",
+        "*_noseboom_gimbal_sif_log.csv"
+      ]
+    },
+    {
+      "pattern_id": "sif",
+      "likely_folder_names": ["2026*", "HATCH-BOX", "FLOXINSIDE", "FLOX", "FLUO"],
+      "filename_prefixes": ["F", "CAL_"],
+      "filename_suffixes": [],
+      "file_extensions": [".csv", ".txt"],
+      "required_csv_columns": [],
+      "optional_csv_columns": [
+        "wl", "up_coef", "dw_coef", "wl_F", "up_coef_F", "dw_coef_F", "Device ID"
+      ],
+      "metadata_keys": [
+        "IT_WR[us]=", "IT_VEG[us]=", "GPS_TIME_UTC=", "GPS_date=",
+        "GPS_lat=", "GPS_lon="
+      ],
+      "camera_exif_tags": [],
+      "header_text": ["FROG 2.21c AIRFLOX FULL", "FROG 2.21c AIRFLOX FLUO"],
+      "exclusion_patterns": [
+        "ALL_INDEX_AIRFLOX_*", "Incoming_radiance_*", "Reflected_radiance_*",
+        "Reflectance_*", "*_interactive_map.html", "GIS"
+      ]
+    },
+    {
+      "pattern_id": "micasense",
+      "likely_folder_names": ["MicaSense_Zeppelin", "MicaSense", "Micasense", "MicaSense_zeppelin"],
+      "filename_prefixes": ["IMG_"],
+      "filename_suffixes": [],
+      "file_extensions": [".zip", ".tif", ".tiff"],
+      "required_csv_columns": [],
+      "optional_csv_columns": [],
+      "metadata_keys": ["CaptureId", "BandName", "CenterWavelength", "Bandwidth"],
+      "camera_exif_tags": ["DateTimeOriginal", "SubSecTime", "GPSLatitude", "GPSLongitude", "GPSAltitude", "ExposureTime", "ISOSpeed"],
+      "header_text": [],
+      "exclusion_patterns": []
+    },
+    {
+      "pattern_id": "flir",
+      "likely_folder_names": ["FLIR"],
+      "filename_prefixes": ["camera.FLIR"],
+      "filename_suffixes": [".json"],
+      "file_extensions": [".json"],
+      "required_csv_columns": [],
+      "optional_csv_columns": [],
+      "metadata_keys": ["timestamp", "raw_stats", "calibration", "raw"],
+      "camera_exif_tags": [],
+      "header_text": [],
+      "exclusion_patterns": []
+    },
+    {
+      "pattern_id": "gopro",
+      "likely_folder_names": ["GoPro", "GOPRO", "gopro"],
+      "filename_prefixes": [],
+      "filename_suffixes": [],
+      "file_extensions": [".jpg", ".jpeg", ".png", ".mp4", ".mov"],
+      "required_csv_columns": [],
+      "optional_csv_columns": [],
+      "metadata_keys": [],
+      "camera_exif_tags": ["DateTimeOriginal"],
+      "header_text": [],
+      "exclusion_patterns": []
+    }
+  ]
+}

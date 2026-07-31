@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="70 90 700 330" role="img" aria-label="CC-FLUX 2026 airship logo">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="38%" stop-color="#eaf2f8"/>
+      <stop offset="72%" stop-color="#8faabe"/>
+      <stop offset="100%" stop-color="#4f697e"/>
+    </linearGradient>
+    <linearGradient id="lower" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#263f55"/>
+      <stop offset="50%" stop-color="#48677e"/>
+      <stop offset="100%" stop-color="#152c40"/>
+    </linearGradient>
+    <linearGradient id="arc" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#38d4ff"/>
+      <stop offset="55%" stop-color="#13bfff"/>
+      <stop offset="100%" stop-color="#458cff"/>
+    </linearGradient>
+    <linearGradient id="window" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#102b42"/>
+      <stop offset="100%" stop-color="#020b12"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="15" stdDeviation="13" flood-color="#000" flood-opacity=".5"/>
+    </filter>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <path d="M190 197 C228 59,445 7,617 101" fill="none" stroke="url(#arc)" stroke-width="14" stroke-linecap="round" filter="url(#glow)"/>
+  <path d="M615 330 C548 478,319 493,185 367" fill="none" stroke="url(#arc)" stroke-width="14" stroke-linecap="round" filter="url(#glow)"/>
+  <g transform="rotate(-8 400 265)" filter="url(#shadow)">
+    <path d="M174 254 L100 210 L151 205 L216 229 Z" fill="url(#body)" stroke="#d7e6f2" stroke-width="6"/>
+    <path d="M181 217 L146 141 L205 159 L240 217 Z" fill="url(#body)" stroke="#d7e6f2" stroke-width="6"/>
+    <path d="M185 312 L145 375 L213 360 L248 309 Z" fill="url(#body)" stroke="#d7e6f2" stroke-width="6"/>
+    <path d="M125 261 C206 178,423 155,620 185 C698 197,741 225,747 255 C752 286,708 317,627 332 C425 370,210 351,125 278 C117 271,117 268,125 261 Z" fill="url(#body)" stroke="#f2f8fc" stroke-width="7"/>
+    <path d="M125 275 C239 324,460 337,690 292 C661 321,622 332,554 341 C365 365,201 338,125 278 Z" fill="url(#lower)" opacity=".92"/>
+    <path d="M147 268 C282 230,500 209,716 243" fill="none" stroke="#708da4" stroke-width="4" opacity=".72"/>
+    <path d="M392 332 L510 325 L522 374 Q513 398 481 404 L418 400 Q393 392 385 370 Z" fill="url(#body)" stroke="#e7f1f7" stroke-width="6"/>
+    <g fill="url(#window)" stroke="#99b3c6" stroke-width="2">
+      <rect x="408" y="348" width="19" height="27" rx="3"/>
+      <rect x="433" y="345" width="20" height="28" rx="3"/>
+      <rect x="459" y="343" width="20" height="28" rx="3"/>
+      <rect x="485" y="341" width="19" height="27" rx="3"/>
+    </g>
+    <path d="M126 262 L82 280 L127 278" fill="#dfeaf1" stroke="#edf6fb" stroke-width="4"/>
+  </g>
+</svg>

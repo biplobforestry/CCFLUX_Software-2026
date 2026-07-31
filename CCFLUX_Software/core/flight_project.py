@@ -1,0 +1,610 @@
+"""Human-readable flight-project persistence and raw-file change detection."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from .compat import StrEnum
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from .exceptions import (
+    DuplicateFlightIDError,
+    ProjectFileError,
+    ProjectOverwriteError,
+    ProjectValidationError,
+)
+
+PROJECT_SCHEMA_VERSION = 1
+PROJECT_FILENAME = "flight_project.ccflux"
+LEGACY_PROJECT_FILENAME = "flight_project.json"
+INSTRUMENT_IDS = (
+    "noseboom",
+    "miro",
+    "picarro",
+    "opc_hbx4",
+    "opc_hbx5",
+    "partector",
+    "ins_gimbal",
+    "sif",
+    "micasense",
+    "flir",
+    "gopro",
+)
+OUTPUT_DIRECTORIES = (
+    "project",
+    "metadata",
+    "quicklooks",
+    "thumbnails",
+    "reports",
+    "logs",
+)
+
+
+class RawFileState(StrEnum):
+    UNCHANGED = "unchanged"
+    CHANGED = "changed"
+    MISSING = "missing"
+    UNREADABLE = "unreadable"
+
+
+@dataclass(frozen=True, slots=True)
+class RawFileFingerprint:
+    path: Path
+    size_bytes: int
+    modification_time_ns: int
+    sha256: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RawFileChange:
+    path: Path
+    state: RawFileState
+    reason: str
+
+
+@dataclass(slots=True)
+class InstrumentProjectState:
+    instrument_id: str
+    selected_source_files: list[Path] = field(default_factory=list)
+    selected_source_folders: list[Path] = field(default_factory=list)
+    detection_confidence: float | None = None
+    ambiguous_candidates: list[Path] = field(default_factory=list)
+    original_start_time: datetime | None = None
+    original_end_time: datetime | None = None
+    utc_start_time: datetime | None = None
+    utc_end_time: datetime | None = None
+    analysis_start_time: datetime | None = None
+    analysis_end_time: datetime | None = None
+    time_offset_seconds: float = 0.0
+    timestamp_warnings: list[str] = field(default_factory=list)
+    processing_priority: int = 1
+    enabled: bool = True
+    output_locations: list[Path] = field(default_factory=list)
+
+    def validate(self) -> None:
+        if self.instrument_id not in INSTRUMENT_IDS:
+            raise ProjectValidationError(
+                f"Unknown instrument ID: {self.instrument_id}"
+            )
+        if self.detection_confidence is not None and not (
+            0.0 <= self.detection_confidence <= 1.0
+        ):
+            raise ProjectValidationError(
+                f"{self.instrument_id}: detection confidence must be between 0 and 1"
+            )
+        if self.processing_priority < 1:
+            raise ProjectValidationError(
+                f"{self.instrument_id}: processing priority must be positive"
+            )
+        _validate_range(
+            self.original_start_time,
+            self.original_end_time,
+            f"{self.instrument_id} original",
+        )
+        _validate_range(
+            self.utc_start_time, self.utc_end_time, f"{self.instrument_id} UTC"
+        )
+        _validate_range(
+            self.analysis_start_time,
+            self.analysis_end_time,
+            f"{self.instrument_id} analysis",
+        )
+
+
+@dataclass(slots=True)
+class FlightProject:
+    flight_id: str
+    flight_folder_path: Path
+    output_folder_path: Path
+    camera_folder_path: Path | None = None
+    detected_instruments: dict[str, InstrumentProjectState] = field(default_factory=dict)
+    original_start_time: datetime | None = None
+    original_end_time: datetime | None = None
+    utc_start_time: datetime | None = None
+    utc_end_time: datetime | None = None
+    selected_analysis_start: datetime | None = None
+    selected_analysis_end: datetime | None = None
+    display_timezone: str = "UTC"
+    cpu_allocation: int = 1
+    ram_allocation_bytes: int = 0
+    processing_priority: list[str] = field(default_factory=list)
+    enabled_instruments: list[str] = field(default_factory=list)
+    completed_jobs: list[str] = field(default_factory=list)
+    failed_jobs: list[str] = field(default_factory=list)
+    cancelled_jobs: list[str] = field(default_factory=list)
+    instrument_options: dict[str, dict[str, Any]] = field(default_factory=dict)
+    output_locations: dict[str, Path] = field(default_factory=dict)
+    software_version: str = "0.0.0"
+    configuration_version: str = "1"
+    raw_file_fingerprints: dict[str, RawFileFingerprint] = field(default_factory=dict)
+    project_id: UUID = field(default_factory=uuid4)
+    created_at_utc: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+    updated_at_utc: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+    schema_version: int = PROJECT_SCHEMA_VERSION
+
+    @property
+    def flight_output_root(self) -> Path:
+        return self.output_folder_path / self.flight_id
+
+    @property
+    def project_file(self) -> Path:
+        return self.flight_output_root / "project" / PROJECT_FILENAME
+
+    def validate(self, *, require_raw_folder: bool = True) -> None:
+        if not self.flight_id.strip():
+            raise ProjectValidationError("flight_id cannot be blank")
+        if any(character in self.flight_id for character in ("/", "\\", "\0")):
+            raise ProjectValidationError("flight_id cannot contain path separators")
+        if self.schema_version != PROJECT_SCHEMA_VERSION:
+            raise ProjectValidationError(
+                f"Unsupported project schema version: {self.schema_version}"
+            )
+        try:
+            ZoneInfo(self.display_timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ProjectValidationError(
+                f"Unknown display timezone: {self.display_timezone}"
+            ) from exc
+        if require_raw_folder and not self.flight_folder_path.is_dir():
+            raise ProjectValidationError(
+                f"Raw flight folder does not exist: {self.flight_folder_path}"
+            )
+        if (
+            require_raw_folder
+            and self.camera_folder_path is not None
+            and not self.camera_folder_path.is_dir()
+        ):
+            raise ProjectValidationError(
+                f"Raw camera folder does not exist: {self.camera_folder_path}"
+            )
+        raw = self.flight_folder_path.resolve(strict=False)
+        output = self.output_folder_path.resolve(strict=False)
+        if raw == output or _is_relative_to(output, raw) or _is_relative_to(raw, output):
+            raise ProjectValidationError(
+                "Output Folder must be independent from the raw Flight Folder"
+            )
+        if self.cpu_allocation < 0:
+            raise ProjectValidationError("CPU allocation cannot be negative")
+        if self.ram_allocation_bytes < 0:
+            raise ProjectValidationError("RAM allocation cannot be negative")
+        _validate_range(
+            self.original_start_time, self.original_end_time, "project original"
+        )
+        _validate_range(self.utc_start_time, self.utc_end_time, "project UTC")
+        _validate_range(
+            self.selected_analysis_start,
+            self.selected_analysis_end,
+            "selected analysis",
+        )
+        for key, state in self.detected_instruments.items():
+            if key != state.instrument_id:
+                raise ProjectValidationError(
+                    f"Instrument mapping key {key!r} does not match "
+                    f"{state.instrument_id!r}"
+                )
+            state.validate()
+        for queue_id in self.processing_priority:
+            if not isinstance(queue_id, str) or not queue_id.strip():
+                raise ProjectValidationError(
+                    "Processing priority entries must be non-empty strings"
+                )
+        for instrument_id in self.enabled_instruments:
+            if instrument_id not in INSTRUMENT_IDS:
+                raise ProjectValidationError(
+                    f"Unknown instrument ID in project settings: {instrument_id}"
+                )
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectOpenResult:
+    project: FlightProject
+    raw_file_changes: tuple[RawFileChange, ...]
+    rescan_required: bool
+    reused_saved_scan: bool
+
+    @property
+    def missing_raw_files(self) -> tuple[Path, ...]:
+        return tuple(
+            item.path
+            for item in self.raw_file_changes
+            if item.state is RawFileState.MISSING
+        )
+
+
+class FlightProjectStore:
+    """Create and persist projects without writing in the raw flight folder."""
+
+    def create_project(
+        self,
+        *,
+        flight_id: str,
+        flight_folder_path: Path,
+        output_folder_path: Path,
+        detected_instruments: Mapping[str, InstrumentProjectState] | None = None,
+        cpu_allocation: int = 1,
+        ram_allocation_bytes: int = 0,
+        software_version: str = "0.0.0",
+        configuration_version: str = "1",
+        checksum_mode: bool = False,
+    ) -> FlightProject:
+        project = FlightProject(
+            flight_id=flight_id,
+            flight_folder_path=Path(flight_folder_path),
+            output_folder_path=Path(output_folder_path),
+            detected_instruments=dict(detected_instruments or {}),
+            cpu_allocation=cpu_allocation,
+            ram_allocation_bytes=ram_allocation_bytes,
+            software_version=software_version,
+            configuration_version=configuration_version,
+        )
+        project.processing_priority = [
+            key
+            for key, value in sorted(
+                project.detected_instruments.items(),
+                key=lambda item: item[1].processing_priority,
+            )
+        ]
+        project.enabled_instruments = [
+            key for key, value in project.detected_instruments.items() if value.enabled
+        ]
+        project.output_locations = {
+            name: project.flight_output_root / name
+            for name in (*OUTPUT_DIRECTORIES, "processed")
+        }
+        project.validate()
+        if project.flight_output_root.exists():
+            raise DuplicateFlightIDError(
+                f"Output already exists for Flight ID {flight_id!r}: "
+                f"{project.flight_output_root}"
+            )
+        self._create_output_structure(project)
+        project.raw_file_fingerprints = self.capture_raw_file_fingerprints(
+            project, checksum_mode=checksum_mode
+        )
+        return project
+
+    def save_project(
+        self, project: FlightProject, *, overwrite: bool = False
+    ) -> Path:
+        project.validate(require_raw_folder=False)
+        self._create_output_structure(project)
+        destination = project.project_file
+        if destination.exists() and not overwrite:
+            raise ProjectOverwriteError(
+                f"Project file already exists and was not overwritten: {destination}"
+            )
+        project.updated_at_utc = datetime.now(timezone.utc)
+        payload = _project_to_dict(project)
+        temporary = destination.with_name(
+            f".{destination.name}.{os.getpid()}.temporary"
+        )
+        try:
+            temporary.write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(destination)
+        except OSError as exc:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise ProjectFileError(f"Could not save project: {destination}") from exc
+        return destination
+
+    def load_project(self, project_file: Path) -> FlightProject:
+        path = Path(project_file)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ProjectFileError(f"Invalid or unreadable project file: {path}") from exc
+        try:
+            project = _project_from_dict(payload)
+            project.validate(require_raw_folder=False)
+        except (KeyError, TypeError, ValueError, ProjectValidationError) as exc:
+            raise ProjectFileError(f"Invalid project file: {path}: {exc}") from exc
+        expected_locations = {
+            project.project_file.resolve(strict=False),
+            (
+                project.flight_output_root
+                / "project"
+                / LEGACY_PROJECT_FILENAME
+            ).resolve(strict=False),
+        }
+        if path.resolve(strict=False) not in expected_locations:
+            raise ProjectFileError(
+                "Project file location does not match its saved output folder and Flight ID"
+            )
+        return project
+
+    def validate_project(
+        self, project: FlightProject, *, require_raw_folder: bool = True
+    ) -> None:
+        project.validate(require_raw_folder=require_raw_folder)
+
+    def open_project(
+        self,
+        project_file: Path,
+        *,
+        force_rescan: bool = False,
+        checksum_mode: bool = False,
+    ) -> ProjectOpenResult:
+        project = self.load_project(project_file)
+        changes = self.detect_changed_raw_files(
+            project, checksum_mode=checksum_mode
+        )
+        changed = any(item.state is not RawFileState.UNCHANGED for item in changes)
+        return ProjectOpenResult(
+            project=project,
+            raw_file_changes=changes,
+            rescan_required=force_rescan or changed,
+            reused_saved_scan=not force_rescan and not changed,
+        )
+
+    def force_rescan(
+        self, project_file: Path, *, checksum_mode: bool = False
+    ) -> ProjectOpenResult:
+        return self.open_project(
+            project_file, force_rescan=True, checksum_mode=checksum_mode
+        )
+
+    def capture_raw_file_fingerprints(
+        self, project: FlightProject, *, checksum_mode: bool = False
+    ) -> dict[str, RawFileFingerprint]:
+        fingerprints: dict[str, RawFileFingerprint] = {}
+        for path in _selected_files(project):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if not path.is_file():
+                continue
+            fingerprint = RawFileFingerprint(
+                path=path,
+                size_bytes=stat.st_size,
+                modification_time_ns=stat.st_mtime_ns,
+                sha256=_sha256(path) if checksum_mode else None,
+            )
+            fingerprints[str(path)] = fingerprint
+        return fingerprints
+
+    def detect_changed_raw_files(
+        self, project: FlightProject, *, checksum_mode: bool = False
+    ) -> tuple[RawFileChange, ...]:
+        changes: list[RawFileChange] = []
+        for fingerprint in project.raw_file_fingerprints.values():
+            path = fingerprint.path
+            if not path.exists():
+                changes.append(
+                    RawFileChange(path, RawFileState.MISSING, "source file is missing")
+                )
+                continue
+            try:
+                stat = path.stat()
+                if not path.is_file():
+                    changes.append(
+                        RawFileChange(
+                            path, RawFileState.CHANGED, "source is no longer a file"
+                        )
+                    )
+                    continue
+                reasons: list[str] = []
+                if stat.st_size != fingerprint.size_bytes:
+                    reasons.append("file size changed")
+                if stat.st_mtime_ns != fingerprint.modification_time_ns:
+                    reasons.append("modification time changed")
+                if checksum_mode:
+                    current_checksum = _sha256(path)
+                    if fingerprint.sha256 is None:
+                        reasons.append("saved fingerprint has no checksum")
+                    elif current_checksum != fingerprint.sha256:
+                        reasons.append("SHA-256 checksum changed")
+                state = RawFileState.CHANGED if reasons else RawFileState.UNCHANGED
+                changes.append(
+                    RawFileChange(
+                        path,
+                        state,
+                        "; ".join(reasons) if reasons else "size and modification time match",
+                    )
+                )
+            except OSError as exc:
+                changes.append(
+                    RawFileChange(path, RawFileState.UNREADABLE, str(exc))
+                )
+        return tuple(changes)
+
+    @staticmethod
+    def _create_output_structure(project: FlightProject) -> None:
+        root = project.flight_output_root
+        for name in OUTPUT_DIRECTORIES:
+            (root / name).mkdir(parents=True, exist_ok=True)
+        processed = root / "processed"
+        processed.mkdir(parents=True, exist_ok=True)
+        for instrument_id in INSTRUMENT_IDS:
+            (processed / instrument_id).mkdir(exist_ok=True)
+
+
+def _selected_files(project: FlightProject) -> Iterable[Path]:
+    seen: set[Path] = set()
+    for state in project.detected_instruments.values():
+        for path in state.selected_source_files:
+            normalized = Path(path)
+            if normalized not in seen:
+                seen.add(normalized)
+                yield normalized
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _project_to_dict(project: FlightProject) -> dict[str, Any]:
+    return _json_value(asdict(project))
+
+
+def _json_value(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    return value
+
+
+def _project_from_dict(data: Any) -> FlightProject:
+    if not isinstance(data, dict):
+        raise TypeError("project root must be a JSON object")
+    instruments_data = data.get("detected_instruments", {})
+    if not isinstance(instruments_data, dict):
+        raise TypeError("detected_instruments must be an object")
+    instruments: dict[str, InstrumentProjectState] = {}
+    for key, value in instruments_data.items():
+        if not isinstance(value, dict):
+            raise TypeError(f"instrument {key} must be an object")
+        instruments[key] = InstrumentProjectState(
+            instrument_id=value["instrument_id"],
+            selected_source_files=[
+                Path(item) for item in value.get("selected_source_files", [])
+            ],
+            selected_source_folders=[
+                Path(item) for item in value.get("selected_source_folders", [])
+            ],
+            detection_confidence=value.get("detection_confidence"),
+            ambiguous_candidates=[
+                Path(item) for item in value.get("ambiguous_candidates", [])
+            ],
+            original_start_time=_datetime(value.get("original_start_time")),
+            original_end_time=_datetime(value.get("original_end_time")),
+            utc_start_time=_datetime(value.get("utc_start_time")),
+            utc_end_time=_datetime(value.get("utc_end_time")),
+            analysis_start_time=_datetime(value.get("analysis_start_time")),
+            analysis_end_time=_datetime(value.get("analysis_end_time")),
+            time_offset_seconds=float(value.get("time_offset_seconds", 0.0)),
+            timestamp_warnings=list(value.get("timestamp_warnings", [])),
+            processing_priority=int(value.get("processing_priority", 1)),
+            enabled=bool(value.get("enabled", True)),
+            output_locations=[
+                Path(item) for item in value.get("output_locations", [])
+            ],
+        )
+    fingerprints_data = data.get("raw_file_fingerprints", {})
+    if not isinstance(fingerprints_data, dict):
+        raise TypeError("raw_file_fingerprints must be an object")
+    fingerprints = {
+        key: RawFileFingerprint(
+            path=Path(value["path"]),
+            size_bytes=int(value["size_bytes"]),
+            modification_time_ns=int(value["modification_time_ns"]),
+            sha256=value.get("sha256"),
+        )
+        for key, value in fingerprints_data.items()
+    }
+    return FlightProject(
+        flight_id=data["flight_id"],
+        flight_folder_path=Path(data["flight_folder_path"]),
+        output_folder_path=Path(data["output_folder_path"]),
+        camera_folder_path=(
+            Path(data["camera_folder_path"])
+            if data.get("camera_folder_path")
+            else None
+        ),
+        detected_instruments=instruments,
+        original_start_time=_datetime(data.get("original_start_time")),
+        original_end_time=_datetime(data.get("original_end_time")),
+        utc_start_time=_datetime(data.get("utc_start_time")),
+        utc_end_time=_datetime(data.get("utc_end_time")),
+        selected_analysis_start=_datetime(data.get("selected_analysis_start")),
+        selected_analysis_end=_datetime(data.get("selected_analysis_end")),
+        display_timezone=str(data.get("display_timezone", "UTC")),
+        cpu_allocation=int(data.get("cpu_allocation", 1)),
+        ram_allocation_bytes=int(data.get("ram_allocation_bytes", 0)),
+        processing_priority=list(data.get("processing_priority", [])),
+        enabled_instruments=list(data.get("enabled_instruments", [])),
+        completed_jobs=list(data.get("completed_jobs", [])),
+        failed_jobs=list(data.get("failed_jobs", [])),
+        cancelled_jobs=list(data.get("cancelled_jobs", [])),
+        instrument_options={
+            str(key): dict(value)
+            for key, value in data.get("instrument_options", {}).items()
+            if isinstance(value, dict)
+        },
+        output_locations={
+            key: Path(value) for key, value in data.get("output_locations", {}).items()
+        },
+        software_version=str(data.get("software_version", "unknown")),
+        configuration_version=str(data.get("configuration_version", "unknown")),
+        raw_file_fingerprints=fingerprints,
+        project_id=UUID(data["project_id"]),
+        created_at_utc=_required_datetime(data.get("created_at_utc"), "created_at_utc"),
+        updated_at_utc=_required_datetime(data.get("updated_at_utc"), "updated_at_utc"),
+        schema_version=int(data.get("schema_version", -1)),
+    )
+
+
+def _datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("datetime values must be ISO-8601 strings")
+    return datetime.fromisoformat(value)
+
+
+def _required_datetime(value: Any, name: str) -> datetime:
+    parsed = _datetime(value)
+    if parsed is None:
+        raise ValueError(f"{name} is required")
+    return parsed
+
+
+def _validate_range(
+    start: datetime | None, end: datetime | None, label: str
+) -> None:
+    if start is not None and end is not None and end < start:
+        raise ProjectValidationError(f"{label} end cannot precede start")
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False

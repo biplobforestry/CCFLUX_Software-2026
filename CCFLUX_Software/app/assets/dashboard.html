@@ -1,0 +1,2548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CC-FLUX Campaign 2026 — Integrated Post-Flight Scientific Payload Review</title>
+  <style>
+    :root {
+      --bg: #07111f;
+      --panel: #0d1b2a;
+      --panel-2: #10243a;
+      --line: rgba(255,255,255,0.10);
+      --text: #edf6ff;
+      --muted: #8ca4bd;
+      --cyan: #32d3ff;
+      --green: #43d17a;
+      --amber: #ffbf47;
+      --red: #ff6b6b;
+      --blue: #4f8cff;
+      --shadow: 0 18px 50px rgba(0,0,0,0.35);
+      --scan-window-top: 150px;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      padding-bottom: 42px;
+      font-family: Inter, Segoe UI, Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 15% 10%, rgba(50,211,255,0.10), transparent 28%),
+        radial-gradient(circle at 85% 0%, rgba(79,140,255,0.10), transparent 30%),
+        linear-gradient(180deg, #07111f 0%, #091522 45%, #07111f 100%);
+    }
+
+    button, select, input { font: inherit; }
+
+    .app-shell {
+      width: 100%;
+      max-width: none;
+      margin: 0;
+      padding: clamp(12px, 1.35vw, 26px);
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 1000;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 24px;
+      align-items: center;
+      min-height: 112px;
+      padding: 20px clamp(20px, 1.7vw, 34px);
+      border: 1px solid rgba(255,255,255,0.09);
+      border-top: 3px solid var(--cyan);
+      border-radius: 0 0 14px 14px;
+      background:
+        radial-gradient(circle at 18% 0%, rgba(50,211,255,0.09), transparent 34%),
+        linear-gradient(180deg, rgba(6,17,31,0.99), rgba(8,21,36,0.985));
+      -webkit-backdrop-filter: blur(18px) saturate(125%);
+      backdrop-filter: blur(18px) saturate(125%);
+      box-shadow: 0 12px 30px rgba(0,0,0,0.28), 0 1px 0 rgba(255,255,255,0.035) inset;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 15px;
+      min-width: 0;
+    }
+
+    .brand-emblem {
+      width: 194px;
+      height: 98px;
+      flex: 0 0 194px;
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
+    }
+
+    .brand-emblem svg {
+      width: 188px;
+      height: 94px;
+      display: block;
+      overflow: visible;
+      filter: drop-shadow(0 7px 10px rgba(0,0,0,.38)) drop-shadow(0 0 8px rgba(25,200,255,.10));
+    }
+
+    .brand-copy { min-width: 0; }
+
+    h1 {
+      margin: 0;
+      color: var(--cyan);
+      font-size: clamp(1.62rem, 2.25vw, 2.35rem);
+      line-height: 1.08;
+      font-weight: 780;
+      letter-spacing: -0.025em;
+      max-width: 100%;
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+      overflow-wrap: anywhere;
+    }
+
+    .subtitle {
+      margin-top: 7px;
+      max-width: 710px;
+      color: #a9bfd3;
+      font-size: 0.94rem;
+      font-weight: 500;
+      line-height: 1.35;
+      letter-spacing: 0.008em;
+    }
+
+    .subtitle .campaign-line,
+    .subtitle .review-line { display: block; }
+
+    .subtitle .campaign-line {
+      color: #86d7cc;
+      text-shadow: 0 0 18px rgba(77,184,160,0.12);
+    }
+
+    .subtitle .review-line {
+      margin-top: 3px;
+      color: #c8d9e8;
+      font-weight: 650;
+    }
+
+    .top-actions {
+      display: flex;
+      grid-column: 1 / -1;
+      align-items: stretch;
+      gap: 10px;
+      justify-content: flex-start;
+      flex-wrap: wrap;
+      max-width: none;
+    }
+
+    .action-group.system-actions {
+      grid-column: 2;
+      grid-row: 1;
+      grid-template-columns: 1fr;
+      align-self: start;
+      justify-self: end;
+      display: grid;
+      gap: 8px;
+      padding: 8px;
+      border: 1px solid rgba(255,255,255,.09);
+      border-radius: 12px;
+      background:
+        linear-gradient(145deg, rgba(11,31,49,.78), rgba(4,15,27,.68));
+      box-shadow: 0 10px 26px rgba(0,0,0,.16);
+    }
+
+    .system-information-actions,
+    .system-command-actions {
+      display: grid;
+      gap: 7px;
+    }
+
+    .system-information-actions {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .system-command-actions {
+      grid-template-columns: repeat(3, max-content);
+    }
+
+    .btn.info-product,
+    .btn.info-update {
+      color: #f4fbff;
+      border-color: rgba(119,220,255,.32);
+      font-weight: 760;
+      text-shadow: 0 1px 1px rgba(0,0,0,.22);
+      box-shadow: 0 7px 18px rgba(23,103,162,.16);
+    }
+
+    .btn.info-product {
+      background: linear-gradient(135deg, #10899a, #2867bd);
+    }
+
+    .btn.info-update {
+      background: linear-gradient(135deg, #315fba, #6d55b8);
+    }
+
+    .btn.info-product:hover,
+    .btn.info-update:hover {
+      border-color: rgba(170,235,255,.64);
+      filter: brightness(1.09);
+    }
+
+    .btn.system-refresh {
+      color: #dffcff;
+      border-color: rgba(74,215,224,.36);
+      background: linear-gradient(135deg, rgba(13,105,117,.78), rgba(17,70,103,.88));
+    }
+
+    .btn.system-reset {
+      color: #fff1d4;
+      border-color: rgba(255,188,94,.38);
+      background: linear-gradient(135deg, rgba(139,88,29,.86), rgba(84,55,28,.92));
+    }
+
+    .btn.system-exit {
+      color: #ffe1e6;
+      border-color: rgba(255,119,140,.36);
+      background: linear-gradient(135deg, rgba(128,43,60,.88), rgba(73,28,43,.94));
+    }
+
+    .btn.system-refresh:hover,
+    .btn.system-reset:hover,
+    .btn.system-exit:hover {
+      filter: brightness(1.12);
+    }
+
+    .action-group {
+      display: grid;
+      grid-template-columns: repeat(var(--action-columns, 2), max-content);
+      gap: 7px;
+      padding: 7px;
+      border: 1px solid rgba(255,255,255,.09);
+      border-radius: 11px;
+      background: rgba(4,15,27,.52);
+    }
+
+    .action-group-label {
+      grid-column: 1 / -1;
+      padding: 0 3px 1px;
+      color: var(--muted);
+      font-size: .67rem;
+      font-weight: 780;
+      letter-spacing: .075em;
+      text-transform: uppercase;
+    }
+
+    .btn {
+      min-height: 40px;
+      border: 1px solid rgba(255,255,255,0.11);
+      color: #dceaf7;
+      background: rgba(255,255,255,0.035);
+      padding: 9px 13px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.88rem;
+      font-weight: 650;
+      transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+      border-color: rgba(50,211,255,0.42);
+      background: rgba(50,211,255,0.065);
+    }
+
+    .btn:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 3px rgba(50,211,255,0.14);
+    }
+
+    .btn.primary {
+      background: linear-gradient(135deg, #43dbff, #5795ff);
+      color: #04111c;
+      border-color: transparent;
+      font-weight: 800;
+      box-shadow: 0 7px 20px rgba(50,211,255,0.17);
+    }
+
+    .btn.primary:hover {
+      background: linear-gradient(135deg, #5ee1ff, #6aa2ff);
+      box-shadow: 0 9px 24px rgba(50,211,255,0.23);
+    }
+
+    .btn.confirmed {
+      color: #03170c;
+      border-color: rgba(93,236,164,.78);
+      background: linear-gradient(135deg, #5ae3a0, #2dbb76);
+      box-shadow: 0 7px 20px rgba(67,209,122,.2);
+    }
+
+    .btn.confirmed:hover {
+      color: #03170c;
+      border-color: #8df0bd;
+      background: linear-gradient(135deg, #70e9ae, #39c982);
+    }
+
+    .btn:disabled {
+      cursor: not-allowed;
+      transform: none;
+      opacity: 0.72;
+    }
+
+    .btn.remote-inactive {
+      color: #ffe5e5;
+      border-color: rgba(255,107,107,0.72);
+      background: linear-gradient(135deg, rgba(145,35,47,.78), rgba(95,24,34,.78));
+      box-shadow: 0 0 0 1px rgba(255,107,107,.12);
+    }
+
+    .btn.remote-ready {
+      color: #04170e;
+      border-color: rgba(79,224,154,.78);
+      background: linear-gradient(135deg, #50e09b, #2bbb76);
+      box-shadow: 0 7px 20px rgba(79,224,154,.2);
+    }
+
+    .btn.danger {
+      color: #ffdede;
+      border-color: rgba(255,107,107,0.42);
+      background: rgba(255,107,107,0.08);
+    }
+
+    .btn.danger:hover {
+      border-color: rgba(255,107,107,0.70);
+      background: rgba(255,107,107,0.14);
+    }
+
+    .danger-warning {
+      padding: 12px 14px;
+      color: #ffdede;
+      border: 1px solid rgba(255,107,107,0.48);
+      border-radius: 10px;
+      background: rgba(255,107,107,0.09);
+    }
+
+    .flight-strip {
+      display: grid;
+      grid-template-columns: 1.15fr 1fr 1fr 1fr 0.85fr 0.85fr;
+      gap: 12px;
+      margin-top: 14px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: linear-gradient(145deg, rgba(20,39,57,0.88), rgba(14,31,49,0.84));
+    }
+
+    .folder-summary {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin: 10px 0 12px;
+    }
+
+    .folder-summary .time-readout strong {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .folder-summary .time-readout {
+      background: linear-gradient(145deg, rgba(9,35,45,0.92), rgba(9,27,40,0.94));
+      border-color: rgba(74,181,175,0.15);
+    }
+
+    .folder-summary .time-readout:nth-child(2) {
+      background: linear-gradient(145deg, rgba(10,31,47,0.94), rgba(11,27,43,0.94));
+    }
+
+    .folder-summary .time-readout:nth-child(3) {
+      background: linear-gradient(145deg, rgba(11,29,43,0.94), rgba(12,25,40,0.94));
+    }
+
+    .folder-summary .time-readout.confirmed {
+      border-color: rgba(69,214,133,.7);
+      background: linear-gradient(145deg, rgba(16,75,54,.96), rgba(9,50,41,.96));
+      box-shadow: 0 0 0 1px rgba(69,214,133,.12), 0 10px 26px rgba(0,0,0,.2);
+    }
+
+    .folder-summary .time-readout.confirmed span { color: #b9f5d2; }
+    .folder-summary .time-readout.confirmed strong { color: #f1fff7; }
+
+    .field {
+      min-width: 0;
+    }
+
+    .field label {
+      display: block;
+      color: var(--muted);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 6px;
+    }
+
+    .field input,
+    .field select {
+      width: 100%;
+      color: var(--text);
+      background: #0a1726;
+      border: 1px solid var(--line);
+      padding: 10px 11px;
+      border-radius: 9px;
+      outline: none;
+    }
+
+    .field input:focus,
+    .field select:focus {
+      border-color: rgba(50,211,255,0.55);
+      box-shadow: 0 0 0 3px rgba(50,211,255,0.08);
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0,1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .time-filter-panel {
+      margin-top: 14px;
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background:
+        radial-gradient(circle at 92% 0%, rgba(63,103,170,0.09), transparent 36%),
+        linear-gradient(145deg, rgba(8,24,42,0.94), rgba(9,19,35,0.92));
+    }
+
+    .time-filter-head,
+    .time-filter-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .time-filter-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .time-readout {
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: #0a1726;
+    }
+
+    .time-readout span {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--muted);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+    }
+
+    .time-readout strong { font-size: 0.84rem; }
+
+    .time-edit-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: end;
+      margin-top: 12px;
+    }
+
+    .time-edit-grid.custom-active {
+      padding: 10px;
+      border: 1px solid rgba(50,211,255,0.32);
+      border-radius: 11px;
+      background: rgba(50,211,255,0.035);
+      box-shadow: 0 0 0 3px rgba(50,211,255,0.035);
+    }
+
+    .time-warning {
+      margin-top: 10px;
+      color: var(--amber);
+      font-size: 0.78rem;
+      white-space: pre-wrap;
+    }
+
+    .timezone-control {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      padding: 5px 6px 5px 11px;
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 9px;
+      background: rgba(7,20,34,0.72);
+      color: #b9cde0;
+      font-size: 0.82rem;
+    }
+
+    .timezone-control select {
+      min-width: 190px;
+      max-width: 240px;
+      padding: 7px 30px 7px 10px;
+      color: var(--text);
+      border: 1px solid rgba(50,211,255,0.18);
+      border-radius: 7px;
+      outline: none;
+      background: #0a1726;
+      color-scheme: dark;
+    }
+
+    .timezone-control select:focus {
+      border-color: rgba(50,211,255,0.55);
+      box-shadow: 0 0 0 3px rgba(50,211,255,0.08);
+    }
+
+    .instrument-card.outside-range {
+      border-color: rgba(255,107,107,0.55);
+      box-shadow: 0 0 0 1px rgba(255,107,107,0.12) inset;
+    }
+
+    .priority-panel {
+      margin-top: 14px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background:
+        radial-gradient(circle at 100% 0%, rgba(76,100,173,0.08), transparent 34%),
+        linear-gradient(145deg, rgba(15,25,48,0.94), rgba(10,23,39,0.93));
+      overflow: hidden;
+    }
+
+    .priority-list { padding: 10px; }
+    .queue-guide { display: grid; grid-template-columns: repeat(3, max-content) 1fr; gap: 10px 16px; align-items: center; padding: 11px 12px; margin-bottom: 10px; color: #c8d9e8; border: 1px solid rgba(50,211,255,0.22); border-radius: 10px; background: rgba(50,211,255,0.055); font-size: 0.82rem; }
+    .queue-guide strong { color: var(--cyan); }
+    .queue-guide small { grid-column: 1 / -1; color: var(--muted); }
+
+    .priority-job {
+      display: grid;
+      grid-template-columns: 28px 88px minmax(180px, 1fr) 100px 110px minmax(120px, auto);
+      gap: 10px;
+      align-items: center;
+      padding: 10px;
+      margin-bottom: 7px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #0a1726;
+    }
+
+    .priority-job.dragging { opacity: 0.45; }
+    .priority-progress { height: 6px; margin-top: 7px; overflow: hidden; border-radius: 99px; background: rgba(138,171,196,.2); }
+    .priority-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--cyan), #4fe09a); transition: width .25s ease; }
+    .priority-job.is-processing { border-color: rgba(50,211,255,0.75); background: linear-gradient(100deg, rgba(8,61,85,.92), #0a1726); box-shadow: 0 0 0 1px rgba(50,211,255,.12) inset; }
+    .priority-job.is-complete { border-color: rgba(79,224,154,0.58); background: linear-gradient(100deg, rgba(14,70,54,.82), #0a1726); }
+    .priority-job.is-warning, .priority-job.is-failed { border-color: rgba(255,180,84,0.58); background: linear-gradient(100deg, rgba(79,53,21,.78), #0a1726); }
+    .priority-handle { color: var(--muted); cursor: grab; font-size: 1.05rem; }
+    .queue-select { display: inline-flex; align-items: center; gap: 6px; color: #dceaf7; font-size: .78rem; font-weight: 700; cursor: pointer; }
+    .queue-select input { accent-color: var(--cyan); inline-size: 17px; block-size: 17px; }
+    .priority-name { font-weight: 720; }
+    .priority-meta { color: var(--muted); font-size: 0.74rem; }
+    .priority-meta strong { color: #dceaf7; font-weight: 700; }
+    .priority-actions { display: flex; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+    .priority-actions .btn { min-height: 30px; padding: 5px 8px; font-size: 0.72rem; }
+
+    .metric-card {
+      padding: 16px;
+      border-radius: 15px;
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(16,36,58,0.92), rgba(11,25,40,0.92));
+    }
+
+    .metric-card:nth-child(1) {
+      background: linear-gradient(160deg, rgba(15,43,60,0.94), rgba(10,29,43,0.93));
+    }
+
+    .metric-card:nth-child(2) {
+      background: linear-gradient(160deg, rgba(13,45,49,0.91), rgba(10,30,40,0.94));
+    }
+
+    .metric-card:nth-child(3) {
+      background: linear-gradient(160deg, rgba(28,34,65,0.93), rgba(14,26,45,0.94));
+    }
+
+    .metric-card:nth-child(4) {
+      background: linear-gradient(160deg, rgba(28,41,55,0.93), rgba(14,27,41,0.94));
+    }
+
+    .metric-label {
+      color: #ffffff;
+      font-size: 0.78rem;
+      margin-bottom: 8px;
+    }
+
+    .metric-value {
+      font-size: 1.55rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+    }
+
+    .metric-note {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 0.78rem;
+    }
+
+    .section-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin: 20px 0 12px;
+    }
+
+    .section-title {
+      margin: 0;
+      font-size: 1rem;
+      letter-spacing: 0.03em;
+    }
+
+    .filters {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .filter-btn {
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.03);
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 7px 11px;
+      cursor: pointer;
+    }
+
+    .filter-btn.active {
+      color: var(--text);
+      border-color: rgba(50,211,255,0.45);
+      background: rgba(50,211,255,0.10);
+    }
+
+    .systems-grid {
+      display: grid;
+      grid-template-columns: minmax(320px, 0.82fr) minmax(0, 2.18fr);
+      grid-template-rows: auto auto;
+      gap: 14px;
+      align-items: stretch;
+    }
+
+    .systems-grid > .system-panel:nth-child(1) {
+      grid-column: 1;
+      grid-row: 1;
+    }
+
+    .systems-grid > .system-panel:nth-child(2) {
+      grid-column: 1;
+      grid-row: 2;
+    }
+
+    .systems-grid > .system-panel:nth-child(3) {
+      grid-column: 2;
+      grid-row: 1 / span 2;
+    }
+
+    .systems-grid > .system-panel:nth-child(3) .instrument-list {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      align-content: start;
+    }
+
+    .system-panel {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      overflow: hidden;
+      background: rgba(13,27,42,0.82);
+      box-shadow: var(--shadow);
+    }
+
+    .system-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 15px 16px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(90deg, rgba(50,211,255,0.08), transparent);
+    }
+
+    .system-name {
+      font-size: 0.96rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+    }
+
+    .system-count {
+      color: var(--muted);
+      font-size: 0.76rem;
+    }
+
+    .instrument-list {
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .instrument-card {
+      color: inherit;
+      text-decoration: none;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+      padding: 13px;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 13px;
+      background: rgba(255,255,255,0.025);
+      cursor: pointer;
+      transition: 0.2s ease;
+    }
+
+    .instrument-card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(50,211,255,0.35);
+      background: rgba(50,211,255,0.05);
+    }
+
+    .instrument-card.hidden { display: none; }
+
+    .instrument-name {
+      font-weight: 750;
+      margin-bottom: 5px;
+    }
+
+    .instrument-meta {
+      color: var(--muted);
+      font-size: 0.78rem;
+      line-height: 1.45;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 7px 9px;
+      border-radius: 999px;
+      font-size: 0.74rem;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 10px currentColor;
+    }
+
+    .complete { color: var(--green); background: rgba(67,209,122,0.11); }
+    .warning { color: var(--amber); background: rgba(255,191,71,0.11); }
+    .running { color: var(--cyan); background: rgba(50,211,255,0.11); }
+    .queued { color: var(--muted); background: rgba(140,164,189,0.11); }
+    .failed { color: var(--red); background: rgba(255,107,107,0.11); }
+
+    /* ---------------------------------------------------------
+       Restrained blue/green system styling
+       No instrument icons are used.
+       --------------------------------------------------------- */
+
+    .system-panel {
+      position: relative;
+      isolation: isolate;
+      background: rgba(10, 25, 40, 0.90);
+      box-shadow:
+        0 18px 44px rgba(0,0,0,0.30),
+        0 1px 0 rgba(255,255,255,0.025) inset;
+    }
+
+    /* NOSEBOOM — deep aviation blue */
+    .systems-grid > .system-panel:nth-child(1) {
+      border-color: rgba(62, 137, 235, 0.34);
+      background:
+        linear-gradient(155deg,
+          rgba(19, 67, 119, 0.84) 0%,
+          rgba(11, 35, 61, 0.94) 52%,
+          rgba(8, 24, 40, 0.98) 100%);
+    }
+
+    .systems-grid > .system-panel:nth-child(1) .system-header {
+      background:
+        linear-gradient(90deg,
+          rgba(45, 124, 224, 0.26) 0%,
+          rgba(28, 81, 143, 0.13) 58%,
+          transparent 100%);
+      border-bottom-color: rgba(80, 153, 242, 0.23);
+    }
+
+    /* MIRO RACK — blue-to-green teal */
+    .systems-grid > .system-panel:nth-child(2) {
+      border-color: rgba(38, 184, 160, 0.32);
+      background:
+        linear-gradient(155deg,
+          rgba(10, 84, 88, 0.84) 0%,
+          rgba(8, 53, 62, 0.94) 52%,
+          rgba(7, 28, 41, 0.98) 100%);
+    }
+
+    .systems-grid > .system-panel:nth-child(2) .system-header {
+      background:
+        linear-gradient(90deg,
+          rgba(27, 182, 164, 0.24) 0%,
+          rgba(26, 112, 123, 0.12) 58%,
+          transparent 100%);
+      border-bottom-color: rgba(51, 199, 176, 0.22);
+    }
+
+    /* HATCHBOX — green with a restrained blue undertone */
+    .systems-grid > .system-panel:nth-child(3) {
+      border-color: rgba(66, 188, 115, 0.30);
+      background:
+        linear-gradient(155deg,
+          rgba(24, 88, 63, 0.80) 0%,
+          rgba(12, 55, 50, 0.93) 45%,
+          rgba(8, 30, 42, 0.98) 100%);
+    }
+
+    .systems-grid > .system-panel:nth-child(3) .system-header {
+      background:
+        linear-gradient(90deg,
+          rgba(58, 190, 112, 0.23) 0%,
+          rgba(31, 118, 92, 0.12) 58%,
+          transparent 100%);
+      border-bottom-color: rgba(74, 201, 126, 0.21);
+    }
+
+    .system-name {
+      text-shadow: 0 1px 16px rgba(255,255,255,0.06);
+    }
+
+    /* Shared instrument-card styling */
+    .instrument-card {
+      color: inherit;
+      text-decoration: none;
+      position: relative;
+      overflow: hidden;
+      min-height: 82px;
+      border-color: rgba(255,255,255,0.095);
+      background:
+        linear-gradient(145deg,
+          rgba(255,255,255,0.050),
+          rgba(255,255,255,0.018));
+      box-shadow:
+        0 8px 18px rgba(0,0,0,0.15),
+        0 1px 0 rgba(255,255,255,0.025) inset;
+    }
+
+    .instrument-card::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 12px;
+      bottom: 12px;
+      width: 3px;
+      border-radius: 0 999px 999px 0;
+      background: var(--instrument-accent, #4f8cff);
+      box-shadow: 0 0 14px var(--instrument-glow, rgba(79,140,255,0.34));
+    }
+
+    /* Blue family */
+    .instrument-card[data-name="Noseboom"],
+    .instrument-card[data-name="OPC HBX-4"],
+    .instrument-card[data-name="MicaSense"],
+    .instrument-card[data-name="GoPro"] {
+      --instrument-accent: #4f8cff;
+      --instrument-glow: rgba(79,140,255,0.34);
+      background:
+        linear-gradient(145deg,
+          rgba(35, 78, 133, 0.28),
+          rgba(13, 31, 50, 0.72));
+    }
+
+    .instrument-card[data-name="OPC HBX-5"],
+    .instrument-card[data-name="FLIR Thermal Camera"] {
+      --instrument-accent: #35a9d6;
+      --instrument-glow: rgba(53,169,214,0.32);
+      background:
+        linear-gradient(145deg,
+          rgba(24, 90, 117, 0.27),
+          rgba(12, 34, 49, 0.72));
+    }
+
+    /* Green family */
+    .instrument-card[data-name="MIRO"],
+    .instrument-card[data-name="Partector Pro"],
+    .instrument-card[data-name="SIF / FLOX"] {
+      --instrument-accent: #43d17a;
+      --instrument-glow: rgba(67,209,122,0.31);
+      background:
+        linear-gradient(145deg,
+          rgba(25, 101, 63, 0.28),
+          rgba(11, 40, 35, 0.73));
+    }
+
+    .instrument-card[data-name="Picarro"] {
+      --instrument-accent: #28bfa8;
+      --instrument-glow: rgba(40,191,168,0.31);
+      background:
+        linear-gradient(145deg,
+          rgba(15, 94, 84, 0.28),
+          rgba(10, 39, 42, 0.73));
+    }
+
+    .instrument-card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(89, 169, 235, 0.36);
+      background:
+        linear-gradient(145deg,
+          rgba(52, 120, 146, 0.22),
+          rgba(17, 47, 58, 0.67));
+      box-shadow:
+        0 12px 26px rgba(0,0,0,0.22),
+        0 0 0 1px rgba(77, 184, 160, 0.07) inset;
+    }
+
+    .instrument-card .status-pill {
+      border: 1px solid rgba(255,255,255,0.06);
+      box-shadow: 0 5px 14px rgba(0,0,0,0.14);
+    }
+
+
+    .bottom-grid {
+      display: grid;
+      grid-template-columns: 1.3fr 1fr;
+      gap: 14px;
+      margin-top: 14px;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(13,27,42,0.82);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .availability-panel {
+      background:
+        radial-gradient(circle at 0% 0%, rgba(50,211,255,0.055), transparent 42%),
+        linear-gradient(150deg, rgba(10,31,47,0.95), rgba(11,25,41,0.94));
+    }
+
+    .camera-panel {
+      background:
+        radial-gradient(circle at 100% 0%, rgba(67,209,122,0.055), transparent 40%),
+        linear-gradient(150deg, rgba(10,35,42,0.94), rgba(11,26,40,0.95));
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .panel-body { padding: 15px 16px; }
+
+    .timeline {
+      display: grid;
+      gap: 12px;
+    }
+
+    .timeline-row {
+      display: grid;
+      grid-template-columns: 130px 1fr 58px;
+      gap: 10px;
+      align-items: center;
+      font-size: 0.78rem;
+    }
+
+    .track {
+      height: 9px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    .fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--cyan), var(--blue));
+    }
+
+    .fill.warn {
+      background: linear-gradient(90deg, var(--amber), #ff8f47);
+    }
+
+    .camera-job {
+      padding: 12px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .camera-job:last-child { border-bottom: 0; }
+
+    .camera-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+
+    .camera-name { font-weight: 750; }
+    .camera-name a { color: inherit; text-decoration: none; }
+    .camera-name a:hover { color: var(--cyan); text-decoration: underline; }
+    .camera-detail { color: var(--muted); font-size: 0.75rem; }
+
+    .progress {
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.06);
+      overflow: hidden;
+    }
+
+    .progress > span {
+      display: block;
+      height: 100%;
+      width: 0;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--cyan), var(--blue));
+      transition: width 0.4s ease;
+    }
+
+    .toast {
+      position: fixed;
+      right: 22px;
+      bottom: 22px;
+      max-width: 340px;
+      padding: 14px 16px;
+      border-radius: 13px;
+      background: #10243a;
+      border: 1px solid rgba(50,211,255,0.35);
+      box-shadow: var(--shadow);
+      opacity: 0;
+      transform: translateY(10px);
+      pointer-events: none;
+      transition: 0.25s ease;
+      z-index: 20;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.68);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 30;
+    }
+
+    .modal.show { display: flex; }
+
+    .modal-card {
+      width: min(620px, 100%);
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: #0d1b2a;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .modal-body {
+      max-height: calc(88vh - 74px);
+      overflow: auto;
+      padding: 18px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .detail-grid { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 12px 0; }
+    .detail-row, .form-row { display: flex; gap: 10px; align-items: flex-start; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: #0a1724; }
+    .form-row { align-items: center; justify-content: space-between; margin: 10px 0; }
+    .form-row input, .form-row select { width: min(260px, 55%); padding: 8px; border: 1px solid #28465e; border-radius: 7px; background: #10283a; color: var(--text); }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+    @media (max-width: 700px) { .detail-grid { grid-template-columns: 1fr; } }
+
+    .info-document { color: #c8d9e8; }
+    .info-document h1, .info-document h2, .info-document h3 {
+      margin: 1.15rem 0 .55rem;
+      color: var(--text);
+      line-height: 1.22;
+    }
+    .info-document h1:first-child, .info-document h2:first-child, .info-document h3:first-child { margin-top: 0; }
+    .info-document h1 { color: var(--cyan); font-size: 1.55rem; }
+    .info-document h2 { color: var(--cyan); font-size: 1.3rem; }
+    .info-document h3 { font-size: 1.08rem; }
+    .info-document p { margin: .55rem 0; }
+    .info-document ul { margin: .45rem 0 .9rem; padding-left: 1.35rem; }
+    .info-document li { margin: .42rem 0; }
+    .info-document li.nested { margin-left: 1.2rem; color: #a9bfd3; }
+    .info-document .info-indent { margin-left: 1.4rem; }
+    .info-document strong { color: #f3f9ff; }
+    .info-document a { color: #62dcff; font-weight: 720; overflow-wrap: anywhere; }
+    .info-document a:hover, .info-document a:focus-visible { color: #a4edff; }
+    .info-loading { min-height: 180px; display: grid; place-items: center; color: var(--cyan); font-weight: 750; }
+    .license-hero {
+      position: relative;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: center;
+      gap: 16px;
+      margin: -2px -2px 22px;
+      padding: clamp(18px, 3vw, 28px);
+      overflow: hidden;
+      border: 1px solid rgba(50, 211, 255, .32);
+      border-radius: 16px;
+      background:
+        radial-gradient(circle at 90% 12%, rgba(63, 126, 255, .30), transparent 34%),
+        linear-gradient(135deg, rgba(16, 75, 102, .96), rgba(15, 32, 59, .98));
+      box-shadow: 0 18px 44px rgba(0, 0, 0, .28);
+    }
+    .license-hero::after {
+      content: "";
+      position: absolute;
+      width: 180px;
+      height: 180px;
+      right: -80px;
+      bottom: -120px;
+      border: 22px solid rgba(98, 220, 255, .08);
+      border-radius: 50%;
+    }
+    .license-emblem {
+      width: clamp(58px, 8vw, 76px);
+      aspect-ratio: 1;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(150, 235, 255, .58);
+      border-radius: 18px;
+      color: #061521;
+      background: linear-gradient(145deg, #86edff, #3f7eff);
+      box-shadow: 0 10px 30px rgba(50, 211, 255, .24);
+      font: 900 clamp(1.75rem, 4vw, 2.45rem)/1 Georgia, "Times New Roman", serif;
+    }
+    .license-hero-copy { position: relative; z-index: 1; min-width: 0; }
+    .license-kicker {
+      display: block;
+      margin-bottom: 4px;
+      color: #83e9ff;
+      font-size: .76rem;
+      font-weight: 850;
+      letter-spacing: .15em;
+      text-transform: uppercase;
+    }
+    .license-hero-copy strong {
+      display: block;
+      color: #fff;
+      font-size: clamp(1.22rem, 2.4vw, 1.8rem);
+      line-height: 1.16;
+    }
+    .license-hero-copy small { color: #b9d7e8; font-size: .86rem; }
+    .license-document {
+      padding: clamp(4px, 1vw, 10px);
+      color: #cbdce9;
+      background:
+        linear-gradient(90deg, rgba(50, 211, 255, .05) 1px, transparent 1px) 0 0 / 28px 28px,
+        transparent;
+    }
+    .license-document h1 { display: none; }
+    .license-document h2 {
+      margin-top: 1.5rem;
+      padding-bottom: .42rem;
+      border-bottom: 1px solid rgba(50, 211, 255, .22);
+      color: #75e1ff;
+    }
+    .license-document p {
+      padding: .68rem .82rem;
+      border-left: 3px solid rgba(63, 126, 255, .58);
+      border-radius: 0 8px 8px 0;
+      background: rgba(7, 24, 40, .50);
+    }
+    .license-document ol, .license-document ul {
+      margin: .65rem 0 1rem;
+      padding-left: 1.65rem;
+    }
+    .manual-hero {
+      position: relative;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: center;
+      gap: 18px;
+      margin: -2px -2px 24px;
+      padding: clamp(20px, 3vw, 30px);
+      overflow: hidden;
+      border: 1px solid rgba(122, 235, 255, .42);
+      border-radius: 18px;
+      background:
+        radial-gradient(circle at 86% 12%, rgba(147, 91, 255, .48), transparent 32%),
+        radial-gradient(circle at 8% 92%, rgba(32, 222, 171, .26), transparent 34%),
+        linear-gradient(135deg, rgba(9, 103, 133, .98), rgba(34, 48, 112, .98));
+      box-shadow: 0 20px 48px rgba(0, 0, 0, .30);
+    }
+    .manual-hero::after {
+      content: "";
+      position: absolute;
+      width: 190px;
+      height: 190px;
+      right: -82px;
+      bottom: -126px;
+      border: 24px solid rgba(255, 255, 255, .07);
+      border-radius: 50%;
+    }
+    .manual-emblem {
+      width: clamp(104px, 14vw, 138px);
+      aspect-ratio: 360 / 170;
+      display: grid;
+      place-items: center;
+      padding: 7px 9px;
+      border: 1px solid rgba(217, 250, 255, .68);
+      border-radius: 18px;
+      background:
+        radial-gradient(circle at 25% 20%, rgba(53, 214, 255, .22), transparent 45%),
+        rgba(5, 25, 48, .58);
+      box-shadow: 0 12px 32px rgba(61, 222, 255, .30);
+    }
+    .manual-emblem img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .manual-hero-copy { position: relative; z-index: 1; }
+    .manual-hero-copy small {
+      display: block;
+      margin-bottom: 5px;
+      color: #aef5ff;
+      font-size: .76rem;
+      font-weight: 850;
+      letter-spacing: .15em;
+      text-transform: uppercase;
+    }
+    .manual-hero-copy strong {
+      display: block;
+      color: #fff;
+      font-size: clamp(1.3rem, 2.7vw, 1.95rem);
+      line-height: 1.14;
+    }
+    .manual-hero-copy span { color: #d3e8f6; font-size: .88rem; }
+    .manual-document {
+      padding: clamp(2px, 1vw, 8px);
+      counter-reset: manual-section;
+    }
+    .manual-document h1 { display: none; }
+    .manual-document h2 {
+      margin-top: 1.7rem;
+      padding: .68rem .85rem;
+      border: 1px solid rgba(102, 222, 255, .24);
+      border-radius: 10px;
+      color: #ecfbff;
+      background: linear-gradient(100deg, rgba(17, 123, 151, .72), rgba(78, 68, 158, .42));
+      box-shadow: 0 8px 20px rgba(0, 0, 0, .12);
+    }
+    .manual-document h3 {
+      color: #72e9cf;
+      border-left: 3px solid #7b8cff;
+      padding-left: .68rem;
+    }
+    .manual-document p {
+      padding: .24rem .4rem;
+    }
+    .manual-document li::marker { color: #65dfff; font-weight: 850; }
+    .manual-document strong { color: #fff3ba; }
+    .license-document li { margin: .62rem 0; padding-left: .25rem; }
+    .license-document > p:last-child {
+      border-color: #ffb454;
+      color: #ffd8a7;
+      background: rgba(87, 53, 14, .20);
+    }
+    .instrument-map-shell { margin-top: 14px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #07151f; }
+    .instrument-map-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 9px; border-bottom: 1px solid var(--line); }
+    .instrument-map-toolbar label { display: inline-flex; gap: 7px; align-items: center; }
+    .instrument-map-toolbar input[type="range"] { width: 130px; }
+    .instrument-map { width: 100%; height: min(52vh, 460px); display: block; touch-action: none; cursor: grab; }
+    .instrument-map:active { cursor: grabbing; }
+    .map-legend { display: flex; gap: 18px; flex-wrap: wrap; padding: 8px 11px; color: var(--muted); font-size: 12px; }
+    .map-key { display: inline-flex; align-items: center; gap: 6px; }
+    .map-swatch { width: 24px; height: 4px; border-radius: 2px; background: #32d3ff; }
+    .map-swatch.straight { background: #ffb454; }
+
+    .scan-grid {
+      display: grid;
+      grid-template-columns: 145px minmax(0, 1fr);
+      gap: 8px 14px;
+      font-size: 0.84rem;
+    }
+
+    .scan-label { color: #7892aa; }
+    .scan-value {
+      color: #d7e8f7;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .scan-progress {
+      height: 8px;
+      margin: 18px 0 14px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #07111f;
+      border: 1px solid var(--line);
+    }
+
+    .scan-progress span {
+      display: block;
+      width: 35%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--cyan), var(--blue));
+      transition: width 0.2s ease;
+    }
+
+    .scan-percentage.waiting { color: var(--cyan); min-width: 86px; text-align: right; }
+
+    .scan-progress.indeterminate span {
+      animation: scan-indeterminate 1.15s ease-in-out infinite;
+    }
+
+    @keyframes scan-indeterminate {
+      from { transform: translateX(-110%); }
+      to { transform: translateX(300%); }
+    }
+
+    .scan-messages {
+      height: 130px;
+      overflow: auto;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      color: #a9bfd3;
+      background: #07111f;
+      font: 0.76rem/1.5 Consolas, "Courier New", monospace;
+    }
+
+    .scan-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 16px;
+    }
+    .project-choice-list{display:grid;gap:10px;max-height:48vh;overflow:auto;margin-top:14px;padding-right:4px}
+    .project-choice{width:100%;display:grid;grid-template-columns:minmax(150px,.55fr) minmax(0,1.45fr);gap:7px 16px;padding:14px 16px;text-align:left;border:1px solid rgba(50,211,255,.26);border-radius:11px;background:#0a2032;color:var(--text);cursor:pointer}
+    .project-choice:hover,.project-choice:focus-visible{outline:none;border-color:var(--cyan);background:#103149;box-shadow:0 0 0 2px rgba(50,211,255,.12)}
+    .project-choice strong{color:var(--cyan);font-size:1rem}.project-choice span{color:var(--muted);overflow-wrap:anywhere}.project-choice .project-path{grid-column:1/-1;font:.78rem/1.45 Consolas,monospace;color:#a8c7d9}
+
+    .scan-window {
+      position: fixed;
+      top: var(--scan-window-top);
+      width: min(560px, calc(50vw - 28px));
+      min-width: 360px;
+      min-height: 220px;
+      max-width: calc(100vw - 28px);
+      max-height: calc(100vh - var(--scan-window-top) - 56px);
+      display: none;
+      resize: both;
+      overflow: auto;
+      z-index: 1001;
+      border: 1px solid rgba(50,211,255,.28);
+      border-radius: 14px;
+      background: #0d1b2a;
+      box-shadow: 0 22px 70px rgba(0,0,0,.55);
+    }
+
+    .scan-window.show { display: block; }
+    .scan-window.flight { left: 14px; }
+    .scan-window.camera { right: 14px; }
+    .scan-window.minimized {
+      min-height: 0;
+      height: auto !important;
+      resize: none;
+    }
+    .scan-window.minimized .scan-window-body { display: none; }
+    .scan-window.maximized {
+      top: var(--scan-window-top);
+      right: 14px;
+      bottom: 56px;
+      left: 14px;
+      width: auto !important;
+      height: auto !important;
+      max-width: none;
+      max-height: none;
+      resize: none;
+      z-index: 1002;
+    }
+    .scan-window-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #0a1725;
+    }
+    .scan-window-header strong { margin-right: auto; }
+    .window-control {
+      width: 30px;
+      height: 28px;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 6px;
+      color: var(--text);
+      background: rgba(255,255,255,.04);
+      cursor: pointer;
+      font-size: 1rem;
+    }
+    .window-control:hover { background: rgba(50,211,255,.1); }
+    .window-control.close:hover { background: rgba(255,107,107,.18); }
+    .scan-window-body { padding: 16px; }
+    .scan-progress-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 58px;
+      gap: 12px;
+      align-items: center;
+      margin-top: 14px;
+    }
+    .scan-progress-row .scan-progress { margin: 0; }
+    .scan-percentage {
+      color: var(--cyan);
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }
+    .scan-window[data-phase="complete"] {
+      border-color: rgba(67,209,122,.55);
+    }
+
+    .close-btn {
+      border: 0;
+      background: transparent;
+      color: var(--text);
+      font-size: 1.3rem;
+      cursor: pointer;
+    }
+
+
+    .log-panel {
+      margin-top: 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      overflow: hidden;
+      background: #050b12;
+      box-shadow: var(--shadow);
+    }
+
+    .log-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, #0c1723, #09131e);
+    }
+
+    .log-title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .terminal-dots { display: flex; gap: 5px; }
+    .terminal-dots span { width: 8px; height: 8px; border-radius: 50%; display: block; }
+    .terminal-dots span:nth-child(1) { background: var(--red); }
+    .terminal-dots span:nth-child(2) { background: var(--amber); }
+    .terminal-dots span:nth-child(3) { background: var(--green); }
+
+    .log-title {
+      font-size: 0.82rem;
+      font-weight: 750;
+      letter-spacing: 0.03em;
+    }
+
+    .log-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+    .log-actions .btn { min-height: 32px; padding: 6px 10px; font-size: 0.76rem; }
+
+    .log-console {
+      height: 230px;
+      overflow: auto;
+      padding: 12px 14px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.78rem;
+      line-height: 1.55;
+      color: #c7d6e5;
+      background:
+        linear-gradient(rgba(255,255,255,0.018) 1px, transparent 1px),
+        #050b12;
+      background-size: 100% 24px;
+      scrollbar-color: #29445e #07111b;
+    }
+
+    .log-line { white-space: pre-wrap; word-break: break-word; }
+    .log-time { color: #607c96; }
+    .log-info { color: #8fcfff; }
+    .log-success { color: #72df9b; }
+    .log-warning { color: #ffd073; }
+    .log-error { color: #ff8585; }
+    .log-debug { color: #a9b5c1; }
+
+    .institution-logo-banner {
+      display: grid;
+      grid-template-columns: repeat(11, minmax(0, 1fr));
+      align-items: stretch;
+      justify-items: stretch;
+      gap: clamp(6px, 0.7vw, 12px);
+      width: 100%;
+      margin-top: 14px;
+      padding: 16px clamp(10px, 1.5vw, 24px);
+      overflow: hidden;
+      border-top: 1px solid var(--line);
+      background: rgba(8, 18, 31, 0.72);
+    }
+
+    .institution-logo-item {
+      width: 100%;
+      min-width: 0;
+      height: 88px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 9px 7px;
+      border: 1px solid rgba(99, 150, 187, 0.12);
+      border-radius: 10px;
+      background: rgba(6, 16, 28, 0.34);
+    }
+
+    .institution-logo-item img {
+      display: block;
+      width: 100%;
+      max-width: 136px;
+      max-height: 58px;
+      height: auto;
+      object-fit: contain;
+    }
+
+    .institution-logo-item.main-partner,
+    .institution-logo-item.campaign-logo-item {
+      border-color: rgba(54, 212, 255, 0.35);
+      background: linear-gradient(145deg, rgba(19, 54, 78, 0.70), rgba(5, 17, 30, 0.76));
+      box-shadow: inset 0 0 20px rgba(54, 212, 255, 0.055), 0 7px 16px rgba(0,0,0,0.20);
+    }
+
+    .institution-logo-item.main-partner img {
+      max-width: 158px;
+      max-height: 64px;
+      filter: brightness(1.28) contrast(1.10) saturate(1.12) drop-shadow(0 5px 9px rgba(0,0,0,0.30));
+    }
+
+    .campaign-logo-item {
+      display: grid;
+      grid-template-rows: 52px auto auto;
+      align-content: center;
+      justify-items: center;
+      gap: 1px;
+      padding: 4px 7px 5px;
+      color: var(--text);
+    }
+
+    .campaign-logo-item svg {
+      display: block;
+      width: 100%;
+      max-width: 142px;
+      height: 52px;
+      overflow: visible;
+      filter: brightness(1.12) contrast(1.08) drop-shadow(0 4px 7px rgba(0,0,0,.38));
+    }
+
+    .campaign-logo-title {
+      display: flex;
+      align-items: baseline;
+      justify-content: center;
+      font-size: clamp(0.63rem, 0.75vw, 0.78rem);
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: 0.055em;
+      white-space: nowrap;
+    }
+
+    .campaign-logo-title .accent,
+    .campaign-logo-year { color: var(--cyan); }
+
+    .campaign-logo-year {
+      width: min(100%, 112px);
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.54rem;
+      font-weight: 850;
+      line-height: 1;
+      letter-spacing: 0.20em;
+      padding-left: 0.20em;
+    }
+
+    .campaign-logo-year i {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--cyan));
+    }
+
+    .campaign-logo-year i:last-child {
+      background: linear-gradient(90deg, var(--cyan), transparent);
+    }
+
+    .logo-fallback {
+      display: none;
+      color: #8eb8d7;
+      font-size: clamp(0.72rem, 1vw, 1rem);
+      font-weight: 850;
+      letter-spacing: 0.08em;
+    }
+
+    .app-footer {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 1000;
+      padding: 10px 16px;
+      color: #ffffff;
+      text-align: center;
+      font-size: 0.94rem;
+      font-weight: 650;
+      letter-spacing: 0.045em;
+      background: rgba(7,17,31,0.94);
+      border-top: 1px solid var(--line);
+      backdrop-filter: blur(10px);
+    }
+
+    .footer-actions {
+      position: absolute;
+      top: 50%;
+      right: clamp(10px, 1.5vw, 24px);
+      transform: translateY(-50%);
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .license-link,
+    .manual-link {
+      padding: 3px 8px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      font: inherit;
+      font-size: .72rem;
+      font-weight: 750;
+      letter-spacing: .04em;
+      cursor: pointer;
+      transition: color .18s ease, border-color .18s ease, background .18s ease;
+    }
+    .license-link {
+      color: #9bc6dc;
+      background: transparent;
+    }
+    .license-link:hover, .license-link:focus-visible {
+      outline: none;
+      color: #fff;
+      border-color: rgba(50, 211, 255, .46);
+      background: rgba(50, 211, 255, .12);
+    }
+    .manual-link {
+      padding-inline: 11px;
+      color: #061827;
+      border-color: rgba(158, 240, 255, .56);
+      background: linear-gradient(135deg, #55e4c5, #52bde9 52%, #8974ef);
+      box-shadow: 0 4px 16px rgba(67, 199, 230, .24);
+    }
+    .manual-link:hover, .manual-link:focus-visible {
+      outline: none;
+      color: #03121e;
+      border-color: #dcfbff;
+      filter: brightness(1.12);
+    }
+
+    @media (max-width: 1180px) {
+      .topbar { grid-template-columns: 1fr; }
+      .top-actions { max-width: none; justify-content: flex-start; }
+      .system-actions {
+        grid-column: 1;
+        grid-row: auto;
+        justify-self: start;
+      }
+    }
+
+    @media (max-width: 1250px) {
+      .systems-grid {
+        grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.6fr);
+      }
+
+      .systems-grid > .system-panel:nth-child(3) .instrument-list {
+        grid-template-columns: 1fr;
+      }
+
+      .bottom-grid { grid-template-columns: 1fr; }
+      .summary-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
+      .flight-strip { grid-template-columns: repeat(3, minmax(0,1fr)); }
+      .top-actions { max-width: none; }
+    }
+
+    @media (max-width: 1100px) {
+      .institution-logo-banner { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; padding-inline: 10px; }
+      .institution-logo-item { height: 78px; }
+      .institution-logo-item img { max-width: 118px; max-height: 54px; }
+    }
+
+    @media (max-width: 900px) {
+      .systems-grid {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto;
+      }
+
+      .systems-grid > .system-panel:nth-child(1),
+      .systems-grid > .system-panel:nth-child(2),
+      .systems-grid > .system-panel:nth-child(3) {
+        grid-column: 1;
+        grid-row: auto;
+      }
+
+      .systems-grid > .system-panel:nth-child(3) .instrument-list {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .flight-strip { grid-template-columns: repeat(2, minmax(0,1fr)); }
+    }
+
+    @media (max-width: 720px) {
+      .app-shell { padding: 10px; }
+      .topbar {
+        grid-template-columns: 1fr;
+        min-height: 0;
+        padding: 18px;
+      }
+      .top-actions { justify-content: flex-start; max-width: none; }
+      .action-group { width: 100%; grid-template-columns: repeat(2, minmax(0,1fr)); }
+      .action-group .btn { width: 100%; }
+      .system-actions { width: 100%; }
+      .system-command-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .system-actions .btn { width: 100%; }
+      .flight-strip, .folder-summary, .summary-grid { grid-template-columns: 1fr; }
+      .time-filter-grid, .time-edit-grid { grid-template-columns: 1fr; }
+      .priority-job { grid-template-columns: 24px minmax(0, 1fr); }
+      .priority-job > :not(.priority-handle):not(.priority-copy) { grid-column: 2; }
+      .systems-grid > .system-panel:nth-child(3) .instrument-list { grid-template-columns: 1fr; }
+      .timeline-row { grid-template-columns: 95px 1fr 46px; }
+      h1 { white-space: normal; }
+      .brand-emblem { width: 132px; height: 72px; flex-basis: 132px; }
+      .brand-emblem svg { width: 126px; height: 66px; }
+      .institution-logo-banner { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; padding-inline: 6px; }
+      .institution-logo-item { height: 74px; }
+      .institution-logo-item img { max-width: 100px; max-height: 50px; }
+    }
+
+    /* Desktop readability and direct project-folder interaction. */
+    @media (min-width: 1101px) {
+      body { font-size: clamp(15px, calc(9px + .42vw), 19px); }
+      .btn { min-height: 46px; padding: 10px 15px; font-size: .88rem; }
+      .field input, .field select { min-height: 46px; font-size: .95rem; }
+      .instrument-card { min-height: 98px; padding: 16px; }
+      .instrument-name { font-size: 1rem; }
+      .instrument-meta { font-size: .82rem; line-height: 1.52; }
+      .status-pill { font-size: .8rem; padding: 8px 11px; }
+      .scan-window { width: min(720px, calc(50vw - 28px)); min-height: 290px; }
+      .scan-window-body { padding: 20px; font-size: .95rem; }
+      .scan-messages { height: 170px; font-size: .82rem; }
+    }
+    .folder-summary .time-readout { min-height: 76px; padding: 14px 16px; cursor: pointer; transition: .18s ease; }
+    .folder-summary .time-readout:hover, .folder-summary .time-readout:focus-visible { outline: none; border-color: rgba(50,211,255,.58); background: rgba(50,211,255,.09); transform: translateY(-1px); }
+    .folder-summary .time-readout strong { font-size: .94rem; line-height: 1.45; overflow-wrap: anywhere; }
+    .modal { z-index: 3000; padding: clamp(14px, 3vw, 38px); }
+    .modal-card { width: min(840px, 96vw); max-height: 88vh; font-size: 1rem; }
+    .modal-header { padding: 18px 22px; font-size: 1.1rem; }
+    .modal-body { padding: 21px 22px; line-height: 1.7; }
+    .modal-body input, .modal-body select { min-height: 44px; font-size: .95rem; }
+    .toast.error { left: 50%; right: auto; top: 50%; bottom: auto; min-width: min(520px, 88vw); max-width: min(720px, 92vw); text-align: center; color: #ffe4e4; background: #4b1620; border: 2px solid #ff6973; font-size: 1rem; font-weight: 800; transform: translate(-50%, -45%); z-index: 4000; }
+    .toast.error.show { transform: translate(-50%, -50%); }
+    .instrument-card.is-processing { border-color: rgba(50,211,255,.72); background: linear-gradient(145deg, rgba(20,111,144,.48), rgba(9,43,63,.86)); box-shadow: 0 0 0 1px rgba(50,211,255,.22) inset, 0 0 28px rgba(50,211,255,.16); }
+    .instrument-card.is-complete { border-color: rgba(67,209,122,.68); background: linear-gradient(145deg, rgba(24,117,68,.48), rgba(8,54,39,.88)); box-shadow: 0 0 0 1px rgba(67,209,122,.20) inset, 0 0 26px rgba(67,209,122,.12); }
+    .instrument-card.is-warning { border-color: rgba(255,180,84,.70); background: linear-gradient(145deg, rgba(119,77,20,.46), rgba(55,37,12,.88)); }
+    .instrument-card.is-failed { border-color: rgba(255,105,115,.76); background: linear-gradient(145deg, rgba(126,34,48,.52), rgba(60,18,28,.9)); }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-emblem" role="img" aria-label="CC-FLUX 2026 airship logo">
+          <svg viewBox="70 90 700 330" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <defs>
+              <linearGradient id="ccfluxLogoBody" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#ffffff"/>
+                <stop offset="38%" stop-color="#eaf2f8"/>
+                <stop offset="72%" stop-color="#8faabe"/>
+                <stop offset="100%" stop-color="#4f697e"/>
+              </linearGradient>
+              <linearGradient id="ccfluxLogoLower" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stop-color="#263f55"/>
+                <stop offset="50%" stop-color="#48677e"/>
+                <stop offset="100%" stop-color="#152c40"/>
+              </linearGradient>
+              <linearGradient id="ccfluxLogoArc" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#38d4ff"/>
+                <stop offset="55%" stop-color="#13bfff"/>
+                <stop offset="100%" stop-color="#458cff"/>
+              </linearGradient>
+              <linearGradient id="ccfluxLogoWindow" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#102b42"/>
+                <stop offset="100%" stop-color="#020b12"/>
+              </linearGradient>
+              <filter id="ccfluxLogoShadow" x="-30%" y="-30%" width="160%" height="180%">
+                <feDropShadow dx="0" dy="15" stdDeviation="13" flood-color="#000" flood-opacity=".5"/>
+              </filter>
+              <filter id="ccfluxLogoGlow" x="-40%" y="-40%" width="180%" height="180%">
+                <feGaussianBlur stdDeviation="4" result="ccfluxBlur"/>
+                <feMerge><feMergeNode in="ccfluxBlur"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
+            </defs>
+            <g id="ccfluxAirshipArtwork">
+              <path d="M190 197 C228 59,445 7,617 101" fill="none" stroke="url(#ccfluxLogoArc)" stroke-width="14" stroke-linecap="round" filter="url(#ccfluxLogoGlow)"/>
+              <path d="M615 330 C548 478,319 493,185 367" fill="none" stroke="url(#ccfluxLogoArc)" stroke-width="14" stroke-linecap="round" filter="url(#ccfluxLogoGlow)"/>
+              <g transform="rotate(-8 400 265)" filter="url(#ccfluxLogoShadow)">
+              <path d="M174 254 L100 210 L151 205 L216 229 Z" fill="url(#ccfluxLogoBody)" stroke="#d7e6f2" stroke-width="6"/>
+              <path d="M181 217 L146 141 L205 159 L240 217 Z" fill="url(#ccfluxLogoBody)" stroke="#d7e6f2" stroke-width="6"/>
+              <path d="M185 312 L145 375 L213 360 L248 309 Z" fill="url(#ccfluxLogoBody)" stroke="#d7e6f2" stroke-width="6"/>
+              <path d="M125 261 C206 178,423 155,620 185 C698 197,741 225,747 255 C752 286,708 317,627 332 C425 370,210 351,125 278 C117 271,117 268,125 261 Z" fill="url(#ccfluxLogoBody)" stroke="#f2f8fc" stroke-width="7"/>
+              <path d="M125 275 C239 324,460 337,690 292 C661 321,622 332,554 341 C365 365,201 338,125 278 Z" fill="url(#ccfluxLogoLower)" opacity=".92"/>
+              <path d="M147 268 C282 230,500 209,716 243" fill="none" stroke="#708da4" stroke-width="4" opacity=".72"/>
+              <path d="M392 332 L510 325 L522 374 Q513 398 481 404 L418 400 Q393 392 385 370 Z" fill="url(#ccfluxLogoBody)" stroke="#e7f1f7" stroke-width="6"/>
+              <g fill="url(#ccfluxLogoWindow)" stroke="#99b3c6" stroke-width="2">
+                <rect x="408" y="348" width="19" height="27" rx="3"/>
+                <rect x="433" y="345" width="20" height="28" rx="3"/>
+                <rect x="459" y="343" width="20" height="28" rx="3"/>
+                <rect x="485" y="341" width="19" height="27" rx="3"/>
+              </g>
+              <path d="M126 262 L82 280 L127 278" fill="#dfeaf1" stroke="#edf6fb" stroke-width="4"/>
+              </g>
+            </g>
+          </svg>
+        </div>
+        <div class="brand-copy">
+          <h1>CC-FLUX Campaign 2026</h1>
+          <div class="subtitle">
+            <span class="campaign-line">A Joint CHANEL – ClimStress Zeppelin Campaign<br />Across European Cities and Forests</span>
+            <span class="review-line">Integrated Post-Flight Scientific Payload Review</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="top-actions" aria-label="Main workflow controls">
+        <div class="action-group" style="--action-columns:3">
+          <span class="action-group-label">1 · Data folders</span>
+          <button class="btn" id="openFolderBtn">Flight Folder</button>
+          <button class="btn" id="cameraFolderBtn">Camera Folder</button>
+          <button class="btn" id="outputFolderBtn">Output Folder</button>
+        </div>
+        <div class="action-group" style="--action-columns:3">
+          <span class="action-group-label">2 · Check and project</span>
+          <button class="btn" id="initialCheckBtn">Initial Check</button>
+          <button class="btn" id="openProjectBtn" title="Select a folder and search it for saved .ccflux Flight Projects">Load .ccflux</button>
+          <button class="btn" id="saveProjectBtn" title="Save processing state, completed-job history, inputs, outputs, and workflows">Save .ccflux</button>
+        </div>
+        <div class="action-group" style="--action-columns:2">
+          <span class="action-group-label">3 · Process</span>
+          <button class="btn remote-inactive" id="remoteSensingBtn" disabled aria-disabled="true" title="Camera scanning must finish successfully">Remote Sensing</button>
+          <button class="btn primary" id="runBtn" disabled title="Complete scan, Time Filter, and instrument selection first">Start Processing</button>
+        </div>
+      </div>
+      <div class="action-group system-actions" aria-label="Information and system controls">
+        <div class="system-information-actions" aria-label="Information controls">
+          <button class="btn info-product" id="dataProductsBtn">Data Products</button>
+          <button class="btn info-update" id="softwareUpdateBtn">Update</button>
+        </div>
+        <div class="system-command-actions" aria-label="System controls">
+          <button class="btn system-refresh" id="refreshBtn">Refresh Status</button>
+          <button class="btn system-reset" id="resetSystemBtn">Reset System</button>
+          <button class="btn system-exit" id="exitAppBtn">Exit</button>
+        </div>
+      </div>
+      <input type="file" id="flightFolderInput" webkitdirectory directory hidden />
+    </header>
+
+    <section class="flight-strip">
+      <div class="field">
+        <label>Flight ID</label>
+        <input id="flightId" value="CCFLUX_F07" />
+      </div>
+      <div class="field">
+        <label>Flight date</label>
+        <input type="date" id="flightDate" />
+      </div>
+      <div class="field">
+        <label>Takeoff UTC</label>
+        <input type="time" id="flightStartTime" />
+      </div>
+      <div class="field">
+        <label>Landing UTC</label>
+        <input type="time" id="flightEndTime" />
+      </div>
+      <div class="field">
+        <label>CPU allocation</label>
+        <select id="cpuAllocation">
+          <option>2 cores</option>
+          <option selected>4 cores</option>
+          <option>6 cores</option>
+          <option>8 cores</option>
+        </select>
+        <div class="metric-note" id="cpuDetected">Detecting logical CPU cores...</div>
+      </div>
+      <div class="field">
+        <label>RAM allocation</label>
+        <select id="ramAllocation">
+          <option>4 GB</option>
+          <option selected>8 GB</option>
+          <option>16 GB</option>
+          <option>32 GB</option>
+        </select>
+        <div class="metric-note" id="ramDetected">Detecting system RAM...</div>
+      </div>
+    </section>
+
+    <section class="folder-summary" aria-label="Flight summary">
+      <div class="time-readout" data-folder-action="flight" role="button" tabindex="0" title="Choose or change the Flight Folder">
+        <span>Selected Flight Folder · click to choose</span>
+        <strong id="selectedFlightFolder">Not selected</strong>
+      </div>
+      <div class="time-readout" data-folder-action="camera" role="button" tabindex="0" title="Choose or change the Camera System Folder">
+        <span>Selected Camera System Folder · click to choose</span>
+        <strong id="selectedCameraFolder">Optional · Flight Folder-only scan</strong>
+      </div>
+      <div class="time-readout" data-folder-action="output" role="button" tabindex="0" title="Choose or change the Output Folder">
+        <span>Selected Output Folder · click to choose</span>
+        <strong id="selectedOutputFolder">Not selected</strong>
+      </div>
+    </section>
+
+    <section class="time-filter-panel" id="time-filter" aria-labelledby="timeFilterTitle">
+      <div class="time-filter-head">
+        <h2 class="section-title" id="timeFilterTitle">Time Filter</h2>
+        <div class="time-filter-actions">
+          <label class="timezone-control" for="displayTimezone">Display timezone
+            <select id="displayTimezone" size="1" aria-label="Display timezone">
+              <option value="UTC" selected>UTC — Coordinated Universal Time</option>
+              <option value="Europe/Berlin">CET / CEST — Europe/Berlin</option>
+              <option value="Europe/London">Europe/London</option>
+              <option value="Europe/Paris">Europe/Paris</option>
+              <option value="Europe/Brussels">Europe/Brussels</option>
+              <option value="Europe/Amsterdam">Europe/Amsterdam</option>
+              <option value="Europe/Rome">Europe/Rome</option>
+              <option value="Europe/Madrid">Europe/Madrid</option>
+              <option value="Europe/Vienna">Europe/Vienna</option>
+              <option value="Europe/Zurich">Europe/Zurich</option>
+              <option value="Europe/Prague">Europe/Prague</option>
+              <option value="Europe/Warsaw">Europe/Warsaw</option>
+              <option value="Europe/Athens">Europe/Athens</option>
+              <option value="Europe/Helsinki">Europe/Helsinki</option>
+              <option value="Europe/Oslo">Europe/Oslo</option>
+              <option value="Europe/Stockholm">Europe/Stockholm</option>
+              <option value="Europe/Copenhagen">Europe/Copenhagen</option>
+              <option value="Atlantic/Reykjavik">Atlantic/Reykjavik</option>
+              <option value="America/New_York">America/New_York</option>
+              <option value="America/Chicago">America/Chicago</option>
+              <option value="America/Denver">America/Denver</option>
+              <option value="America/Los_Angeles">America/Los_Angeles</option>
+              <option value="America/Toronto">America/Toronto</option>
+              <option value="America/Sao_Paulo">America/Sao_Paulo</option>
+              <option value="Africa/Cairo">Africa/Cairo</option>
+              <option value="Africa/Johannesburg">Africa/Johannesburg</option>
+              <option value="Asia/Dubai">Asia/Dubai</option>
+              <option value="Asia/Kolkata">Asia/Kolkata</option>
+              <option value="Asia/Singapore">Asia/Singapore</option>
+              <option value="Asia/Tokyo">Asia/Tokyo</option>
+              <option value="Australia/Sydney">Australia/Sydney</option>
+              <option value="Pacific/Auckland">Pacific/Auckland</option>
+            </select>
+          </label>
+          <button class="btn" id="useFullTimeBtn">Use full detected interval</button>
+          <button class="btn" id="useCommonTimeBtn">Use common overlapping interval</button>
+          <button class="btn" id="customTimeBtn">Custom timeframe</button>
+          <button class="btn" id="resetTimeBtn">Reset to detected limits</button>
+        </div>
+      </div>
+      <div class="time-filter-grid">
+        <div class="time-readout"><span>Detected global minimum</span><strong id="detectedMinTime">—</strong></div>
+        <div class="time-readout"><span>Detected global maximum</span><strong id="detectedMaxTime">—</strong></div>
+        <div class="time-readout"><span>Common overlapping interval</span><strong id="commonOverlapTime">—</strong></div>
+      </div>
+      <div class="time-edit-grid" id="customTimeEditor">
+        <div class="field">
+          <label for="analysisStartTime">Selected analysis start</label>
+          <input type="datetime-local" id="analysisStartTime" step="1" />
+        </div>
+        <div class="field">
+          <label for="analysisEndTime">Selected analysis end</label>
+          <input type="datetime-local" id="analysisEndTime" step="1" />
+        </div>
+        <button class="btn primary" id="applyTimeFilterBtn">Apply Time Filter</button>
+      </div>
+      <div class="time-warning" id="timeFilterWarnings" aria-live="polite"></div>
+    </section>
+
+    <section class="summary-grid">
+      <article class="metric-card">
+        <div class="metric-label">Overall readiness</div>
+        <div class="metric-value" id="readyCount">7 / 10</div>
+        <div class="metric-note">Fast instruments available now</div>
+      </article>
+      <article class="metric-card">
+        <div class="metric-label">Flight coverage</div>
+        <div class="metric-value" id="flightCoverageValue">—</div>
+        <div class="metric-note">Landing UTC minus takeoff UTC</div>
+      </article>
+      <article class="metric-card">
+        <div class="metric-label">Open warnings</div>
+        <div class="metric-value" id="warningCount">2</div>
+        <div class="metric-note">Review before detailed processing</div>
+      </article>
+      <article class="metric-card">
+        <div class="metric-label">Camera tasks</div>
+        <div class="metric-value" id="cameraState">3 active</div>
+        <div class="metric-note">Independent from fast instruments</div>
+      </article>
+    </section>
+
+    <div class="section-bar">
+      <h2 class="section-title">Instrument Systems</h2>
+      <div class="filters">
+        <button class="filter-btn active" data-filter="all">All</button>
+        <button class="filter-btn" data-filter="complete">Complete</button>
+        <button class="filter-btn" data-filter="warning">Warning</button>
+        <button class="filter-btn" data-filter="running">Running</button>
+        <button class="filter-btn" data-filter="queued">Queued</button>
+      </div>
+    </div>
+
+    <section class="systems-grid">
+      <article class="system-panel">
+        <div class="system-header">
+          <div>
+            <div class="system-name">NOSEBOOM</div>
+            <div class="system-count">Meteorology and navigation</div>
+          </div>
+          <span class="status-pill complete"><span class="dot"></span>Ready</span>
+        </div>
+        <div class="instrument-list">
+          <a class="instrument-card" data-status="complete" data-name="Noseboom" href="/noseboom" target="_blank" rel="noopener" aria-label="Open Noseboom in a new tab">
+            <div>
+              <div class="instrument-name">Noseboom</div>
+              <div class="instrument-meta">Wind, temperature, humidity, pressure, GPS<br>99.97 Hz · 98.8% complete</div>
+            </div>
+            <span class="status-pill complete"><span class="dot"></span>Complete</span>
+          </a>
+
+        </div>
+      </article>
+
+      <article class="system-panel">
+        <div class="system-header">
+          <div>
+            <div class="system-name">MIRO RACK</div>
+            <div class="system-count">Trace gas measurements</div>
+          </div>
+          <span class="status-pill complete"><span class="dot"></span>Ready</span>
+        </div>
+        <div class="instrument-list">
+          <a class="instrument-card" data-status="complete" data-name="MIRO" href="/miro_rack" target="_blank" rel="noopener" aria-label="Open MIRO Rack in a new tab">
+            <div>
+              <div class="instrument-name">MIRO</div>
+              <div class="instrument-meta">Gas concentrations and instrument diagnostics<br>1.00 Hz · zero periods detected</div>
+            </div>
+            <span class="status-pill complete"><span class="dot"></span>Complete</span>
+          </a>
+
+          <a class="instrument-card" data-status="complete" data-name="Picarro" href="/miro_rack" target="_blank" rel="noopener" aria-label="Open MIRO Rack in a new tab">
+            <div>
+              <div class="instrument-name">Picarro</div>
+              <div class="instrument-meta">CO₂, CH₄, H₂O and analyzer status<br>0.50 Hz · 99.2% complete</div>
+            </div>
+            <span class="status-pill complete"><span class="dot"></span>Complete</span>
+          </a>
+        </div>
+      </article>
+
+      <article class="system-panel">
+        <div class="system-header">
+          <div>
+            <div class="system-name">HATCHBOX</div>
+            <div class="system-count">Atmospheric particle and Remote sensing payload</div>
+          </div>
+          <span class="status-pill warning"><span class="dot"></span>Review</span>
+        </div>
+        <div class="instrument-list">
+          <a class="instrument-card" data-status="complete" data-name="OPC HBX-4" href="/opc/overview" target="_blank" rel="noopener" aria-label="Open combined OPC workspace in a new tab">
+            <div>
+              <div class="instrument-name">OPC HBX-4</div>
+              <div class="instrument-meta">Optical particle counter · without inlet<br>Combined HBX-4/HBX-5 scientific workspace</div>
+            </div>
+            <span class="status-pill complete"><span class="dot"></span>Complete</span>
+          </a>
+
+          <a class="instrument-card" data-status="complete" data-name="OPC HBX-5" href="/opc/overview" target="_blank" rel="noopener" aria-label="Open combined OPC workspace in a new tab">
+            <div>
+              <div class="instrument-name">OPC HBX-5</div>
+              <div class="instrument-meta">Optical particle counter · with inlet<br>Combined HBX-4/HBX-5 scientific workspace</div>
+            </div>
+            <span class="status-pill complete"><span class="dot"></span>Complete</span>
+          </a>
+
+          <a class="instrument-card" data-status="warning" data-name="Partector Pro" href="/partector/overview" target="_blank" rel="noopener" aria-label="Open Partector Pro workspace in a new tab">
+            <div>
+              <div class="instrument-name">Partector Pro</div>
+              <div class="instrument-meta">Particle number, LDSA and 8-bin size distribution<br>QC-aware scientific workspace</div>
+            </div>
+            <span class="status-pill warning"><span class="dot"></span>Warning</span>
+          </a>
+
+          <a class="instrument-card" data-status="queued" data-name="INS Gimbal" href="/ins_gimbal/overview" target="_blank" rel="noopener" aria-label="Open INS Gimbal scientific workspace in a new tab">
+            <div>
+              <div class="instrument-name">INS Gimbal</div>
+              <div class="instrument-meta">Gremsy T3V3 RAW_IMU motion and vibration diagnostics<br>Responsive scientific workspace</div>
+            </div>
+            <span class="status-pill queued"><span class="dot"></span>Not detected</span>
+          </a>
+
+          <a class="instrument-card" data-status="complete" data-name="SIF / FLOX" href="/sif/overview" target="_blank" rel="noopener" aria-label="Open SIF / FLOX scientific workspace in a new tab">
+            <div>
+              <div class="instrument-name">SIF / FLOX</div>
+              <div class="instrument-meta">FULL and FLUO radiance, reflectance, vegetation indices and SIF<br>Click to open plots and georeferenced map</div>
+            </div>
+            <span class="status-pill complete"><span class="dot"></span>Complete</span>
+          </a>
+
+          <div class="instrument-card" data-status="running" data-name="MicaSense">
+            <div>
+              <div class="instrument-name">MicaSense Multispectral</div>
+              <div class="instrument-meta">Metadata and capture completeness scan<br>14,220 / 21,350 files checked</div>
+            </div>
+            <span class="status-pill running"><span class="dot"></span>Running</span>
+          </div>
+
+          <a class="instrument-card" data-status="running" data-name="FLIR Thermal Camera" href="/flir" target="_blank" rel="noopener" aria-label="Open FLIR thermal results and temperature map in a new tab">
+            <div>
+              <div class="instrument-name">FLIR Thermal Camera</div>
+              <div class="instrument-meta">Frame, radiometric metadata, plots and Noseboom georeferencing<br>Click to open the FLIR thermal workspace</div>
+            </div>
+            <span class="status-pill running"><span class="dot"></span>Running</span>
+          </a>
+
+          <a class="instrument-card" data-status="queued" data-name="GoPro" href="/gopro" target="_blank" rel="noopener" aria-label="Open GoPro capture map in a new tab">
+            <div>
+              <div class="instrument-name">GoPro</div>
+              <div class="instrument-meta">CET/CEST capture time matched to Noseboom UTC<br>Click to open the georeferenced image map</div>
+            </div>
+            <span class="status-pill queued"><span class="dot"></span>Queued</span>
+          </a>
+        </div>
+      </article>
+    </section>
+
+    <section class="priority-panel" id="priorityPanel" aria-labelledby="priorityQueueTitle">
+      <div class="panel-header">
+        <div>
+          <strong id="priorityQueueTitle">Processing Priority</strong>
+          <div class="system-count">Select the instruments to process, use one global time interval, then start. Drag only before processing begins.</div>
+        </div>
+        <span class="status-pill queued" id="priorityWorkflowState"><span class="dot"></span>Selection required</span>
+      </div>
+      <div class="system-count" style="margin: 0 0 9px">Processing Queue — selection and live activity</div>
+      <div class="priority-list" id="priorityList"></div>
+    </section>
+
+    <section class="bottom-grid">
+      <article class="panel availability-panel">
+        <div class="panel-header">
+          <strong>Instrument Availability Timeline</strong>
+          <span class="system-count">06:15–15:52 UTC</span>
+        </div>
+        <div class="panel-body timeline">
+          <div class="timeline-row"><span>Noseboom</span><div class="track"><div class="fill" style="width:98%"></div></div><span>98%</span></div>
+          <div class="timeline-row"><span>MIRO</span><div class="track"><div class="fill" style="width:96%"></div></div><span>96%</span></div>
+          <div class="timeline-row"><span>Picarro</span><div class="track"><div class="fill" style="width:99%"></div></div><span>99%</span></div>
+          <div class="timeline-row"><span>OPC HBX-4</span><div class="track"><div class="fill" style="width:97%"></div></div><span>97%</span></div>
+          <div class="timeline-row"><span>Partector</span><div class="track"><div class="fill warn" style="width:91%"></div></div><span>91%</span></div>
+          <div class="timeline-row"><span>MicaSense</span><div class="track"><div class="fill" style="width:66%"></div></div><span>66%</span></div>
+          <div class="timeline-row"><span>FLIR</span><div class="track"><div class="fill" style="width:42%"></div></div><span>42%</span></div>
+          <div class="timeline-row"><span>GoPro</span><div class="track"><div class="fill" style="width:7%"></div></div><span>7%</span></div>
+        </div>
+      </article>
+
+      <article class="panel camera-panel">
+        <div class="panel-header">
+          <strong>Remote sensing data processing</strong>
+          <button class="btn" id="pauseCameraBtn">Pause Cameras</button>
+        </div>
+        <div class="panel-body">
+          <div class="camera-job">
+            <div class="camera-head">
+              <div>
+                <div class="camera-name">MicaSense</div>
+                <div class="camera-detail" id="micaText">Metadata scan · 66%</div>
+              </div>
+              <span class="status-pill running"><span class="dot"></span>Running</span>
+            </div>
+            <div class="progress"><span id="micaProgress" style="width:66%"></span></div>
+          </div>
+
+          <div class="camera-job">
+            <div class="camera-head">
+              <div>
+                <div class="camera-name"><a href="/flir" target="_blank" rel="noopener">FLIR Thermal Camera · Open plots and map</a></div>
+                <div class="camera-detail" id="flirText">Metadata scan · 42%</div>
+              </div>
+              <span class="status-pill running"><span class="dot"></span>Running</span>
+            </div>
+            <div class="progress"><span id="flirProgress" style="width:42%"></span></div>
+          </div>
+
+          <div class="camera-job">
+            <div class="camera-head">
+              <div>
+                <div class="camera-name">GoPro</div>
+                <div class="camera-detail" id="goproText">Metadata and Noseboom georeferencing not started</div>
+              </div>
+              <span class="status-pill queued"><span class="dot"></span>Queued</span>
+            </div>
+            <div class="progress"><span id="goproProgress" style="width:0%"></span></div>
+          </div>
+
+        </div>
+      </article>
+    </section>
+
+
+
+    <section class="log-panel" aria-label="Application log">
+      <div class="log-toolbar">
+        <div class="log-title-wrap">
+          <div class="terminal-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div class="log-title">Processing Log &amp; Diagnostics</div>
+          <span class="status-pill running" id="logStatus"><span class="dot"></span>Live</span>
+        </div>
+        <div class="log-actions">
+          <button class="btn" id="copyLogBtn">Copy Log</button>
+          <button class="btn" id="clearLogBtn">Clear</button>
+          <button class="btn" id="toggleLogBtn">Collapse</button>
+        </div>
+      </div>
+      <div class="log-console" id="logConsole" role="log" aria-live="polite"></div>
+    </section>
+
+    <div class="institution-logo-banner" aria-label="Participating institutions">
+      <div class="institution-logo-item"><img src="https://upload.wikimedia.org/wikipedia/commons/d/d7/DLR_Logo.svg" alt="DLR logo" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='inline-block';" /><span class="logo-fallback" aria-label="DLR logo">DLR</span></div>
+      <div class="institution-logo-item"><img src="https://static.wikia.nocookie.net/logopedia/images/2/24/BIRA-IASB_2017.svg/revision/latest?cb=20241012054016" alt="BIRA-IASB logo" loading="lazy" onerror="this.style.visibility='hidden';" /></div>
+      <div class="institution-logo-item"><img src="https://upload.wikimedia.org/wikipedia/commons/8/83/Utrecht-univesrsity-logo.svg" alt="Utrecht University logo" loading="lazy" onerror="this.style.visibility='hidden';" /></div>
+      <div class="institution-logo-item"><img src="https://upload.wikimedia.org/wikipedia/de/3/36/Universit%C3%A4t_Wageningen_Logo.svg" alt="Wageningen University logo" loading="lazy" onerror="this.style.visibility='hidden';" /></div>
+      <div class="institution-logo-item"><img src="https://upload.wikimedia.org/wikipedia/commons/3/3a/Logo_KIT.svg" alt="Karlsruhe Institute of Technology logo" loading="lazy" onerror="this.style.visibility='hidden';" /></div>
+      <div class="institution-logo-item"><img src="https://upload.wikimedia.org/wikipedia/de/9/9c/UniversitaetTuebingen_WortBildMarke.png" alt="University of Tübingen logo" loading="lazy" onerror="this.style.visibility='hidden';" /></div>
+      <div class="institution-logo-item"><img src="https://upload.wikimedia.org/wikipedia/sco/a/ad/Imperial_College_London_crest.svg" alt="Imperial College London logo" loading="lazy" onerror="this.style.visibility='hidden';" /></div>
+      <div class="institution-logo-item"><img src="https://upload.wikimedia.org/wikipedia/commons/1/15/Siegel_Uni_K%C3%B6ln_%28blau%29.svg" alt="University of Cologne logo" loading="lazy" onerror="this.style.visibility='hidden';" /></div>
+      <div class="institution-logo-item"><img src="https://upload.wikimedia.org/wikipedia/commons/6/6b/Bundesanstalt_f%C3%BCr_Stra%C3%9Fenwesen_logo.svg" alt="Bundesanstalt für Straßenwesen logo" loading="lazy" onerror="this.style.visibility='hidden';" /></div>
+      <div class="institution-logo-item main-partner"><img src="https://upload.wikimedia.org/wikipedia/commons/4/40/Logo_des_Forschungszentrums_J%C3%BClich_seit_2018.svg" alt="Forschungszentrum Jülich logo — main partner" loading="lazy" onerror="this.style.visibility='hidden';" /></div>
+      <div class="institution-logo-item campaign-logo-item" role="img" aria-label="CC-FLUX 2026 campaign logo">
+        <svg viewBox="70 80 700 350" aria-hidden="true"><use href="#ccfluxAirshipArtwork"></use></svg>
+        <span class="campaign-logo-title" aria-hidden="true"><span class="accent">CC-</span><span>FLUX</span></span>
+        <span class="campaign-logo-year" aria-hidden="true"><i></i><span>2026</span><i></i></span>
+      </div>
+    </div>
+    <footer class="app-footer">
+      <span>© 2026 Biplob Dey · Forschungszentrum Jülich GmbH</span>
+      <div class="footer-actions">
+        <button class="manual-link" id="manualBtn" type="button" aria-haspopup="dialog">Manual</button>
+        <button class="license-link" id="licenseBtn" type="button" aria-haspopup="dialog">License</button>
+      </div>
+    </footer>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <div class="modal" id="modal" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="modal-header">
+        <strong id="modalTitle">Instrument</strong>
+        <button class="close-btn" id="closeModal">×</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+  <section class="scan-window flight" id="flightScanWindow" role="dialog" aria-labelledby="flightScanTitle" title="Scanning Flight Data">
+    <div class="scan-window-header">
+      <strong id="flightScanTitle">Flight-data scanning</strong>
+      <span class="status-pill running" id="flightScanStatus"><span class="dot"></span>Scanning</span>
+      <button class="window-control" data-window-action="minimize" data-scan-source="flight" title="Minimize">−</button>
+      <button class="window-control" data-window-action="maximize" data-scan-source="flight" title="Maximize or restore">□</button>
+      <button class="window-control close" data-window-action="close" data-scan-source="flight" title="Close">×</button>
+    </div>
+    <div class="scan-window-body">
+      <div class="scan-grid">
+        <span class="scan-label">Flight folder</span><span class="scan-value" id="flightScanRoot">—</span>
+        <span class="scan-label">Current folder</span><span class="scan-value" id="flightScanFolder">—</span>
+        <span class="scan-label">Current file</span><span class="scan-value" id="flightScanFile">—</span>
+        <span class="scan-label">Instrument name(s)</span><span class="scan-value" id="flightScanInstrument">Identifying instrument</span>
+        <span class="scan-label">Files scanned</span><span class="scan-value" id="flightScanCount">0</span>
+      </div>
+      <div class="scan-progress-row"><div class="scan-progress indeterminate" id="flightScanProgress"><span></span></div><strong class="scan-percentage waiting" id="flightScanPercentage">Preparing...</strong></div>
+      <div class="scan-messages" id="flightScanMessages" aria-live="polite"></div>
+      <div class="scan-actions"><button class="btn" data-stop-scan="flight">Stop Flight Scan</button></div>
+    </div>
+  </section>
+
+  <section class="scan-window camera" id="cameraScanWindow" role="dialog" aria-labelledby="cameraScanTitle">
+    <div class="scan-window-header">
+      <strong id="cameraScanTitle">Camera-data scanning</strong>
+      <span class="status-pill running" id="cameraScanStatus"><span class="dot"></span>Scanning</span>
+      <button class="window-control" data-window-action="minimize" data-scan-source="camera" title="Minimize">−</button>
+      <button class="window-control" data-window-action="maximize" data-scan-source="camera" title="Maximize or restore">□</button>
+      <button class="window-control close" data-window-action="close" data-scan-source="camera" title="Close">×</button>
+    </div>
+    <div class="scan-window-body">
+      <div class="scan-grid">
+        <span class="scan-label">Camera folder</span><span class="scan-value" id="cameraScanRoot">—</span>
+        <span class="scan-label">Current folder</span><span class="scan-value" id="cameraScanFolder">—</span>
+        <span class="scan-label">Current file</span><span class="scan-value" id="cameraScanFile">—</span>
+        <span class="scan-label">Instrument name(s)</span><span class="scan-value" id="cameraScanInstrument">Identifying instrument</span>
+        <span class="scan-label">Files scanned</span><span class="scan-value" id="cameraScanCount">0</span>
+      </div>
+      <div class="scan-progress-row"><div class="scan-progress indeterminate" id="cameraScanProgress"><span></span></div><strong class="scan-percentage waiting" id="cameraScanPercentage">Preparing...</strong></div>
+      <div class="scan-messages" id="cameraScanMessages" aria-live="polite"></div>
+      <div class="scan-actions"><button class="btn" data-stop-scan="camera">Stop Camera Scan</button></div>
+    </div>
+  </section>
+  <script type="text/plain" id="legacyDashboardDemo">
+    const toast = document.getElementById('toast');
+    const modal = document.getElementById('modal');
+    const modalTitle = document.getElementById('modalTitle');
+    const modalBody = document.getElementById('modalBody');
+    const logConsole = document.getElementById('logConsole');
+    let camerasPaused = false;
+    let progressTimer = null;
+
+
+
+    function addLog(level, message) {
+      const line = document.createElement('div');
+      const time = new Date().toLocaleTimeString('en-GB', { hour12: false });
+      const normalized = String(level).toLowerCase();
+      line.className = 'log-line';
+      line.innerHTML = `<span class="log-time">[${time}]</span> <span class="log-${normalized}">${String(level).toUpperCase().padEnd(7)}</span> ${message}`;
+      logConsole.appendChild(line);
+      logConsole.scrollTop = logConsole.scrollHeight;
+    }
+
+    function showToast(message) {
+      toast.textContent = message;
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 2600);
+    }
+
+    document.getElementById('openFolderBtn').addEventListener('click', () => {
+      document.getElementById('flightFolderInput').click();
+      addLog('info', 'Flight-folder selection requested.');
+    });
+
+    document.getElementById('flightFolderInput').addEventListener('change', event => {
+      const files = Array.from(event.target.files || []);
+      if (!files.length) {
+        addLog('warning', 'No flight folder was selected.');
+        return;
+      }
+      const root = files[0].webkitRelativePath.split('/')[0] || 'Selected folder';
+      showToast(`Flight folder selected: ${root}`);
+      addLog('success', `Flight folder loaded: ${root} (${files.length.toLocaleString()} files detected).`);
+    });
+
+    document.getElementById('outputFolderBtn').addEventListener('click', async () => {
+      try {
+        if ('showDirectoryPicker' in window) {
+          const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+          showToast(`Output folder selected: ${handle.name}`);
+          addLog('success', `Output folder set to: ${handle.name}.`);
+        } else {
+          showToast('Output-folder selection requires a Chromium-based browser.');
+          addLog('warning', 'Directory picker API is not available in this browser.');
+        }
+      } catch (error) {
+        if (error.name !== 'AbortError') addLog('error', `Output-folder selection failed: ${error.message}`);
+        else addLog('debug', 'Output-folder selection cancelled by user.');
+      }
+    });
+
+    document.getElementById('saveProjectBtn').addEventListener('click', () => {
+      const project = {
+        flightId: document.getElementById('flightId').value,
+        cpu: document.getElementById('cpuAllocation').value,
+        ram: document.getElementById('ramAllocation').value,
+        savedAt: new Date().toISOString()
+      };
+      const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `${project.flightId || 'CCFLUX_project'}.json`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+      showToast('Project configuration saved.');
+      addLog('success', `Project configuration saved for ${project.flightId || 'unnamed flight'}.`);
+    });
+
+    document.getElementById('refreshBtn').addEventListener('click', () => {
+      showToast('Instrument status refreshed.');
+      addLog('info', 'Instrument status refreshed by user.');
+    });
+
+    document.getElementById('cpuAllocation').addEventListener('change', event => {
+      showToast(`CPU allocation set to ${event.target.value}.`);
+      addLog('info', `CPU allocation changed to ${event.target.value}.`);
+    });
+
+    document.getElementById('ramAllocation').addEventListener('change', event => {
+      showToast(`RAM allocation set to ${event.target.value}.`);
+      addLog('info', `RAM allocation changed to ${event.target.value}.`);
+    });
+
+    document.getElementById('runBtn').addEventListener('click', () => {
+      showToast('Processing started. Fast instruments remain immediately available.');
+      addLog('info', 'Post-flight processing workflow started.');
+      addLog('debug', `Resources: ${document.getElementById('cpuAllocation').value}, ${document.getElementById('ramAllocation').value} RAM.`);
+      startSimulation();
+    });
+
+    document.querySelectorAll('.filter-btn').forEach(button => {
+      button.addEventListener('click', () => {
+        document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+        button.classList.add('active');
+        const filter = button.dataset.filter;
+
+        document.querySelectorAll('.instrument-card').forEach(card => {
+          card.classList.toggle('hidden', filter !== 'all' && card.dataset.status !== filter);
+        });
+      });
+    });
+
+    document.querySelectorAll('.instrument-card').forEach(card => {
+      card.addEventListener('click', () => {
+        const name = card.dataset.name;
+        const status = card.dataset.status;
+        modalTitle.textContent = name;
+        modalBody.innerHTML = `
+          <p><strong>Status:</strong> ${status.charAt(0).toUpperCase() + status.slice(1)}</p>
+          <p>This button would open the dedicated quick-look page for <strong>${name}</strong>.</p>
+          <p>The detailed page can later contain plots, QC warnings, file statistics, metadata, and export controls.</p>
+        `;
+        modal.classList.add('show');
+      });
+    });
+
+    document.getElementById('closeModal').addEventListener('click', () => modal.classList.remove('show'));
+    modal.addEventListener('click', event => {
+      if (event.target === modal) modal.classList.remove('show');
+    });
+
+    document.getElementById('pauseCameraBtn').addEventListener('click', event => {
+      camerasPaused = !camerasPaused;
+      event.target.textContent = camerasPaused ? 'Resume Cameras' : 'Pause Cameras';
+      showToast(camerasPaused ? 'Camera processing paused.' : 'Camera processing resumed.');
+      addLog(camerasPaused ? 'warning' : 'info', camerasPaused ? 'Camera workers paused by user.' : 'Camera workers resumed.');
+      if (!camerasPaused) startSimulation();
+    });
+
+
+
+    document.getElementById('clearLogBtn').addEventListener('click', () => {
+      logConsole.innerHTML = '';
+      addLog('info', 'Log cleared.');
+    });
+
+    document.getElementById('copyLogBtn').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(logConsole.innerText);
+        showToast('Log copied to clipboard.');
+      } catch (error) {
+        addLog('error', `Could not copy log: ${error.message}`);
+      }
+    });
+
+    document.getElementById('toggleLogBtn').addEventListener('click', event => {
+      const hidden = logConsole.style.display === 'none';
+      logConsole.style.display = hidden ? 'block' : 'none';
+      event.target.textContent = hidden ? 'Collapse' : 'Expand';
+    });
+
+    window.addEventListener('error', event => {
+      addLog('error', `${event.message} at ${event.filename || 'unknown source'}:${event.lineno || 0}`);
+    });
+
+    window.addEventListener('unhandledrejection', event => {
+      addLog('error', `Unhandled promise rejection: ${event.reason || 'Unknown error'}`);
+    });
+
+    addLog('info', 'CCFLUX dashboard initialized.');
+    addLog('success', 'Instrument registry loaded: 10 instruments detected.');
+    addLog('warning', 'Partector Pro: 8-minute data gap requires review.');
+    addLog('debug', 'Camera workers are isolated from fast-instrument processing.');
+
+    function startSimulation() {
+      if (progressTimer) clearInterval(progressTimer);
+
+      progressTimer = setInterval(() => {
+        if (camerasPaused) return;
+
+        const mica = document.getElementById('micaProgress');
+        const flir = document.getElementById('flirProgress');
+        const gopro = document.getElementById('goproProgress');
+
+        let micaValue = parseInt(mica.style.width, 10);
+        let flirValue = parseInt(flir.style.width, 10);
+        let goproValue = parseInt(gopro.style.width, 10);
+
+        if (micaValue < 100) micaValue = Math.min(100, micaValue + 2);
+        if (flirValue < 100) flirValue = Math.min(100, flirValue + 1);
+        if (micaValue >= 100 && goproValue < 100) goproValue = Math.min(100, goproValue + 3);
+
+        mica.style.width = micaValue + '%';
+        flir.style.width = flirValue + '%';
+        gopro.style.width = goproValue + '%';
+
+        document.getElementById('micaText').textContent = micaValue >= 100 ? 'Metadata scan complete' : `Metadata scan · ${micaValue}%`;
+        document.getElementById('flirText').textContent = flirValue >= 100 ? 'Metadata scan complete' : `Metadata scan · ${flirValue}%`;
+        document.getElementById('goproText').textContent = micaValue >= 100 ? (goproValue >= 100 ? 'Visual coverage check complete' : `Visual coverage check · ${goproValue}%`) : 'Waiting for camera worker';
+
+        if (micaValue >= 100 && flirValue >= 100 && goproValue >= 100) {
+          clearInterval(progressTimer);
+          document.getElementById('readyCount').textContent = '10 / 10';
+          document.getElementById('cameraState').textContent = 'Complete';
+          showToast('All camera quick checks completed.');
+          addLog('success', 'All camera metadata and visual-coverage checks completed successfully.');
+        }
+      }, 900);
+    }
+  </script>
+  <script src="/dashboard.js"></script>
+</body>
+</html>

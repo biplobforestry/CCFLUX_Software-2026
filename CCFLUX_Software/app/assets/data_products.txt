@@ -1,0 +1,17 @@
+## Products
+
+### Flight Project Data (CC-FLUX 2026)
+
+The CC-FLUX 2026 flight datasets compatible with this software are available at:
+
+https://uni-koeln.sciebo.de/s/CCFLUX
+
+### Data Access
+
+To request access to the flight datasets, please contact:
+
+* **Eva Y. Pfannerstill**
+  Email: [e.pfannerstill@fz-juelich.de](mailto:e.pfannerstill@fz-juelich.de)
+
+* **Georgios I. Gkatzelis**
+  Email: [g.gkatzelis@fz-juelich.de](mailto:g.gkatzelis@fz-juelich.de)

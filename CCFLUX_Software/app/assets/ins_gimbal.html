@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>INS Gimbal · CC-FLUX Campaign 2026</title>
+  <link rel="stylesheet" href="/hatchbox_science.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-logo-shell"><img class="brand-logo" src="/campaign-main-airship.svg" alt="CC-FLUX 2026 airship logo"></div>
+    <div class="brand-copy">
+      <h1>CC-FLUX Campaign 2026</h1>
+      <span class="campaign-line">A Joint CHANEL – ClimStress Zeppelin Campaign<br>Across European Cities and Forests</span>
+      <span class="review-line">Integrated Post-Flight Scientific Payload Review · INS Gimbal</span>
+    </div>
+    <div class="top-actions"><a class="btn" href="/">Main GUI</a><button class="btn" id="refreshBtn">Refresh</button></div>
+  </header>
+  <div class="status-strip"><span class="status-dot" id="statusDot"></span><span id="statusText">Reading processed INS Gimbal project data…</span><span class="spacer"></span><strong id="flightName">No project</strong></div>
+  <main>
+    <nav class="nav-tabs">
+      <a class="btn active" data-view="overview" href="/ins_gimbal/overview">Overview</a>
+      <a class="btn" data-view="motion" href="/ins_gimbal/motion">Motion diagnostics</a>
+      <a class="btn" data-view="frequency" href="/ins_gimbal/frequency">Frequency analysis</a>
+    </nav>
+    <section class="summary-grid" id="summaryGrid"></section>
+    <section class="chart-grid">
+      <article class="chart-card" data-section="overview"><div class="card-head"><h2>All recorded RAW_IMU acceleration</h2><button class="btn" data-fullscreen="accelerationPlot">Full screen</button></div><div class="plot" id="accelerationPlot"></div></article>
+      <article class="chart-card" data-section="overview"><div class="card-head"><h2>All recorded RAW_IMU angular rate</h2><button class="btn" data-fullscreen="angularRatePlot">Full screen</button></div><div class="plot" id="angularRatePlot"></div></article>
+      <article class="chart-card" data-section="motion"><div class="card-head"><h2>Unfiltered acceleration deviation</h2><button class="btn" data-fullscreen="accelerationMotionPlot">Full screen</button></div><div class="plot" id="accelerationMotionPlot"></div></article>
+      <article class="chart-card" data-section="motion"><div class="card-head"><h2>Unfiltered angular motion</h2><button class="btn" data-fullscreen="angularMotionPlot">Full screen</button></div><div class="plot" id="angularMotionPlot"></div></article>
+      <article class="chart-card wide" data-section="frequency"><div class="card-head"><h2>Acceleration spectrogram · unfiltered input</h2><button class="btn" data-fullscreen="spectrogramPlot">Full screen</button></div><div class="plot" id="spectrogramPlot"></div></article>
+      <article class="chart-card wide" data-section="frequency"><div class="card-head"><h2>Welch amplitude spectral density</h2><button class="btn" data-fullscreen="asdPlot">Full screen</button></div><div class="plot" id="asdPlot"></div></article>
+    </section>
+  </main>
+  <div class="busy show" id="busy"><div class="busy-card"><div class="spinner"></div><h2>Preparing INS Gimbal scientific workspace</h2><p>Loading saved, precomputed Gremsy products from the Flight Project.</p></div></div>
+  <footer class="app-footer">© 2026 Biplob Dey · Forschungszentrum Jülich GmbH</footer>
+  <script src="/vendor/plotly.min.js"></script>
+  <script src="/ins_gimbal.js"></script>
+</body>
+</html>

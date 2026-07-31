@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 160" role="img" aria-label="CC-FLUX campaign airship">
+  <defs>
+    <linearGradient id="airship-body" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#ffffff"/>
+      <stop offset=".55" stop-color="#dceaf3"/>
+      <stop offset="1" stop-color="#4d6c82"/>
+    </linearGradient>
+    <linearGradient id="campaign-arc" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#36d4ff"/>
+      <stop offset="1" stop-color="#4f8cff"/>
+    </linearGradient>
+  </defs>
+  <path d="M52 69C80 10 199 7 253 49" fill="none" stroke="url(#campaign-arc)" stroke-width="8" stroke-linecap="round"/>
+  <path d="M254 108C205 157 86 153 48 111" fill="none" stroke="url(#campaign-arc)" stroke-width="8" stroke-linecap="round"/>
+  <g transform="translate(-20 0) rotate(-6 178 82)">
+    <path d="M39 77C71 46 235 43 290 72C306 80 306 91 291 100C235 131 70 125 39 91C34 86 34 82 39 77Z" fill="url(#airship-body)" stroke="#eff8fd" stroke-width="3"/>
+    <path d="M50 92C105 110 224 113 288 94C265 116 91 121 50 92Z" fill="#31546c" opacity=".8"/>
+    <path d="M140 116H190L195 138Q189 147 178 147H151Q140 143 138 135Z" fill="url(#airship-body)" stroke="#e6f0f5" stroke-width="3"/>
+    <path d="M46 81L18 91L48 91" fill="#dfeaf1" stroke="#eff8fd" stroke-width="2"/>
+  </g>
+</svg>

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 170" role="img" aria-label="CC-FLUX Campaign 2026 airship logo">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#fff"/><stop offset=".55" stop-color="#dceaf3"/><stop offset="1" stop-color="#4d6c82"/></linearGradient>
+    <linearGradient id="arc" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#36d4ff"/><stop offset="1" stop-color="#4f8cff"/></linearGradient>
+  </defs>
+  <path d="M72 69C100 10 219 7 273 49" fill="none" stroke="url(#arc)" stroke-width="8" stroke-linecap="round"/>
+  <path d="M274 108C225 157 106 153 68 111" fill="none" stroke="url(#arc)" stroke-width="8" stroke-linecap="round"/>
+  <g transform="rotate(-6 178 82)"><path d="M39 77C71 46 235 43 290 72C306 80 306 91 291 100C235 131 70 125 39 91C34 86 34 82 39 77Z" fill="url(#body)" stroke="#eff8fd" stroke-width="3"/><path d="M50 92C105 110 224 113 288 94C265 116 91 121 50 92Z" fill="#31546c" opacity=".8"/><path d="M140 116H190L195 138Q189 147 178 147H151Q140 143 138 135Z" fill="url(#body)" stroke="#e6f0f5" stroke-width="3"/><path d="M46 81L18 91L48 91" fill="#dfeaf1" stroke="#eff8fd" stroke-width="2"/></g>
+  <text x="180" y="153" text-anchor="middle" fill="#eaf7ff" font-family="Segoe UI,Arial,sans-serif" font-size="22" font-weight="800">CC-FLUX <tspan fill="#36d4ff">2026</tspan></text>
+</svg>

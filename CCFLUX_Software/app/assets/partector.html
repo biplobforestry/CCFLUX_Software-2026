@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Partector Pro · CC-FLUX Campaign 2026</title>
+  <link rel="stylesheet" href="/hatchbox_science.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-logo-shell"><img class="brand-logo" src="/campaign-main-airship.svg" alt="CC-FLUX 2026 airship logo"></div>
+    <div class="brand-copy"><h1>CC-FLUX Campaign 2026</h1><span class="campaign-line">A Joint CHANEL – ClimStress Zeppelin Campaign<br>Across European Cities and Forests</span><span class="review-line">Integrated Post-Flight Scientific Payload Review · Partector Pro</span></div>
+    <div class="top-actions"><a class="btn" href="/">Main GUI</a><button class="btn" id="refreshBtn">Refresh</button></div>
+  </header>
+  <div class="status-strip"><span class="status-dot" id="statusDot"></span><span id="statusText">Reading processed Partector project data…</span><span class="spacer"></span><strong id="flightName">No project</strong></div>
+  <main>
+    <nav class="nav-tabs"><a class="btn active" data-view="overview" href="/partector/overview">Overview</a><a class="btn" data-view="size" href="/partector/size-distribution">Size distribution</a><a class="btn" data-view="housekeeping" href="/partector/housekeeping">Housekeeping & QC</a></nav>
+    <section class="summary-grid" id="summaryGrid"></section>
+    <section class="chart-grid">
+      <article class="chart-card wide" data-section="overview"><div class="card-head"><h2>Particle metrics</h2><div class="toolbar"><label>Quantity <select id="timeMetric"><option value="number_cm3">Number concentration [#/cm³]</option><option value="ldsa_um2_cm3">LDSA [µm²/cm³]</option><option value="mean_diameter_nm">Mean diameter [nm]</option><option value="mass_ug_m3">PM0.3 mass [µg/m³]</option></select></label><button class="btn" data-fullscreen="timePlot">Full screen</button></div></div><div class="plot" id="timePlot"></div></article>
+      <article class="chart-card wide" data-section="size"><div class="card-head"><h2>Eight-channel particle number size distribution</h2><button class="btn" data-fullscreen="heatPlot">Full screen</button></div><div class="plot" id="heatPlot"></div><div class="science-note">Channels are treated as dN/dlog₁₀(D). Integrals use logarithmic bin widths and geometric-midpoint edges; no temporal interpolation or smoothing is applied.</div></article>
+      <article class="chart-card wide" data-section="size"><div class="card-head"><h2>Integrated number size bands</h2><button class="btn" data-fullscreen="bandsPlot">Full screen</button></div><div class="plot" id="bandsPlot"></div></article>
+      <article class="chart-card wide" data-section="housekeeping"><div class="card-head"><h2>Housekeeping diagnostics</h2><div class="toolbar"><label>Quantity <select id="houseMetric"><option value="flow_lpm">Flow [L/min]</option><option value="temperature_c">Temperature [°C]</option><option value="rh_percent">RH [%]</option><option value="pressure_hpa">Pressure [hPa]</option><option value="battery_v">Battery [V]</option><option value="pump_current_ma">Pump current [mA]</option><option value="size_integral_to_reported_ratio">8-bin / reported number ratio</option></select></label><button class="btn" data-fullscreen="housePlot">Full screen</button></div></div><div class="plot" id="housePlot"></div></article>
+    </section>
+  </main>
+  <div class="busy show" id="busy"><div class="busy-card"><div class="spinner"></div><h2>Preparing Partector scientific workspace</h2><p id="busyText">Loading the saved, precomputed flight products.</p></div></div>
+  <footer class="app-footer">© 2026 Biplob Dey · Forschungszentrum Jülich GmbH</footer>
+  <script src="/vendor/plotly.min.js"></script><script src="/partector.js"></script>
+</body>
+</html>

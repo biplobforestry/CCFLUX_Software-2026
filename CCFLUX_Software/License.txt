@@ -1,0 +1,31 @@
+# License
+
+**Copyright © 2026 Biplob Dey**
+
+**Contact**
+
+* [biplobforestry@gmail.com](mailto:biplobforestry@gmail.com)
+* [b.dey@fz-juelich.de](mailto:b.dey@fz-juelich.de)
+
+## Permission
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and its associated documentation, to use, copy, modify, and distribute the software for research, educational, commercial, or non-commercial purposes, subject to the following conditions.
+
+## Conditions
+
+1. Appropriate credit **must always** be given to the original author, **Biplob Dey**, in any redistribution, modification, derivative work, publication, presentation, or other work that uses or is based on this software.
+
+2. The original copyright notice and this license must be included in all copies or substantial portions of the software.
+
+3. Any modifications or derivative works must clearly indicate that changes have been made and must not misrepresent the original software or its authorship.
+
+
+## Disclaimer
+
+THIS SOFTWARE IS PROVIDED **"AS IS"**, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+THIS SOFTWARE IS INTENDED FOR RESEARCH AND SCIENTIFIC DATA ANALYSIS ONLY. IT IS NOT CERTIFIED FOR USE IN SAFETY-CRITICAL, LIFE-CRITICAL, MEDICAL, OR OPERATIONAL DECISION-MAKING APPLICATIONS.
+
+THE USER IS SOLELY RESPONSIBLE FOR VERIFYING THE ACCURACY, SUITABILITY, AND COMPLIANCE OF THE SOFTWARE AND ITS OUTPUTS WITH APPLICABLE LAWS, REGULATIONS, AND INSTITUTIONAL POLICIES.
+
+IN NO EVENT SHALL THE AUTHOR OR COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

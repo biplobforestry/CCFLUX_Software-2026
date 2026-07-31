@@ -1,0 +1,51 @@
+# Upcoming Software Update
+
+**The next major software update will be available on 3 August 2026 after 22:00 UTC.**
+
+This release will introduce significant improvements to the CCFLUX Scientific Payload Review software, with a strong focus on navigation accuracy, performance, and remote sensing data analysis.
+
+## New Features
+
+* **Advanced Simulation System**
+
+
+* **Advanced Parallel Processing System**
+
+A parallel computing framework enables multiple instrument and remote-sensing modules to be processed simultaneously across different computers.
+
+The system includes a **key-based locking mechanism** that:
+
+  * assigns each processing task a unique lock key;
+  * allows remote-sensing and scientific-payload modules to run independently;
+  * safely combines completed outputs through the **Project Fusion** system;
+  * records the computer, user, processing time, software version, and module responsible for each output.
+
+
+* **More Accurate Navigation System Profile**
+
+  * Improved GNSS/INS integration and navigation profile visualization.
+  * Enhanced altitude profiling using GNSS, INS, and Digital Terrain Model (DTM).
+
+* **Interactive Data Visualization**
+
+  * Faster and more responsive scientific plots.
+  * Interactive flight route exploration.
+
+* **Remote Sensing Products**
+
+  * Integrated visualization and analysis of remote sensing products.
+  * Unified interface for multisensor airborne observations.
+  * Improved comparison between navigation, atmospheric, and remote sensing datasets.
+
+
+* **Performance Improvements**
+
+  * Optimized processing for large airborne datasets (up to 10 hour flights).
+  * Improved memory management.
+  * Faster visualization updates.
+  * Professional loading indicators during processing to keep the interface responsive.
+
+.....look forward to bringing these improvements in the upcoming release.
+
+regards,
+Biplob

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SIF / FLOX · CC-FLUX Campaign 2026</title>
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/hatchbox_science.css">
+  <style>
+    .control-bar{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-bottom:14px;padding:12px;border:1px solid var(--line);border-radius:11px;background:var(--panel)}
+    .control-bar label{display:flex;align-items:center;gap:7px;color:var(--muted);font-weight:700}.control-bar select{min-width:150px}
+    #sifMap{height:clamp(520px,68vh,840px);background:#cbd5df}.map-shell{position:relative}.map-reset{position:absolute;z-index:800;right:12px;top:12px}
+    .reference{position:fixed;inset:0;z-index:1300;background:#020812d9;display:none;place-items:center;padding:20px}.reference.show{display:grid}
+    .reference-card{width:min(980px,96vw);max-height:88vh;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#0d1d2c;padding:20px}
+    .reference-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.reference table{width:100%;border-collapse:collapse;margin-top:12px}.reference th,.reference td{border:1px solid #294b66;padding:8px;text-align:left}.reference th{background:#15364f;color:var(--cyan)}
+    .manual-copy{white-space:pre-wrap;color:#c7dbea}.map-legend{background:#0a1928eF;color:white;padding:9px 11px;border-radius:8px;border:1px solid #45677e}.gradient{height:10px;margin:5px 0;background:linear-gradient(90deg,#440154,#31688e,#35b779,#fde725)}
+    .sif-progress{height:12px;overflow:hidden;margin-top:16px;border-radius:999px;background:#173247}.sif-progress span{display:block;height:100%;width:0;background:linear-gradient(90deg,#16bed9,#63ddb0);transition:width .35s ease}.busy-card .progress-value{display:block;margin-top:8px;color:#79e8dc;font-weight:800}
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-logo-shell"><img class="brand-logo" src="/campaign-main-airship.svg" alt="CC-FLUX 2026 airship logo"></div>
+    <div class="brand-copy">
+      <h1>CC-FLUX Campaign 2026</h1>
+      <span class="campaign-line">A Joint CHANEL – ClimStress Zeppelin Campaign<br>Across European Cities and Forests</span>
+      <span class="review-line">Integrated Post-Flight Scientific Payload Review · SIF / FLOX</span>
+    </div>
+    <div class="top-actions">
+      <button class="btn" id="variablesBtn">Variables</button>
+      <button class="btn" id="indicesBtn">Vegetation Index</button>
+      <button class="btn" id="manualBtn">Manual</button>
+      <a class="btn" href="/">Main GUI</a>
+      <button class="btn" id="refreshBtn">Refresh</button>
+    </div>
+  </header>
+  <div class="status-strip"><span class="status-dot" id="statusDot"></span><span id="statusText">Reading processed SIF project data…</span><span class="spacer"></span><strong id="flightName">No project</strong></div>
+  <main>
+    <nav class="nav-tabs">
+      <a class="btn active" data-view="overview" href="/sif/overview">Overview</a>
+      <a class="btn" data-view="timeseries" href="/sif/timeseries">Time series</a>
+      <a class="btn" data-view="spectra" href="/sif/spectra">Spectra</a>
+      <a class="btn" data-view="map" href="/sif/map">Map view</a>
+    </nav>
+    <div class="control-bar">
+      <label>Product <select id="modeSelect"><option value="FULL">FULL / FLOX</option><option value="FLUO">FLUO</option></select></label>
+      <label>Variable <select id="variableSelect"></select></label>
+      <button class="btn primary" id="applyBtn">Update plots</button>
+      <span class="spacer"></span><span id="selectionNote">Waiting for products</span>
+    </div>
+    <section class="summary-grid" id="summaryGrid"></section>
+    <section class="chart-grid">
+      <article class="chart-card wide" data-section="overview"><div class="card-head"><h2>Selected SIF/FLOX variable overview</h2><button class="btn" data-fullscreen="overviewPlot">Full screen</button></div><div class="plot" id="overviewPlot"></div></article>
+      <article class="chart-card" data-section="overview"><div class="card-head"><h2>Distribution</h2><button class="btn" data-fullscreen="histogramPlot">Full screen</button></div><div class="plot" id="histogramPlot"></div></article>
+      <article class="chart-card" data-section="overview"><div class="card-head"><h2>Altitude relationship</h2><button class="btn" data-fullscreen="altitudePlot">Full screen</button></div><div class="plot" id="altitudePlot"></div></article>
+      <article class="chart-card wide" data-section="timeseries"><div class="card-head"><h2>Variable time series</h2><button class="btn" data-fullscreen="timePlot">Full screen</button></div><div class="plot" id="timePlot"></div></article>
+      <article class="chart-card wide" data-section="spectra"><div class="card-head"><h2>Median incoming, reflected and reflectance spectra</h2><button class="btn" data-fullscreen="spectraPlot">Full screen</button></div><div class="plot" id="spectraPlot"></div></article>
+      <article class="chart-card wide" data-section="map"><div class="card-head"><h2>Georeferenced SIF / vegetation map</h2></div><div class="map-shell"><div id="sifMap"></div><button class="btn map-reset" id="resetMapBtn">Reset position</button></div></article>
+    </section>
+  </main>
+  <div class="busy show" id="busy"><div class="busy-card"><div class="spinner"></div><h2 id="busyTitle">Preparing SIF / FLOX scientific workspace</h2><p id="busyMessage">Loading saved FULL and FLUO products from the active Flight Project.</p><div class="sif-progress" id="sifProgress"><span></span></div><span class="progress-value" id="sifProgressValue">Waiting…</span></div></div>
+  <div class="reference" id="reference"><div class="reference-card"><div class="reference-head"><h2 id="referenceTitle">Reference</h2><button class="btn" id="closeReference">Close</button></div><div id="referenceBody"></div></div></div>
+  <footer class="app-footer">© 2026 Biplob Dey · Forschungszentrum Jülich GmbH</footer>
+  <script src="/vendor/plotly.min.js"></script>
+  <script src="/sif.js"></script>
+</body>
+</html>

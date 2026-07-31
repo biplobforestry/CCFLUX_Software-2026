@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GoPro Capture Map · CC-FLUX Campaign 2026</title>
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
+  <style>
+    :root{--bg:#07111f;--panel:#0e1d2e;--line:#29445d;--text:#ecf7ff;--muted:#9ebbd0;--cyan:#36d4ff;--blue:#438dff;--green:#42d99b;--warn:#f6b84b}
+    *{box-sizing:border-box}html,body{margin:0;min-height:100%;font-family:Inter,"Segoe UI",Arial,sans-serif;background:radial-gradient(circle at 15% 0,#133451 0,#07111f 42%,#050b14 100%);color:var(--text)}body{padding-bottom:52px}button,input{font:inherit}
+    .topbar{min-height:126px;display:flex;align-items:center;gap:20px;padding:17px clamp(18px,2vw,34px);background:linear-gradient(115deg,rgba(10,25,43,.99),rgba(13,47,72,.98));border-bottom:1px solid #2b5573;box-shadow:0 8px 28px #0008;position:relative;z-index:1001}.brand-logo{width:190px;height:98px;border:0;background:transparent}.brand-copy h1{margin:0;font-size:clamp(1.65rem,2.5vw,2.55rem);line-height:1.08;color:var(--cyan)}.campaign-line{display:block;color:#c8e8fa;font-weight:650;line-height:1.4;font-size:.92rem;margin-top:5px}.review-line{display:block;color:var(--cyan);font-size:.82rem;margin-top:4px}.top-actions{margin-left:auto;display:flex;gap:9px;flex-wrap:wrap}
+    .btn{border:1px solid #3b6480;background:#132a40;color:var(--text);border-radius:9px;padding:.62rem .85rem;min-height:44px;cursor:pointer;font-weight:700;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}.btn:hover,.btn:focus-visible{border-color:var(--cyan);background:#153b56}.btn.primary{background:linear-gradient(135deg,#087aa1,#1768c5);border-color:#47cfff}
+    .status-strip{display:flex;align-items:center;gap:14px;padding:11px clamp(16px,2vw,30px);background:#081625ee;border-bottom:1px solid var(--line);color:var(--muted);min-height:46px}.status-dot{width:10px;height:10px;border-radius:50%;background:var(--warn);box-shadow:0 0 10px currentColor}.status-dot.ready{background:var(--green)}.spacer{flex:1}#flightName{color:var(--text);font-weight:800}
+    main{padding:16px clamp(12px,1.4vw,28px) 30px}.card{background:linear-gradient(155deg,rgba(15,31,48,.98),rgba(8,21,34,.98));border:1px solid var(--line);border-radius:14px;box-shadow:0 14px 32px #0005;overflow:hidden}.card-head{display:flex;align-items:center;gap:12px;padding:13px 15px;border-bottom:1px solid var(--line);flex-wrap:wrap}.card-head h2{margin:0;font-size:1.05rem}.map-tools{margin-left:auto;display:flex;align-items:center;gap:9px;flex-wrap:wrap}.width-control{display:flex;align-items:center;gap:7px;color:var(--muted);font-weight:700}.width-control input{width:70px;min-height:42px;padding:7px 9px;border:1px solid #3b6480;border-radius:8px;background:#091a2a;color:var(--text)}.map-shell{position:relative}.map{height:calc(100vh - 285px);min-height:520px;background:#0a1825}.map-message{position:absolute;z-index:900;left:50%;top:50%;transform:translate(-50%,-50%);padding:20px 24px;background:#0a1825ee;border:1px solid var(--line);border-radius:12px;color:var(--muted);max-width:82%;text-align:center}.map-info{position:absolute;left:12px;bottom:22px;z-index:900;background:#091827ee;border:1px solid #365570;border-radius:9px;padding:10px 11px;font-weight:750}
+    .capture-popup{min-width:250px;color:#102534}.capture-popup table{width:100%;border-collapse:collapse;margin-bottom:10px}.capture-popup td{padding:4px;border-bottom:1px solid #d7e5eb}.capture-popup td:first-child{font-weight:750}.capture-popup .btn{width:100%;min-height:36px;padding:7px;color:#fff;background:#116d99}
+    .modal{position:fixed;inset:0;z-index:6000;display:none;align-items:center;justify-content:center;padding:20px;background:#020912e8}.modal.show{display:flex}.image-card{position:relative;width:min(1100px,96vw);max-height:94vh;padding:54px 16px 16px;border:1px solid #3c6782;border-radius:16px;background:#07111f;box-shadow:0 22px 72px #000b}.close{position:absolute;right:13px;top:10px;width:38px;height:38px;border-radius:50%;border:1px solid #58748c;background:#132a40;color:white;font-size:25px;cursor:pointer}.image-wrap{display:grid;place-items:center;min-height:240px;max-height:calc(94vh - 84px);overflow:auto}.image-wrap img{display:none;max-width:100%;max-height:calc(94vh - 100px);cursor:pointer}.loading{width:min(520px,80vw);text-align:center}.progress-track{height:15px;border-radius:99px;background:#07131f;border:1px solid #33566e;overflow:hidden;margin:14px 0}.progress-fill{height:100%;width:1%;background:linear-gradient(90deg,#17b6d8,#438dff);transition:width .15s}.image-actions{position:absolute;left:50%;bottom:30px;transform:translateX(-50%);display:none;gap:9px;padding:9px;background:#06111ee8;border:1px solid #3b6480;border-radius:11px}.image-actions.show{display:flex}
+    .app-footer{position:fixed;left:0;right:0;bottom:0;z-index:1200;padding:11px 16px;color:white;text-align:center;font-size:.82rem;font-weight:700;letter-spacing:.035em;background:rgba(7,17,31,.97);border-top:1px solid var(--line)}
+    .brand-logo{width:194px;height:98px;flex:0 0 194px;border:0;background:transparent;display:block;object-fit:contain;filter:drop-shadow(0 7px 10px rgba(0,0,0,.38)) drop-shadow(0 0 8px rgba(25,200,255,.10))}
+    @media(max-width:760px){.topbar{align-items:flex-start;flex-wrap:wrap;padding:14px}.brand-logo{width:125px;height:68px;flex-basis:125px}.brand-copy h1{font-size:1.45rem}.top-actions{width:100%;margin-left:0}.map-tools{width:100%;margin-left:0}.map{height:65vh;min-height:430px}.status-strip{flex-wrap:wrap}.status-strip .spacer{display:none}}
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <img class="brand-logo" src="/campaign-main-airship.svg" alt="CC-FLUX 2026 airship logo">
+    <div class="brand-copy"><h1>CC-FLUX Campaign 2026</h1><span class="campaign-line">A Joint CHANEL – ClimStress Zeppelin Campaign<br />Across European Cities and Forests</span><span class="review-line">Integrated Post-Flight Scientific Payload Review · GoPro</span></div>
+    <div class="top-actions"><button class="btn" id="mainGuiBtn">Main GUI</button><button class="btn" id="refreshBtn">Refresh</button><button class="btn" id="mapFullscreenBtn">Full screen map</button></div>
+  </header>
+  <div class="status-strip"><span class="status-dot" id="statusDot"></span><span id="statusText">Reading GoPro capture locations…</span><span class="spacer"></span><span id="flightName">No project</span></div>
+  <main>
+    <section class="card" id="mapCard">
+      <div class="card-head"><h2>GoPro capture locations</h2><span id="summary">Waiting for processed camera and Noseboom data</span><div class="map-tools"><label class="width-control" for="trackWidth">Line width [px]<input id="trackWidth" type="number" min="1" max="20" step="1" value="3" /></label><button class="btn" id="resetMapBtn" type="button">Reset map position</button></div></div>
+      <div class="map-shell"><div id="map" class="map" role="application" aria-label="Interactive GoPro capture map"></div><div class="map-message" id="mapMessage">Waiting for GoPro georeferencing…</div><div class="map-info" id="mapInfo">No captures loaded</div></div>
+    </section>
+  </main>
+  <div class="modal" id="imageModal" role="dialog" aria-modal="true" aria-labelledby="imageTitle">
+    <div class="image-card" id="imageCard"><button class="close" id="imageClose" aria-label="Close image">×</button><div class="image-wrap" id="imageWrap"><div class="loading" id="imageLoading"><h2 id="imageTitle">Loading image</h2><div class="progress-track"><div class="progress-fill" id="imageProgress"></div></div><strong id="imagePercent">1%</strong></div><img id="captureImage" alt="Selected GoPro capture" /></div><div class="image-actions" id="imageActions"><a class="btn primary" id="downloadImage">Download</a><button class="btn" id="fullscreenImage">Full screen</button></div></div>
+  </div>
+  <footer class="app-footer">© 2026 Biplob Dey · Forschungszentrum Jülich GmbH</footer>
+  <script src="/gopro.js"></script>
+</body>
+</html>

@@ -1,0 +1,89 @@
+# CC-FLUX 2026 Software Manual
+
+**Integrated post-flight scientific payload review for the CC-FLUX Zeppelin campaign 2026**
+
+This manual describes the distributable folder, the normal processing workflow, instrument responsibilities, time handling, project files, and result pages.
+
+## 1. Starting the software
+
+### Windows
+
+1. Double-click **Windows_CCFLUX.bat**.
+2. Keep the Command Prompt window open.
+3. The launcher creates **.venv-windows**, installs or verifies all required Python libraries, starts CC-FLUX on a free local port, and opens the default browser.
+
+### macOS
+
+1. Double-click **Mac_CCFLUX.command**.
+2. Keep the Terminal window open.
+3. The launcher creates **.venv-macos**, installs or verifies all required Python libraries, starts CC-FLUX on a free local port, and opens the default browser.
+
+Python 3.10 or newer is required. An internet connection is normally required during the first launch. Launcher diagnostics are written to **logs/launcher.log**.
+
+## 2. Distribution folder structure
+
+* **Windows_CCFLUX.bat** — Windows setup and launcher.
+* **Mac_CCFLUX.command** — one-MacOS setup and launcher.
+* **app/** — local web server, dashboard controller, GUI pages, maps, plots, JavaScript, CSS, and images.
+* **core/** — scanning, time handling, instrument registry, processing queue, resources, logging, project persistence, camera georeferencing, and artifact management.
+* **instruments/** — integrated adapters for every payload instrument.
+* **instruments/sif/essentials/** — SIF calibration files and vegetation-index definitions distributed with the software.
+* **configs/** — instrument detection rules, filename patterns, processing defaults, resource limits, and logging configuration.
+* **legacy_integration/** — bundled validated scientific routines used by Noseboom, MIRO/Picarro, OPC, Partector, INS Gimbal, FLIR, and SIF.
+* **requirements-all.txt** — readable summary of required libraries.
+
+Keep the complete distribution folder together. The application code does not contain campaign raw data.
+
+## 3. Data-folder workflow
+
+### Flight Folder
+
+Select the flight-specific folder containing Noseboom, MIRO Rack, Hatchbox, and other flight payload deliveries. CC-FLUX scans this folder read-only.
+
+### Camera Folder
+
+Select the flight-specific "Camera_System" folder containing GoPro, FLIR, MicaSense. Camera scanning is independent from the Flight Folder scan.
+
+### Output Folder
+
+Select a writable location for processed files, plots, maps, logs, and the saved Flight Project. Never select a raw-data folder as the Output Folder.
+
+## 4. Recommended processing workflow
+
+1. Select **Flight Folder**, **Camera Folder**, and **Output Folder**.
+2. Selecting a folder does not start scanning. Click **Initial Check** when the folder selections are ready.
+3. If a Camera Folder is defined, choose **Scan Flight Only** or **Scan Flight + Camera**. Flight-only scanning keeps the Camera Folder selected for later.
+4. Review detected instruments, warnings, file counts, and UTC availability.
+5. Set the **Time Filter** using the full interval, common overlap, or a custom start and end.
+6. Select only the instruments that should run in **Processing Priority**.
+7. Configure instrument-specific options where a Configure button is available.
+8. Click **Start Processing**, review the health dialog, and confirm.
+9. Use **Remote Sensing** for selected camera instruments.
+10. Open an instrument card to inspect its dedicated plots, diagnostics, maps, and exports.
+11. Click **Save .ccflux** to preserve the project state.
+
+
+## 5. Saving and loading a Flight Project
+
+**Save .ccflux** stores selected folders, flight identity, time-filter state, instrument configuration, processing history, completed-job state, output references, and page-specific workflow state.
+
+**Load .ccflux** searches the selected location for saved projects and restores the chosen Flight Project. Raw data are not copied into the .ccflux file; the referenced input folders must remain accessible.
+
+## 10. Logs, troubleshooting, and safe operation
+
+* Keep the launcher window open while CC-FLUX is running.
+* Read **logs/launcher.log** when startup or library installation fails.
+* Review **Processing Log & Diagnostics** for scan and processing errors.
+* Confirm that Python 3.10 or newer is installed.
+* Confirm internet access during the first dependency installation.
+* Confirm the Output Folder is writable and separate from raw data.
+* If an external disk is slow or unavailable, select the flight-specific subfolder instead of the disk root.
+* Use **Refresh Status** to update displayed states.
+* Use **Reset System** only to clear the active GUI state. It does not delete raw input files or existing output products.
+* Use **Exit** to stop the local CC-FLUX server cleanly.
+
+## 11. Scientific responsibility
+
+Review warnings, calibration inputs, time alignment, QC information, and generated products before scientific interpretation or publication. The software assists reproducible processing but does not replace instrument-PI validation.
+
+© 2026 Biplob Dey · Forschungszentrum Jülich GmbH

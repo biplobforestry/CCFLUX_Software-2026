@@ -1,0 +1,296 @@
+(() => {
+  'use strict';
+
+  const variableDescriptions = {
+    'temp1 [C]': 'AirFloX mainboard temperature',
+    'h1 [%]': 'AirFloX relative humidity',
+    'Incoming at 750nm Full [W m-2nm-1sr-1]': 'FULL incoming radiance near 750 nm',
+    'Reflected 750nm full [W m-2nm-1sr-1]': 'FULL reflected radiance near 750 nm',
+    'Incoming at 750nm FLUO [W m-2nm-1sr-1]': 'FLUO incoming radiance near 750 nm',
+    'Reflected 750nm FLUO [W m-2nm-1sr-1]': 'FLUO reflected radiance near 750 nm',
+    'SIF_A_ifld [mW m-2nm-1sr-1]': 'Solar-induced fluorescence retrieved in the O₂-A band',
+    'SIF_B_ifld [mW m-2nm-1sr-1]': 'Solar-induced fluorescence retrieved in the O₂-B band',
+    'PAR inc [W m-2]': 'Incoming photosynthetically active radiation',
+    'PAR ref [W m-2]': 'Reflected photosynthetically active radiation',
+    'APAR [umol m-2 s-1]': 'Absorbed photosynthetically active radiation',
+    'E_stability full [%]': 'FULL WR1/WR2 irradiance stability',
+    'E_stability FLUO [%]': 'FLUO WR1/WR2 irradiance stability',
+    'Dynamic range E full [%]': 'FULL upward-channel dynamic range',
+    'Dynamic range L full [%]': 'FULL downward-channel dynamic range',
+    'Dynamic range E FLUO [%]': 'FLUO upward-channel dynamic range',
+    'Dynamic range L FLUO [%]': 'FLUO downward-channel dynamic range',
+    NDVI: 'Normalized Difference Vegetation Index',
+    PRI: 'Photochemical Reflectance Index',
+    MTCI: 'MERIS Terrestrial Chlorophyll Index',
+    SR: 'Simple Ratio',
+    EVI: 'Enhanced Vegetation Index',
+    REP: 'Red Edge Position',
+    TCARI: 'Transformed Chlorophyll Absorption Reflectance Index',
+    REDCl: 'Red Edge Chlorophyll Index',
+    MCRI: 'Modified Carotenoid Reflectance Index'
+  };
+  const vegetationIndices = [
+    ['NDVI', 'Normalized Difference Vegetation Index', '800; 670', '(R800 − R670) / (R800 + R670)'],
+    ['PRI', 'Photochemical Reflectance Index', '531; 570', '(R531 − R570) / (R531 + R570)'],
+    ['MTCI', 'MERIS Terrestrial Chlorophyll Index', '754; 709; 681', '(R754 − R709) / (R709 + R681)'],
+    ['SR', 'Simple Ratio', '795; 810', 'R795 / R810'],
+    ['EVI', 'Enhanced Vegetation Index', '800; 670; 480', '2.5 × (a − b) / (a + 6b − 7.5c + 1)'],
+    ['REP', 'Red Edge Position', '670; 800; 700; 740', '700 + 40 × ((a − b/2) − c) / (d − c)'],
+    ['TCARI', 'Transformed Chlorophyll Absorption Reflectance Index', '700; 670; 550; 670', '3 × (a − b − 0.2 × (a − c) × a/d)'],
+    ['REDCl', 'Red Edge Chlorophyll Index', '785; 725', 'R785 / R725 − 1'],
+    ['MCRI', 'Modified Carotenoid Reflectance Index', '510; 725; 785', 'R785 / (R510 − R725)'],
+    ['SIF A/B', 'Solar-induced fluorescence by improved FLD', 'O₂-A / O₂-B', 'Validated AirFloX iFLD retrieval']
+  ];
+  const manual = `SIF / FLOX WORKFLOW
+
+1. Select and scan the Flight Folder in the Main GUI. The flight should contain FULL and FLUO/FLOX raw CSV files.
+2. SIF UAV/Airship mode uses an existing SIF telemetry log when available. Otherwise it creates one by matching Gremsy Gimbal timestamps to Noseboom latitude, longitude, and altitude.
+3. Open Configure SIF in the processing queue. Choose FULL, FLUO, spectral shift, nonlinearity, row handling, altitude filtering, and the maximum navigation time gap.
+4. Raw files smaller than the configured threshold are ignored. The validated default is 100 KB.
+5. The global Main GUI Time Filter is applied in UTC after telemetry matching.
+6. Start Processing. This page follows telemetry preparation, FULL/FLUO calibration, vegetation indices, SIF iFLD, GIS, browser payload, and completion.
+7. Inspect time series, distributions, spectra, and the georeferenced map.
+
+DEFAULT SCIENCE POLICY
+• FULL spectral shift correction: off
+• Nonlinearity correction: off
+• Drop unmatched telemetry rows: on
+• Drop invalid spectral rows: off
+• Maximum Gimbal/Noseboom position gap: 0.2 s
+• Ignore raw files smaller than: 100 KB
+• Raw source files are never modified.
+
+BUNDLED ESSENTIALS
+The main application uses the validated FULL calibration, FLUO calibration, and Indices_ICOS definition shipped under instruments/sif/essentials.
+
+OUTPUTS
+Each immutable SIF run writes incoming radiance, reflected radiance, reflectance, the combined index/SIF table, GIS shapefiles, and the browser payload under the active Flight Project.`;
+
+  const api = async path => {
+    const response = await fetch(path, {cache: 'no-store'});
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
+    return body;
+  };
+  const layout = (xTitle, yTitle) => ({
+    paper_bgcolor: '#f7fafc', plot_bgcolor: '#f7fafc',
+    margin: {l: 86, r: 28, t: 35, b: 72},
+    font: {family: 'Inter, Segoe UI, Arial', color: '#17324a', size: 14},
+    xaxis: {title: xTitle, gridcolor: '#d9e3ea', automargin: true},
+    yaxis: {title: yTitle, gridcolor: '#d9e3ea', automargin: true},
+    legend: {orientation: 'h', y: 1.08}, hovermode: 'closest'
+  });
+  const config = {responsive: true, displaylogo: false, scrollZoom: true};
+  let payload = null;
+  let map = null;
+  let pointLayer = null;
+  let initialBounds = null;
+  let legend = null;
+  let retryTimer = null;
+
+  function finitePairs(x, y, extra = null) {
+    const result = {x: [], y: [], extra: []};
+    for (let index = 0; index < Math.min(x.length, y.length); index += 1) {
+      if (x[index] == null || y[index] == null || !Number.isFinite(Number(y[index]))) continue;
+      result.x.push(x[index]);
+      result.y.push(Number(y[index]));
+      result.extra.push(extra ? extra[index] : null);
+    }
+    return result;
+  }
+  function selectedMode() {
+    return payload?.modes?.[document.getElementById('modeSelect').value] || null;
+  }
+  function selectedVariable() {
+    return document.getElementById('variableSelect').value;
+  }
+  function setModes() {
+    const select = document.getElementById('modeSelect');
+    const modes = Object.keys(payload.modes || {});
+    select.innerHTML = modes.map(mode => `<option value="${mode}">${mode === 'FULL' ? 'FULL / FLOX' : mode}</option>`).join('');
+    if (!modes.length) return;
+    const preferred = location.pathname.toLowerCase().includes('fluo') ? 'FLUO' : modes[0];
+    select.value = modes.includes(preferred) ? preferred : modes[0];
+    setVariables();
+  }
+  function setVariables() {
+    const mode = selectedMode();
+    const select = document.getElementById('variableSelect');
+    const names = mode?.variable_names || [];
+    const preferred = names.find(name => /SIF_A/i.test(name))
+      || names.find(name => name === 'NDVI') || names[0];
+    select.innerHTML = names.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+    if (preferred) select.value = preferred;
+  }
+  function renderSummary() {
+    const modeName = document.getElementById('modeSelect').value;
+    const mode = selectedMode();
+    const summary = payload.summary || {};
+    const option = summary.options || {};
+    const cards = [
+      ['Product', modeName, `${mode?.row_count || 0} evaluated spectra`],
+      ['UTC coverage', shortTime(mode?.time?.find(Boolean)), shortTime([...(mode?.time || [])].reverse().find(Boolean))],
+      ['Position source', summary.position_mode === 'tower' ? 'Tower/static' : 'Gimbal + Noseboom', option.drop_unmatched_telemetry === false ? 'Unmatched rows retained' : 'Unmatched rows dropped'],
+      ['Corrections', option.spectral_shift_correction ? 'Spectral shift on' : 'Spectral shift off', option.apply_nonlinearity_correction ? 'Nonlinearity on' : 'Nonlinearity off'],
+      ['Raw-file filter', `${summary.raw_file_filter_kb ?? option.raw_min_kb ?? 100} KB`, `${(summary.skipped_raw_files || []).length} small file(s) skipped`]
+    ];
+    document.getElementById('summaryGrid').innerHTML = cards.map(([label, value, note]) =>
+      `<div class="summary"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || '—')}</strong><small>${escapeHtml(note || '')}</small></div>`
+    ).join('');
+  }
+  function renderPlots() {
+    const mode = selectedMode();
+    const variable = selectedVariable();
+    if (!mode || !variable) return;
+    const values = mode.variables[variable] || [];
+    const time = finitePairs(mode.time || [], values);
+    Plotly.react('overviewPlot', [{x: time.x, y: time.y, type: 'scattergl', mode: 'lines+markers', marker: {size: 4, color: '#008ec4'}, line: {width: 1.4, color: '#008ec4'}, name: variable}], layout('Capture time [UTC]', variable), config);
+    Plotly.react('timePlot', [{x: time.x, y: time.y, type: 'scattergl', mode: 'lines', line: {width: 1.6, color: '#0b8f88'}, name: variable}], layout('Capture time [UTC]', variable), config);
+    Plotly.react('histogramPlot', [{x: values.filter(Number.isFinite), type: 'histogram', marker: {color: '#0b8f88'}, nbinsx: 35}], layout(variable, 'Number of spectra'), config);
+    const altitude = finitePairs(mode.altitude_m || [], values);
+    Plotly.react('altitudePlot', [{x: altitude.x, y: altitude.y, type: 'scattergl', mode: 'markers', marker: {size: 5, color: altitude.y, colorscale: 'Viridis', showscale: true}, name: variable}], layout('Altitude [m]', variable), config);
+    const spectra = mode.spectra || {};
+    Plotly.react('spectraPlot', [
+      {x: spectra.wavelength_nm, y: spectra.incoming, type: 'scatter', mode: 'lines', name: 'Incoming radiance', line: {color: '#1261a0'}},
+      {x: spectra.wavelength_nm, y: spectra.reflected, type: 'scatter', mode: 'lines', name: 'Reflected radiance', line: {color: '#d75d18'}},
+      {x: spectra.wavelength_nm, y: spectra.reflectance, type: 'scatter', mode: 'lines', name: 'Reflectance', yaxis: 'y2', line: {color: '#18864b'}}
+    ], {...layout('Wavelength [nm]', 'Radiance [W m⁻² nm⁻¹ sr⁻¹]'), yaxis2: {title: 'Reflectance [-]', overlaying: 'y', side: 'right', showgrid: false}}, config);
+    document.getElementById('selectionNote').textContent = `${mode.row_count.toLocaleString()} ${document.getElementById('modeSelect').value} spectra · ${variable}`;
+    renderMap(mode, variable);
+    renderSummary();
+  }
+  function renderMap(mode, variable) {
+    if (!map) {
+      map = L.map('sifMap', {preferCanvas: true});
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19, attribution: '© OpenStreetMap contributors'}).addTo(map);
+      L.control.scale({imperial: false}).addTo(map);
+      pointLayer = L.layerGroup().addTo(map);
+      legend = L.control({position: 'bottomright'});
+      legend.onAdd = () => {
+        const div = L.DomUtil.create('div', 'map-legend');
+        div.innerHTML = '<strong id="mapLegendName">Variable</strong><div class="gradient"></div><span id="mapLegendMin">—</span><span id="mapLegendMax" style="float:right">—</span>';
+        return div;
+      };
+      legend.addTo(map);
+    }
+    pointLayer.clearLayers();
+    const points = [];
+    const values = mode.variables[variable] || [];
+    const finite = values.filter(value => Number.isFinite(value));
+    const low = finite.length ? Math.min(...finite) : 0;
+    const high = finite.length ? Math.max(...finite) : 1;
+    for (let i = 0; i < values.length; i += 1) {
+      const lat = Number(mode.latitude[i]), lon = Number(mode.longitude[i]), value = Number(values[i]);
+      if (![lat, lon, value].every(Number.isFinite)) continue;
+      const ratio = high > low ? (value - low) / (high - low) : 0.5;
+      const color = viridis(ratio);
+      L.circleMarker([lat, lon], {radius: 4.5, color: '#7a1020', weight: 1, fillColor: color, fillOpacity: .9})
+        .bindPopup(`<strong>${escapeHtml(variable)}</strong>: ${value.toPrecision(6)}<br>Lat: ${lat.toFixed(6)}<br>Lon: ${lon.toFixed(6)}<br>Altitude: ${formatNumber(mode.altitude_m[i])} m<br>UTC: ${escapeHtml(mode.time[i] || '—')}`)
+        .addTo(pointLayer);
+      points.push([lat, lon]);
+    }
+    if (points.length) {
+      initialBounds = L.latLngBounds(points).pad(.08);
+      map.fitBounds(initialBounds);
+    }
+    document.getElementById('mapLegendName').textContent = variable;
+    document.getElementById('mapLegendMin').textContent = formatNumber(low);
+    document.getElementById('mapLegendMax').textContent = formatNumber(high);
+    setTimeout(() => map.invalidateSize(), 40);
+  }
+  function viridis(value) {
+    const stops = [[68,1,84],[49,104,142],[53,183,121],[253,231,37]];
+    const scaled = Math.max(0, Math.min(.999, value)) * (stops.length - 1);
+    const index = Math.floor(scaled), amount = scaled - index;
+    const rgb = stops[index].map((part, channel) => Math.round(part + (stops[index + 1][channel] - part) * amount));
+    return `rgb(${rgb.join(',')})`;
+  }
+  function routeView() {
+    const view = location.pathname.split('/').filter(Boolean)[1] || 'overview';
+    document.querySelectorAll('[data-view]').forEach(link => link.classList.toggle('active', link.dataset.view === view));
+    document.querySelectorAll('[data-section]').forEach(card => card.hidden = card.dataset.section !== view && !(view === 'overview' && card.dataset.section === 'overview'));
+    if (view === 'map' && map) setTimeout(() => map.invalidateSize(), 50);
+  }
+  function showReference(title, content) {
+    document.getElementById('referenceTitle').textContent = title;
+    document.getElementById('referenceBody').innerHTML = content;
+    document.getElementById('reference').classList.add('show');
+  }
+  function table(headers, rows) {
+    return `<table><thead><tr>${headers.map(value => `<th>${escapeHtml(value)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${row.map(value => `<td>${escapeHtml(value)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  }
+  async function load() {
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+    document.getElementById('busy').classList.add('show');
+    let keepBusy = false;
+    try {
+      const response = await api('/api/sif');
+      document.getElementById('flightName').textContent = response.flight_id || 'No project';
+      if (!response.ready) {
+        const state = response.status?.sif || {};
+        const progress = Math.max(0, Math.min(100, Number(state.processing_progress) || 0));
+        const active = ['queued', 'processing'].includes(state.processing_status);
+        const publishing = state.processing_status === 'complete';
+        document.getElementById('statusText').textContent = active || publishing
+          ? `${state.processing_step || 'Preparing SIF products'} · ${progress.toFixed(0)}%`
+          : response.message || 'Process SIF / FLOX from the Main GUI first.';
+        document.getElementById('summaryGrid').innerHTML = `<div class="summary"><span>Status</span><strong>Not ready</strong><small>${escapeHtml(response.message || '')}</small></div>`;
+        document.querySelector('.chart-grid').style.display = 'none';
+        if (active || publishing) {
+          keepBusy = true;
+          document.getElementById('busyTitle').textContent = publishing
+            ? 'Publishing SIF / FLOX workspace'
+            : 'Processing SIF / FLOX';
+          document.getElementById('busyMessage').textContent =
+            state.processing_step || 'Preparing scientific products…';
+          document.querySelector('#sifProgress span').style.width = `${progress}%`;
+          document.getElementById('sifProgressValue').textContent =
+            `${progress.toFixed(0)}% complete`;
+          retryTimer = setTimeout(load, 900);
+        }
+        return;
+      }
+      payload = response.data;
+      document.querySelector('.chart-grid').style.display = '';
+      document.getElementById('statusDot').classList.add('ready');
+      document.getElementById('statusText').textContent = `Processed FULL/FLUO data loaded · ${payload.time_basis}`;
+      document.querySelector('#sifProgress span').style.width = '100%';
+      document.getElementById('sifProgressValue').textContent = '100% complete';
+      setModes();
+      renderPlots();
+      routeView();
+    } catch (error) {
+      document.getElementById('statusText').textContent = error.message;
+    } finally {
+      if (!keepBusy) document.getElementById('busy').classList.remove('show');
+    }
+  }
+  function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+  }
+  function shortTime(value) {
+    if (!value) return '—';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? value : date.toISOString().replace('T', ' ').replace('.000Z', ' UTC');
+  }
+  function formatNumber(value) {
+    return Number.isFinite(Number(value)) ? Number(value).toLocaleString(undefined, {maximumFractionDigits: 4}) : '—';
+  }
+
+  document.getElementById('refreshBtn').onclick = load;
+  document.getElementById('applyBtn').onclick = renderPlots;
+  document.getElementById('modeSelect').onchange = () => { setVariables(); renderPlots(); };
+  document.getElementById('variableSelect').onchange = renderPlots;
+  document.getElementById('resetMapBtn').onclick = () => { if (map && initialBounds) map.fitBounds(initialBounds); };
+  document.getElementById('variablesBtn').onclick = () => showReference('Variables', table(['Variable', 'Description'], Object.entries(variableDescriptions)));
+  document.getElementById('indicesBtn').onclick = () => showReference('Vegetation Index', table(['Index', 'Description', 'Wavelength [nm]', 'Expression'], vegetationIndices));
+  document.getElementById('manualBtn').onclick = () => showReference('SIF / FLOX User Manual', `<div class="manual-copy">${escapeHtml(manual)}</div>`);
+  document.getElementById('closeReference').onclick = () => document.getElementById('reference').classList.remove('show');
+  document.querySelectorAll('[data-fullscreen]').forEach(button => button.onclick = () => document.getElementById(button.dataset.fullscreen)?.requestFullscreen());
+  document.querySelectorAll('[data-view]').forEach(link => link.onclick = event => { event.preventDefault(); history.pushState({}, '', link.href); routeView(); });
+  addEventListener('popstate', routeView);
+  load();
+})();

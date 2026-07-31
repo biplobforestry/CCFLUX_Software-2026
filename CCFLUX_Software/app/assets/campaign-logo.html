@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CC-FLUX 2026 Logo</title>
+  <style>
+    :root{
+      --cyan:#19c8ff;
+      --blue:#4c8dff;
+      --white:#f7fbff;
+      --silver:#a9bfd2;
+      --navy:#061525;
+    }
+
+    *{box-sizing:border-box}
+
+    body{
+      margin:0;
+      min-height:100vh;
+      display:grid;
+      place-items:center;
+      background:
+        radial-gradient(circle at 50% 35%, #102d49 0%, #071a2c 44%, #030b15 100%);
+      font-family:Inter,Segoe UI,Arial,sans-serif;
+    }
+
+    .ccflux-logo{
+      width:min(92vw,720px);
+      padding:7%;
+      text-align:center;
+      color:var(--white);
+    }
+
+    .ccflux-logo svg{
+      width:78%;
+      height:auto;
+      overflow:visible;
+      filter:
+        drop-shadow(0 12px 18px rgba(0,0,0,.42))
+        drop-shadow(0 0 14px rgba(25,200,255,.12));
+    }
+
+    .logo-title{
+      margin-top:1%;
+      display:flex;
+      justify-content:center;
+      align-items:baseline;
+      gap:.04em;
+      font-size:clamp(3rem,10vw,6.7rem);
+      font-weight:800;
+      line-height:.95;
+      letter-spacing:.035em;
+      white-space:nowrap;
+    }
+
+    .logo-title .accent{color:var(--cyan)}
+    .logo-title .main{color:var(--white)}
+
+    .year-row{
+      width:78%;
+      margin:4% auto 0;
+      display:grid;
+      grid-template-columns:1fr auto 1fr;
+      align-items:center;
+      gap:1rem;
+    }
+
+    .year{
+      color:var(--cyan);
+      font-size:clamp(1.7rem,5vw,3.35rem);
+      font-weight:700;
+      letter-spacing:.27em;
+      padding-left:.27em;
+    }
+
+    .line{
+      height:3px;
+      border-radius:999px;
+    }
+
+    .line.left{background:linear-gradient(90deg,transparent,var(--cyan))}
+    .line.right{background:linear-gradient(90deg,var(--cyan),transparent)}
+
+    @media (max-width:560px){
+      .ccflux-logo{padding:5%}
+      .ccflux-logo svg,.year-row{width:86%}
+      .line{height:2px}
+    }
+  </style>
+  <style>
+    html,body{width:100%;height:100%;min-height:0!important;overflow:hidden;background:transparent!important}
+    body{display:grid;place-items:center}
+    .ccflux-logo{width:100%;height:100%;padding:0;display:grid;grid-template-rows:minmax(0,1fr);align-items:center;justify-items:center}
+    .ccflux-logo svg{width:97%;height:97%;min-height:0;overflow:visible;filter:drop-shadow(0 7px 10px rgba(0,0,0,.38)) drop-shadow(0 0 8px rgba(25,200,255,.10))}
+    .logo-title,.year-row{display:none!important}
+    .line{height:1px}
+  </style></head>
+<body>
+
+<div class="ccflux-logo" role="img" aria-label="CC-FLUX 2026 airship logo">
+  <svg viewBox="70 90 700 330" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <defs>
+      <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#ffffff"/>
+        <stop offset="38%" stop-color="#eaf2f8"/>
+        <stop offset="72%" stop-color="#8faabe"/>
+        <stop offset="100%" stop-color="#4f697e"/>
+      </linearGradient>
+
+      <linearGradient id="lower" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0%" stop-color="#263f55"/>
+        <stop offset="50%" stop-color="#48677e"/>
+        <stop offset="100%" stop-color="#152c40"/>
+      </linearGradient>
+
+      <linearGradient id="arc" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#38d4ff"/>
+        <stop offset="55%" stop-color="#13bfff"/>
+        <stop offset="100%" stop-color="#458cff"/>
+      </linearGradient>
+
+      <linearGradient id="window" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#102b42"/>
+        <stop offset="100%" stop-color="#020b12"/>
+      </linearGradient>
+
+      <filter id="shadow" x="-30%" y="-30%" width="160%" height="180%">
+        <feDropShadow dx="0" dy="15" stdDeviation="13" flood-color="#000" flood-opacity=".5"/>
+      </filter>
+
+      <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+        <feGaussianBlur stdDeviation="4" result="b"/>
+        <feMerge>
+          <feMergeNode in="b"/>
+          <feMergeNode in="SourceGraphic"/>
+        </feMerge>
+      </filter>
+    </defs>
+
+    <path d="M190 197 C228 59,445 7,617 101"
+          fill="none" stroke="url(#arc)" stroke-width="14"
+          stroke-linecap="round" filter="url(#glow)"/>
+
+    <path d="M615 330 C548 478,319 493,185 367"
+          fill="none" stroke="url(#arc)" stroke-width="14"
+          stroke-linecap="round" filter="url(#glow)"/>
+
+    <g transform="rotate(-8 400 265)" filter="url(#shadow)">
+      <path d="M174 254 L100 210 L151 205 L216 229 Z"
+            fill="url(#body)" stroke="#d7e6f2" stroke-width="6"/>
+
+      <path d="M181 217 L146 141 L205 159 L240 217 Z"
+            fill="url(#body)" stroke="#d7e6f2" stroke-width="6"/>
+
+      <path d="M185 312 L145 375 L213 360 L248 309 Z"
+            fill="url(#body)" stroke="#d7e6f2" stroke-width="6"/>
+
+      <path d="M125 261
+               C206 178,423 155,620 185
+               C698 197,741 225,747 255
+               C752 286,708 317,627 332
+               C425 370,210 351,125 278
+               C117 271,117 268,125 261 Z"
+            fill="url(#body)" stroke="#f2f8fc" stroke-width="7"/>
+
+      <path d="M125 275
+               C239 324,460 337,690 292
+               C661 321,622 332,554 341
+               C365 365,201 338,125 278 Z"
+            fill="url(#lower)" opacity=".92"/>
+
+      <path d="M147 268 C282 230,500 209,716 243"
+            fill="none" stroke="#708da4" stroke-width="4" opacity=".72"/>
+
+      <path d="M392 332 L510 325 L522 374
+               Q513 398 481 404 L418 400
+               Q393 392 385 370 Z"
+            fill="url(#body)" stroke="#e7f1f7" stroke-width="6"/>
+
+      <g fill="url(#window)" stroke="#99b3c6" stroke-width="2">
+        <rect x="408" y="348" width="19" height="27" rx="3"/>
+        <rect x="433" y="345" width="20" height="28" rx="3"/>
+        <rect x="459" y="343" width="20" height="28" rx="3"/>
+        <rect x="485" y="341" width="19" height="27" rx="3"/>
+      </g>
+
+      <path d="M126 262 L82 280 L127 278"
+            fill="#dfeaf1" stroke="#edf6fb" stroke-width="4"/>
+    </g>
+  </svg>
+
+  <div class="logo-title" aria-hidden="true">
+    <span class="accent">CC-</span><span class="main">FLUX</span>
+  </div>
+
+  <div class="year-row" aria-hidden="true">
+    <span class="line left"></span>
+    <span class="year">2026</span>
+    <span class="line right"></span>
+  </div>
+</div>
+
+</body>
+</html>

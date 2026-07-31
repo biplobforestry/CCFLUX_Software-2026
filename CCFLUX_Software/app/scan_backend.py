@@ -1,0 +1,4823 @@
+"""Background Flight Folder scanning state for the local dashboard."""
+
+from __future__ import annotations
+
+import csv
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+import importlib.util
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Callable, Mapping, Sequence
+
+import pandas as pd
+from uuid import uuid4
+
+from core.configuration import load_detection_configuration
+from core.detector import InputCandidate
+from core.dashboard_time import DashboardTimeState, parse_dashboard_datetime
+from core.enums import DetectionStatus, ProcessingStatus
+from core.flight_project import (
+    LEGACY_PROJECT_FILENAME,
+    PROJECT_FILENAME,
+    FlightProject,
+    FlightProjectStore,
+    InstrumentProjectState,
+)
+from core.gopro_georeference import georeference_captures, public_capture
+from core.flir_georeference import georeference_temperature_records
+from core.instrument_registry import InstrumentRegistry
+from core.logging_manager import LogLevel, ProcessingLogManager
+from .noseboom_statistics_export import NoseboomStatisticsExportManager
+from core.resource_manager import CameraBatchPolicy, GIB, ResourceLimits, ResourceManager
+from core.priority_manager import create_default_priority_queue
+from core.processing_manager import (
+    JobOutcome,
+    ProcessingContext,
+    ProcessingJob,
+    ProcessingScheduler,
+)
+from core.camera_level2 import (
+    level2_capability_snapshot,
+    validate_level2_selection,
+)
+from core.scanner import (
+    FlightFolderScanner,
+    InstrumentCandidate,
+    ScanCancellationToken,
+    ScanProgress,
+    ScanReport,
+)
+from instruments.micasense import MicaSenseLevel1Adapter
+from instruments.flir import FlirLevel1Adapter
+from instruments.gopro import GoProLevel1Adapter
+from core.time_extraction import TimestampExtractor
+
+
+INTEGRATED_PROCESSING_JOB_IDS = frozenset({
+    "noseboom",
+    "miro",
+    "picarro",
+    "opc_hbx4",
+    "opc_hbx5",
+    "partector",
+    "ins_gimbal",
+    "sif",
+    "micasense_quick",
+    "flir_quick",
+    "gopro_quick",
+})
+
+DEFAULT_SIF_OPTIONS: dict[str, object] = {
+    "modes": ["FULL", "FLUO"],
+    "position_mode": "uav_airship",
+    "raw_min_kb": 100.0,
+    "apply_nonlinearity_correction": False,
+    "spectral_shift_correction": False,
+    "drop_unmatched_telemetry": True,
+    "drop_invalid_spectral_rows": False,
+    "altitude_filter": False,
+    "max_position_gap_seconds": 0.2,
+    "static_lat": None,
+    "static_lon": None,
+    "static_alt": None,
+}
+
+
+@dataclass(slots=True)
+class InstrumentScanState:
+    instrument_id: str
+    display_name: str
+    physical_group: str
+    detection_status: DetectionStatus = DetectionStatus.NOT_DETECTED
+    file_count: int = 0
+    confidence: float | None = None
+    candidate_paths: list[str] = field(default_factory=list)
+    ambiguous: bool = False
+    warnings: list[str] = field(default_factory=list)
+    timestamp_warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    utc_start_time: datetime | None = None
+    utc_end_time: datetime | None = None
+    original_start_time: str | None = None
+    original_end_time: str | None = None
+    processing_status: str = "idle"
+    processing_progress: float = 0.0
+    processing_step: str = "Not started"
+    processing_elapsed_seconds: float = 0.0
+    output_files: list[str] = field(default_factory=list)
+    quicklook: dict[str, object] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "instrument_id": self.instrument_id,
+            "display_name": self.display_name,
+            "physical_group": self.physical_group,
+            "detection_status": self.detection_status.value,
+            "file_count": self.file_count,
+            "confidence": self.confidence,
+            "candidate_paths": list(self.candidate_paths),
+            "ambiguous": self.ambiguous,
+            "warnings": list(self.warnings),
+            "timestamp_warnings": list(self.timestamp_warnings),
+            "errors": list(self.errors),
+            "utc_start_time": _iso(self.utc_start_time),
+            "utc_end_time": _iso(self.utc_end_time),
+            "original_start_time": self.original_start_time,
+            "original_end_time": self.original_end_time,
+            "processing_status": self.processing_status,
+            "processing_progress": self.processing_progress,
+            "processing_step": self.processing_step,
+            "processing_elapsed_seconds": self.processing_elapsed_seconds,
+            "output_files": list(self.output_files),
+            "quicklook": dict(self.quicklook),
+        }
+
+
+def _instrument_is_processable(state: InstrumentScanState) -> bool:
+    """Allow scientifically usable warning data while retaining health advisories."""
+    return (
+        state.detection_status in {DetectionStatus.READY, DetectionStatus.WARNING}
+        and not state.ambiguous
+        and not state.errors
+    )
+
+
+class FolderDialog:
+    """Foreground native chooser, injectable for automated tests."""
+
+    @staticmethod
+    def _choose_with_windows_dialog(
+        method_name: str,
+        *,
+        title: str,
+        filetypes: tuple[tuple[str, str], ...] | None = None,
+    ) -> Path | None:
+        escaped_title = title.replace("'", "''")
+        if method_name == "askdirectory":
+            dialog_setup = (
+                "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                f"$dialog.Description = '{escaped_title}'; "
+                "$dialog.ShowNewFolderButton = $true; "
+            )
+            selected_property = "SelectedPath"
+        else:
+            filter_value = "|".join(
+                f"{label}|{pattern}" for label, pattern in (filetypes or ())
+            ).replace("'", "''")
+            dialog_setup = (
+                "$dialog = New-Object System.Windows.Forms.OpenFileDialog; "
+                f"$dialog.Title = '{escaped_title}'; "
+                f"$dialog.Filter = '{filter_value}'; "
+                "$dialog.CheckFileExists = $true; $dialog.Multiselect = $false; "
+            )
+            selected_property = "FileName"
+        script = (
+            "Add-Type @'\n"
+            "using System;\nusing System.Runtime.InteropServices;\n"
+            "public static class CCFluxDialogWindow {\n"
+            "[DllImport(\"user32.dll\", CharSet = CharSet.Auto)] public static extern IntPtr FindWindow(string className, string windowName);\n"
+            "[DllImport(\"user32.dll\", SetLastError = true)] public static extern bool SetWindowPos(IntPtr handle, IntPtr insertAfter, int x, int y, int width, int height, uint flags);\n"
+            "}\n'@; "
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "[System.Windows.Forms.Application]::EnableVisualStyles(); "
+            "$owner = New-Object System.Windows.Forms.Form; "
+            "$owner.TopMost = $true; $owner.ShowInTaskbar = $false; "
+            "$owner.Opacity = 0; $owner.Width = 1; $owner.Height = 1; "
+            "$owner.StartPosition = 'CenterScreen'; "
+            + dialog_setup
+            + "$resizeTimer = New-Object System.Windows.Forms.Timer; "
+            + "$resizeTimer.Interval = 35; "
+            + "$resizeTimer.Add_Tick({ "
+            + "$dialogHandle = [CCFluxDialogWindow]::FindWindow('#32770', $null); "
+            + "if ($dialogHandle -ne [IntPtr]::Zero) { "
+            + "[CCFluxDialogWindow]::SetWindowPos($dialogHandle, [IntPtr]::Zero, 0, 0, 980, 700, 0x0056); "
+            + "$resizeTimer.Stop() } }); "
+            + "$resizeTimer.Start(); "
+            + "$owner.Show(); try { "
+            "$result = $dialog.ShowDialog($owner); "
+            "if ($result -eq [System.Windows.Forms.DialogResult]::OK) { "
+            f"[Console]::Out.Write($dialog.{selected_property})"
+            " } } finally { $resizeTimer.Stop(); $resizeTimer.Dispose(); $dialog.Dispose(); $owner.Close(); $owner.Dispose() }"
+        )
+        run_options: dict[str, object] = {
+            "capture_output": True,
+            "text": True,
+            "check": False,
+        }
+        create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if create_no_window:
+            run_options["creationflags"] = create_no_window
+        startupinfo_type = getattr(subprocess, "STARTUPINFO", None)
+        if startupinfo_type is not None:
+            startupinfo = startupinfo_type()
+            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+            run_options["startupinfo"] = startupinfo
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-STA",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                script,
+            ],
+            **run_options,
+        )
+        if completed.returncode != 0:
+            details = completed.stderr.strip() or "Windows dialog process failed"
+            raise RuntimeError(details)
+        selected = completed.stdout.strip()
+        return Path(selected) if selected else None
+
+    @classmethod
+    def _choose_native(
+        cls,
+        method_name: str,
+        *,
+        title: str,
+        filetypes: tuple[tuple[str, str], ...] | None = None,
+    ) -> Path | None:
+        if sys.platform.startswith("win"):
+            return cls._choose_with_windows_dialog(
+                method_name, title=title, filetypes=filetypes
+            )
+        return cls._choose_with_tkinter(
+            method_name, title=title, filetypes=filetypes
+        )
+
+    @staticmethod
+    def _choose_with_tkinter(
+        method_name: str,
+        *,
+        title: str,
+        filetypes: tuple[tuple[str, str], ...] | None = None,
+    ) -> Path | None:
+        import tkinter
+        from tkinter import filedialog
+
+        root = tkinter.Tk()
+        root.withdraw()
+        try:
+            try:
+                root.attributes("-topmost", True)
+                root.lift()
+                root.update_idletasks()
+                root.update()
+            except (tkinter.TclError, AttributeError):
+                # Some window managers do not expose every foreground hint.
+                pass
+            options: dict[str, object] = {"title": title, "parent": root}
+            if filetypes is not None:
+                options["filetypes"] = filetypes
+            selected = getattr(filedialog, method_name)(**options)
+        finally:
+            root.destroy()
+        return Path(selected) if selected else None
+
+    def choose_flight_folder(self) -> Path | None:
+        if sys.platform == "darwin":
+            script = (
+                'POSIX path of (choose folder with prompt '
+                '"Select the root folder for one Zeppelin flight")'
+            )
+            completed = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if completed.returncode != 0:
+                return None
+            selected = completed.stdout.strip()
+            return Path(selected) if selected else None
+
+        return self._choose_native(
+            "askdirectory",
+            title="Select the root folder for one Zeppelin flight",
+        )
+
+    def choose_output_folder(self) -> Path | None:
+        if sys.platform == "darwin":
+            completed = subprocess.run(
+                ["osascript", "-e", 'POSIX path of (choose folder with prompt "Select the independent CCFLUX Output Folder")'],
+                capture_output=True, text=True, check=False,
+            )
+            selected = completed.stdout.strip() if completed.returncode == 0 else ""
+            return Path(selected) if selected else None
+        return self._choose_native(
+            "askdirectory",
+            title="Select CCFLUX Output Folder",
+        )
+
+    def choose_project_file(self) -> Path | None:
+        return self._choose_native(
+            "askopenfilename",
+            title="Open CC-FLUX Flight Project",
+            filetypes=(
+                ("CC-FLUX project", "*.ccflux"),
+                ("Legacy CC-FLUX JSON project", "flight_project.json"),
+            ),
+        )
+
+    def choose_project_folder(self) -> Path | None:
+        return self._choose_native(
+            "askdirectory",
+            title="Select a folder containing saved CC-FLUX Flight Projects",
+        )
+
+    def choose_camera_folder(self) -> Path | None:
+        if sys.platform == "darwin":
+            completed = subprocess.run(
+                ["osascript", "-e", 'POSIX path of (choose folder with prompt "Select the Camera System data folder for this flight")'],
+                capture_output=True, text=True, check=False,
+            )
+            selected = completed.stdout.strip() if completed.returncode == 0 else ""
+            return Path(selected) if selected else None
+        return self._choose_native(
+            "askdirectory",
+            title="Select the Camera System data folder for this flight",
+        )
+
+
+class DashboardScanBackend:
+    """Own one cancellable scan while exposing thread-safe dashboard snapshots."""
+
+    def __init__(
+        self,
+        application_root: Path,
+        *,
+        folder_dialog: FolderDialog | None = None,
+        logger: ProcessingLogManager | None = None,
+        scanner_factory: Callable[[], FlightFolderScanner] | None = None,
+    ) -> None:
+        self.application_root = Path(application_root)
+        self.folder_dialog = folder_dialog or FolderDialog()
+        self.logger = logger or ProcessingLogManager(
+            self.application_root / "logs" / "processing.jsonl"
+        )
+        self.resource_manager = ResourceManager(logger=self.logger)
+        system = self.resource_manager.system
+        safe_workers = system.safely_available_workers
+        balanced_workers = min(safe_workers, max(1, system.total_logical_cores // 4))
+        balanced_ram_target = min(
+            system.safely_available_ram_bytes,
+            max(1, int(system.total_ram_bytes * 0.25)),
+        )
+        balanced_ram = max(
+            (
+                value * GIB
+                for value in (1, 2, 4, 8, 16, 32, 64, 128)
+                if value * GIB <= balanced_ram_target
+            ),
+            default=min(system.safely_available_ram_bytes, GIB),
+        )
+        self._resource_limits = self.resource_manager.create_limits(
+            balanced_workers,
+            balanced_ram,
+        )
+        self._resources_auto_selected = True
+        self._dialog_lock = threading.Lock()
+        self.processing_queue = create_default_priority_queue()
+        self._scheduler: ProcessingScheduler | None = None
+        self._registry = InstrumentRegistry()
+        self._scanner_factory = scanner_factory or self._default_scanner
+        self._lock = threading.RLock()
+        self._token: ScanCancellationToken | None = None
+        self._scan_tokens: dict[str, ScanCancellationToken] = {}
+        self._scan_channels = {
+            "flight": self._new_scan_channel("flight"),
+            "camera": self._new_scan_channel("camera"),
+        }
+        self._worker: threading.Thread | None = None
+        self._scan_id: str | None = None
+        self._selected_folder: Path | None = None
+        self._selected_camera_folder: Path | None = None
+        self._phase = "idle"
+        self._current_folder: Path | None = None
+        self._current_file: Path | None = None
+        self._current_instrument: str | None = None
+        self._files_scanned = 0
+        self._progress: float | None = None
+        self._detected: tuple[str, ...] = ()
+        self._messages: list[str] = []
+        self._cancelled = False
+        self._error: str | None = None
+        self._report: ScanReport | None = None
+        self._instruments = self._new_instrument_states()
+        self._time_state = DashboardTimeState()
+        self._flight_project: FlightProject | None = None
+        self._selected_output_folder: Path | None = None
+        self._project_store = FlightProjectStore()
+        self._noseboom_straight_settings: dict[str, float] = {}
+        self._noseboom_preview_quicklook: dict[str, object] | None = None
+        self._noseboom_preview_settings: dict[str, float] | None = None
+        self._noseboom_recalculation: dict[str, object] = {
+            "job_id": None,
+            "running": False,
+            "ready": False,
+            "progress": 0.0,
+            "message": "No straight-flight recalculation is running.",
+            "error": None,
+            "result": None,
+            "started_monotonic": None,
+        }
+        self._noseboom_recalculation_thread: threading.Thread | None = None
+        self._noseboom_statistics_export = NoseboomStatisticsExportManager(
+            self.logger, self._save_noseboom_statistics_exports
+        )
+        self._miro_rack_bridge: object | None = None
+        self._hatchbox_view_lock = threading.RLock()
+        self._sif_options = dict(DEFAULT_SIF_OPTIONS)
+
+    def attach_miro_rack_bridge(self, bridge: object) -> None:
+        """Connect shared MIRO/Picarro browser science to queue processing."""
+        with self._lock:
+            self._miro_rack_bridge = bridge
+
+    @staticmethod
+    def _new_scan_channel(
+        source: str, root: Path | None = None, *, running: bool = False
+    ) -> dict[str, object]:
+        return {
+            "source": source,
+            "root": root,
+            "phase": "starting" if running else "idle",
+            "running": running,
+            "current_folder": root,
+            "current_file": None,
+            "current_instrument": None,
+            "files_scanned": 0,
+            "progress": None,
+            "detected_instruments": (),
+            "message": (
+                f"{source.title()} data discovery is starting." if running else ""
+            ),
+            "cancelled": False,
+            "error": None,
+        }
+
+    @staticmethod
+    def _scan_channel_snapshot(channel: dict[str, object]) -> dict[str, object]:
+        return {
+            **channel,
+            "root": str(channel["root"]) if channel["root"] else None,
+            "current_folder": (
+                str(channel["current_folder"])
+                if channel["current_folder"]
+                else None
+            ),
+            "current_file": (
+                str(channel["current_file"]) if channel["current_file"] else None
+            ),
+            "detected_instruments": list(channel["detected_instruments"]),
+        }
+
+    def select_output_folder(self) -> dict[str, object]:
+        self.logger.log(
+            LogLevel.INFO, "output-folder", "Opening Output Folder chooser"
+        )
+        folder = self._choose_folder_once(
+            "output-folder", self.folder_dialog.choose_output_folder
+        )
+        if folder is None:
+            self.logger.log(
+                LogLevel.INFO, "output-folder", "Output Folder selection cancelled"
+            )
+            return {"cancelled": True}
+        output = Path(folder).expanduser().resolve()
+        if not output.is_dir():
+            raise ValueError(f"Output Folder does not exist: {output}")
+        probe = output / f".ccflux-write-test-{uuid4().hex}"
+        try:
+            probe.write_text("test", encoding="utf-8")
+            probe.unlink()
+        except OSError as exc:
+            raise ValueError(f"Output Folder is not writable: {output}") from exc
+        with self._lock:
+            if self._selected_folder:
+                raw = self._selected_folder.resolve(strict=False)
+                if output == raw or output.is_relative_to(raw) or raw.is_relative_to(output):
+                    raise ValueError("Output Folder must be independent from Flight Folder")
+            self._selected_output_folder = output
+            if self._flight_project:
+                self._flight_project.output_folder_path = output
+            project = self._flight_project
+        # Once a flight scan exists, choosing an Output Folder should also
+        # establish a recoverable project checkpoint. Previously this action
+        # created only the log folder, leaving nothing for Load .ccflux to open.
+        if project is not None:
+            self._checkpoint_project()
+        self.logger.log(LogLevel.SUCCESS, "project", "Output Folder selected", file_path=output)
+        return {
+            "cancelled": False,
+            "folder": str(output),
+            "project_file": (
+                str(project.project_file)
+                if project is not None and project.project_file.is_file()
+                else None
+            ),
+            "project_saved": bool(
+                project is not None and project.project_file.is_file()
+            ),
+        }
+
+    def select_and_start(self) -> dict[str, object]:
+        selection = self.select_folders()
+        if selection["cancelled"]:
+            return selection
+        return self.start_scan(
+            Path(str(selection["folder"])),
+            camera_folder=(
+                Path(str(selection["camera_folder"]))
+                if selection.get("camera_folder")
+                else None
+            ),
+        )
+
+    def _choose_folder_once(
+        self, component: str, chooser: Callable[[], Path | None]
+    ) -> Path | None:
+        """Prevent delayed duplicate native pickers from stacking behind the GUI."""
+        if not self._dialog_lock.acquire(blocking=False):
+            raise RuntimeError("A folder selection window is already open")
+        try:
+            self.logger.log(LogLevel.INFO, component, "Opening folder chooser")
+            return chooser()
+        finally:
+            self._dialog_lock.release()
+
+    def select_folders(self) -> dict[str, object]:
+        """Select only the Flight Folder; camera selection is an explicit action."""
+        folder = self._choose_folder_once(
+            "flight-folder", self.folder_dialog.choose_flight_folder
+        )
+        if folder is None:
+            self.logger.log(
+                LogLevel.INFO, "flight-folder", "Flight Folder selection cancelled"
+            )
+            return {"cancelled": True}
+        resolved = Path(folder).expanduser().resolve()
+        with self._lock:
+            self._selected_folder = resolved
+            self._selected_camera_folder = None
+            self._phase = "folder-selected"
+            self._current_folder = None
+            self._current_file = None
+            self._current_instrument = None
+            self._files_scanned = 0
+            self._progress = None
+            self._detected = ()
+            self._messages = [
+                "Flight Folder selected. Click Initial Check to scan files."
+            ]
+            self._error = None
+            self._report = None
+            self._instruments = self._new_instrument_states()
+            self._time_state = DashboardTimeState()
+            self._flight_project = None
+            self._sif_options = dict(DEFAULT_SIF_OPTIONS)
+            self.processing_queue = create_default_priority_queue()
+            self._noseboom_preview_quicklook = None
+            self._noseboom_preview_settings = None
+            self._noseboom_recalculation = {
+                "job_id": None,
+                "running": False,
+                "ready": False,
+                "progress": 0.0,
+                "message": "No straight-flight recalculation is running.",
+                "error": None,
+                "result": None,
+                "started_monotonic": None,
+            }
+            self._noseboom_recalculation_thread = None
+            self._token = None
+            self._scan_tokens = {}
+            self._worker = None
+            self._scan_channels = {
+                "flight": self._new_scan_channel("flight", resolved),
+                "camera": self._new_scan_channel("camera"),
+            }
+            self._scan_channels["flight"]["phase"] = "folder-selected"
+            self._scan_channels["flight"]["message"] = (
+                "Flight Folder selected. Click Initial Check to scan files."
+            )
+            self._scan_channels["camera"]["phase"] = "not_selected"
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "flight-folder",
+            "Flight Folder selected; scanning is waiting for Initial Check",
+            file_path=resolved,
+            processing_step="folder-selected",
+        )
+        return {
+            "cancelled": False,
+            "folder": str(resolved),
+            "camera_folder": None,
+        }
+
+    def select_camera_folder(self) -> dict[str, object]:
+        chooser = getattr(self.folder_dialog, "choose_camera_folder", None)
+        if not callable(chooser):
+            raise RuntimeError("Camera Folder selection is not available")
+        folder = self._choose_folder_once("camera-folder", chooser)
+        if folder is None:
+            self.logger.log(
+                LogLevel.INFO, "camera-folder", "Camera Folder selection cancelled"
+            )
+            return {"cancelled": True}
+        resolved = Path(folder).expanduser().resolve()
+        with self._lock:
+            flight = self._selected_folder
+        if flight and (
+            resolved == flight
+            or resolved.is_relative_to(flight)
+            or flight.is_relative_to(resolved)
+        ):
+            raise ValueError("Camera Folder and Flight Folder must be independent")
+        with self._lock:
+            self._selected_camera_folder = resolved
+            camera_channel = self._new_scan_channel("camera", resolved)
+            camera_channel["phase"] = "folder-selected"
+            camera_channel["message"] = (
+                "Camera Folder selected. Click Initial Check and choose whether "
+                "to include camera scanning."
+            )
+            self._scan_channels["camera"] = camera_channel
+            self._messages.append(
+                "Camera Folder selected; scanning is waiting for Initial Check."
+            )
+            if self._flight_project is not None:
+                self._flight_project.camera_folder_path = resolved
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "camera-folder",
+            "Camera Folder selected; no scan was started",
+            file_path=resolved,
+            processing_step="folder-selected",
+        )
+        return {"cancelled": False, "folder": str(resolved)}
+
+    def start_scan(
+        self,
+        folder: Path,
+        *,
+        camera_folder: Path | None = None,
+        include_camera: bool = True,
+    ) -> dict[str, object]:
+        root = Path(folder).expanduser().resolve()
+        if not root.is_dir():
+            raise ValueError(f"Flight Folder does not exist: {root}")
+        selected_camera_root = (
+            Path(camera_folder).expanduser().resolve()
+            if camera_folder is not None
+            else None
+        )
+        if selected_camera_root is not None:
+            if not selected_camera_root.is_dir():
+                raise ValueError(
+                    f"Camera System Folder does not exist: {selected_camera_root}"
+                )
+            if (
+                selected_camera_root == root
+                or selected_camera_root.is_relative_to(root)
+                or root.is_relative_to(selected_camera_root)
+            ):
+                raise ValueError(
+                    "Flight Folder and Camera System Folder must be independent"
+                )
+        camera_root = selected_camera_root if include_camera else None
+        if camera_root is not None:
+            _assert_directory_responsive(camera_root)
+        with self._lock:
+            if self._worker is not None and self._worker.is_alive():
+                raise RuntimeError("A Flight Folder scan is already running")
+            existing_project = (
+                self._flight_project
+                if self._flight_project is not None
+                and self._flight_project.flight_folder_path.resolve(
+                    strict=False
+                )
+                == root.resolve(strict=False)
+                else None
+            )
+            incremental = bool(
+                existing_project is not None
+                and existing_project.completed_jobs
+            )
+            self._scan_id = uuid4().hex
+            self._selected_folder = root
+            self._selected_camera_folder = selected_camera_root
+            self._phase = "starting"
+            self._current_folder = root
+            self._current_file = None
+            self._current_instrument = None
+            self._files_scanned = 0
+            self._progress = None
+            self._detected = ()
+            self._messages = [
+                (
+                    "Incremental scan is starting. Previously processed "
+                    "instruments will remain completed and skipped."
+                    if incremental
+                    else "Flight Folder selected; discovery is starting."
+                )
+            ]
+            self._cancelled = False
+            self._error = None
+            self._report = None
+            if not incremental:
+                self._instruments = self._new_instrument_states()
+            self._time_state = DashboardTimeState()
+            if existing_project is not None:
+                self._flight_project = existing_project
+                self._flight_project.camera_folder_path = selected_camera_root
+                self._flight_project.cpu_allocation = (
+                    self._resource_limits.worker_count
+                )
+                self._flight_project.ram_allocation_bytes = (
+                    self._resource_limits.memory_bytes
+                )
+                if self._selected_output_folder is not None:
+                    self._flight_project.output_folder_path = (
+                        self._selected_output_folder
+                    )
+            else:
+                self._flight_project = FlightProject(
+                    flight_id=root.name,
+                    flight_folder_path=root,
+                    output_folder_path=self.application_root / "outputs",
+                    camera_folder_path=selected_camera_root,
+                    cpu_allocation=self._resource_limits.worker_count,
+                    ram_allocation_bytes=self._resource_limits.memory_bytes,
+                )
+            self._sync_project_queue_state()
+            flight_token = ScanCancellationToken()
+            camera_token = ScanCancellationToken() if camera_root is not None else None
+            self._token = flight_token
+            self._scan_tokens = {"flight": flight_token}
+            if camera_token is not None:
+                self._scan_tokens["camera"] = camera_token
+            self._scan_channels = {
+                "flight": self._new_scan_channel("flight", root, running=True),
+                "camera": self._new_scan_channel(
+                    "camera", camera_root, running=camera_root is not None
+                ),
+            }
+            if camera_root is None:
+                if selected_camera_root is not None:
+                    self._scan_channels["camera"] = self._new_scan_channel(
+                        "camera", selected_camera_root
+                    )
+                    self._scan_channels["camera"]["phase"] = "folder-selected"
+                    self._scan_channels["camera"]["message"] = (
+                        "Camera Folder retained but excluded from this scan."
+                    )
+                else:
+                    self._scan_channels["camera"]["phase"] = "not_selected"
+            worker = threading.Thread(
+                target=self._run_scan,
+                args=(root, camera_root, flight_token, camera_token),
+                name=f"ccflux-scan-{self._scan_id[:8]}",
+                daemon=True,
+            )
+            self._worker = worker
+            worker.start()
+            scan_id = self._scan_id
+        self.logger.log(
+            LogLevel.INFO,
+            "flight-scanner",
+            (
+                "Flight Folder scan started with one bounded discovery worker; "
+                "live GUI progress is throttled to 10 updates/s after the first "
+                "five files; "
+                f"processing allocation is {self._resource_limits.worker_count} CPU "
+                f"worker(s) and {self._resource_limits.memory_bytes // GIB} GiB RAM"
+            ),
+            file_path=root,
+            processing_step="discovery",
+        )
+        return {
+            "cancelled": False,
+            "scan_id": scan_id,
+            "folder": str(root),
+            "camera_folder": str(camera_root) if camera_root else None,
+            "selected_camera_folder": (
+                str(selected_camera_root) if selected_camera_root else None
+            ),
+        }
+
+    def cancel(self, source: str | None = None) -> bool:
+        if source not in {None, "flight", "camera", "all"}:
+            raise ValueError("Scan source must be 'flight' or 'camera'")
+        with self._lock:
+            targets = (
+                ("flight", "camera")
+                if source in {None, "all"}
+                else (source,)
+            )
+            cancelled_sources = []
+            for target in targets:
+                token = self._scan_tokens.get(target)
+                channel = self._scan_channels[target]
+                if token is not None and bool(channel["running"]):
+                    token.cancel()
+                    channel["message"] = "Cancellation requested; stopping safely."
+                    cancelled_sources.append(target)
+            if not cancelled_sources:
+                return False
+            self._messages.append(
+                "Cancellation requested for " + ", ".join(cancelled_sources) + " scan."
+            )
+        for target in cancelled_sources:
+            self.logger.cancelled_job(f"{self._scan_id or 'scan'}-{target}")
+        return True
+
+    def reset_system(self) -> dict[str, object]:
+        """Return the dashboard to a clean state without touching raw data or outputs."""
+        with self._lock:
+            tokens = tuple(self._scan_tokens.values())
+            worker = self._worker
+            scheduler = self._scheduler
+        for token in tokens:
+            token.cancel()
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=5)
+        if scheduler is not None:
+            scheduler.shutdown(wait=False, cancel_pending=True)
+        with self._lock:
+            self.processing_queue = create_default_priority_queue()
+            self._scheduler = None
+            self._token = None
+            self._scan_tokens = {}
+            self._scan_channels = {
+                "flight": self._new_scan_channel("flight"),
+                "camera": self._new_scan_channel("camera"),
+            }
+            self._worker = None
+            self._scan_id = None
+            self._selected_folder = None
+            self._selected_camera_folder = None
+            self._selected_output_folder = None
+            self._phase = "idle"
+            self._current_folder = None
+            self._current_file = None
+            self._current_instrument = None
+            self._files_scanned = 0
+            self._progress = None
+            self._detected = ()
+            self._messages = ["System reset completed. No raw data or output files were changed."]
+            self._cancelled = False
+            self._error = None
+            self._report = None
+            self._instruments = self._new_instrument_states()
+            self._time_state = DashboardTimeState()
+            self._flight_project = None
+        self.logger.log(
+            LogLevel.WARNING,
+            "application",
+            "Dashboard system state reset by user; files were not modified",
+            processing_step="system-reset",
+        )
+        return self.snapshot()
+
+    def snapshot(self) -> dict[str, object]:
+        with self._lock:
+            return {
+                "scan_id": self._scan_id,
+                "selected_folder": (
+                    str(self._selected_folder) if self._selected_folder else None
+                ),
+                "selected_output_folder": (
+                    str(self._selected_output_folder)
+                    if self._selected_output_folder else None
+                ),
+                "selected_camera_folder": (
+                    str(self._selected_camera_folder)
+                    if self._selected_camera_folder else None
+                ),
+                "flight_id": (
+                    self._flight_project.flight_id if self._flight_project else
+                    self._selected_folder.name if self._selected_folder else None
+                ),
+                "project_file": (
+                    str(self._flight_project.project_file)
+                    if self._flight_project else None
+                ),
+                "project_saved": bool(
+                    self._flight_project
+                    and (
+                        self._flight_project.project_file.is_file()
+                        or (
+                            self._flight_project.flight_output_root
+                            / "project"
+                            / LEGACY_PROJECT_FILENAME
+                        ).is_file()
+                    )
+                ),
+                "phase": self._phase,
+                "running": any(
+                    bool(channel["running"])
+                    for channel in self._scan_channels.values()
+                ),
+                "current_folder": (
+                    str(self._current_folder) if self._current_folder else None
+                ),
+                "current_file": (
+                    str(self._current_file) if self._current_file else None
+                ),
+                "files_scanned": self._files_scanned,
+                "progress": self._progress,
+                "detected_instruments": list(self._detected),
+                "current_instrument": self._current_instrument or (
+                    self._instruments[self._detected[-1]].display_name
+                    if self._detected
+                    else None
+                ),
+                "messages": list(self._messages[-100:]),
+                "cancelled": self._cancelled,
+                "error": self._error,
+                "instruments": {
+                    key: value.to_dict() for key, value in self._instruments.items()
+                },
+                "summary": self._summary(),
+                "time_filter": self._time_state.to_dict(),
+                "resources": self._resource_snapshot(),
+                "processing_queue": self._queue_snapshot(),
+                "level2_capabilities": level2_capability_snapshot(),
+                "sif_options": dict(self._sif_options),
+                "scans": {
+                    source: self._scan_channel_snapshot(channel)
+                    for source, channel in self._scan_channels.items()
+                },
+                "camera_scan_ready": (
+                    self._scan_channels["camera"]["phase"] == "complete"
+                    and not self._scan_channels["camera"]["cancelled"]
+                    and self._scan_channels["camera"]["error"] is None
+                ),
+            }
+
+    def visible_logs(self) -> list[dict[str, object]]:
+        return [record.to_dict() for record in self.logger.records()]
+
+    def clear_visible_logs(self) -> None:
+        self.logger.clear_visible()
+
+    def save_project(self) -> Path:
+        with self._lock:
+            if self._flight_project is None or self._selected_folder is None:
+                raise ValueError("Select and scan a Flight Folder before saving")
+            if self._selected_output_folder is None:
+                raise ValueError("Select an Output Folder before saving")
+            self._flight_project.output_folder_path = self._selected_output_folder
+            self._sync_project_queue_state()
+            self._sync_project_time_state()
+            self._flight_project.raw_file_fingerprints = (
+                self._project_store.capture_raw_file_fingerprints(
+                    self._flight_project
+                )
+            )
+            self._persist_project_logs()
+            project_file = self._project_store.save_project(
+                self._flight_project, overwrite=True
+            )
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "project",
+            "Flight Project saved",
+            file_path=project_file,
+            processing_step="manual-save",
+        )
+        self._persist_project_logs()
+        return project_file
+
+    def select_project_folder(self) -> dict[str, object]:
+        chooser = getattr(self.folder_dialog, "choose_project_folder", None)
+        if not callable(chooser):
+            raise RuntimeError("Saved-project folder selection is not available")
+        folder = self._choose_folder_once("project-folder", chooser)
+        if folder is None:
+            self.logger.log(
+                LogLevel.INFO, "project", "Saved-project folder selection cancelled"
+            )
+            return {"cancelled": True}
+        return self.discover_saved_projects(Path(folder))
+
+    def discover_saved_projects(self, folder: Path) -> dict[str, object]:
+        root = Path(folder).expanduser().resolve()
+        if not root.is_dir():
+            raise ValueError(f"Saved-project search folder does not exist: {root}")
+        ignored = {
+            ".git", ".pytest_cache", "__pycache__", "backups", "verification",
+            "node_modules",
+        }
+        project_files: list[Path] = []
+        inaccessible: list[str] = []
+
+        def record_walk_error(error: OSError) -> None:
+            inaccessible.append(str(getattr(error, "filename", "") or error))
+
+        root_depth = len(root.parts)
+        for current, directories, filenames in os.walk(
+            root, topdown=True, onerror=record_walk_error, followlinks=False
+        ):
+            current_path = Path(current)
+            depth = len(current_path.parts) - root_depth
+            directories[:] = [
+                name for name in directories
+                if name.casefold() not in ignored
+                and not name.startswith(".")
+                and depth < 8
+            ]
+            selected_name = (
+                PROJECT_FILENAME
+                if PROJECT_FILENAME in filenames
+                else (
+                    LEGACY_PROJECT_FILENAME
+                    if LEGACY_PROJECT_FILENAME in filenames
+                    else None
+                )
+            )
+            if selected_name is not None:
+                project_files.append(current_path / selected_name)
+                if len(project_files) >= 500:
+                    break
+
+        projects: list[dict[str, object]] = []
+        invalid = 0
+        for project_file in project_files:
+            try:
+                if project_file.stat().st_size > 10 * 1024 * 1024:
+                    raise ValueError("project file exceeds 10 MB")
+                payload = json.loads(project_file.read_text(encoding="utf-8"))
+                flight_id = str(payload.get("flight_id") or "").strip()
+                if not flight_id:
+                    raise ValueError("flight_id is missing")
+                projects.append(
+                    {
+                        "flight_id": flight_id,
+                        "project_file": str(project_file.resolve()),
+                        "relative_path": str(project_file.relative_to(root)),
+                        "updated_at_utc": payload.get("updated_at_utc"),
+                        "created_at_utc": payload.get("created_at_utc"),
+                        "flight_folder_path": payload.get("flight_folder_path"),
+                        "output_folder_path": payload.get("output_folder_path"),
+                    }
+                )
+            except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+                invalid += 1
+                self.logger.log(
+                    LogLevel.WARNING,
+                    "project",
+                    f"Ignoring invalid saved-project candidate: {exc}",
+                    file_path=project_file,
+                    processing_step="project-discovery",
+                )
+        projects.sort(
+            key=lambda item: (
+                str(item.get("updated_at_utc") or ""),
+                str(item.get("flight_id") or "").casefold(),
+            ),
+            reverse=True,
+        )
+        self.logger.log(
+            LogLevel.INFO,
+            "project",
+            (
+                f"Saved-project search found {len(projects)} valid project(s) "
+                f"below {root}"
+            ),
+            file_path=root,
+            processing_step="project-discovery",
+        )
+        return {
+            "cancelled": False,
+            "folder": str(root),
+            "projects": projects,
+            "valid_count": len(projects),
+            "invalid_count": invalid,
+            "inaccessible_count": len(inaccessible),
+            "truncated": len(project_files) >= 500,
+        }
+
+    def open_project(self, project_file: Path | None = None) -> dict[str, object]:
+        if project_file is None:
+            self.logger.log(
+                LogLevel.INFO, "project", "Opening Flight Project file chooser"
+            )
+            chooser = getattr(self.folder_dialog, "choose_project_file", None)
+            project_file = chooser() if callable(chooser) else None
+        if project_file is None:
+            self.logger.log(LogLevel.INFO, "project", "Open Project cancelled")
+            return {"cancelled": True}
+        opened = self._project_store.open_project(Path(project_file))
+        project = opened.project
+        restored_queue = create_default_priority_queue()
+        saved_priority = list(project.processing_priority)
+        if (
+            saved_priority
+            and len(saved_priority) == len(set(saved_priority))
+            and set(saved_priority)
+            == {job.job_id for job in restored_queue.ordered()}
+        ):
+            restored_queue.reorder(saved_priority)
+        completed_instruments: set[str] = set()
+        for snapshot in restored_queue.ordered():
+            job = restored_queue.get(snapshot.job_id)
+            completed = (
+                job.job_id in project.completed_jobs
+                or job.instrument_id in project.completed_jobs
+            )
+            if completed:
+                job.status = ProcessingStatus.COMPLETE
+                job.enabled = False
+                job.progress = 100.0
+                job.current_step = "Previously processed — skipped by default"
+                completed_instruments.add(job.instrument_id)
+            elif job.job_id in project.failed_jobs:
+                job.status = ProcessingStatus.FAILED
+                job.enabled = False
+                job.current_step = "Previous processing failed"
+            elif job.job_id in project.cancelled_jobs:
+                job.status = ProcessingStatus.CANCELLED
+                job.enabled = False
+                job.current_step = "Previous processing was cancelled"
+            elif (
+                not job.detailed
+                and job.instrument_id in project.enabled_instruments
+            ):
+                restored_queue.set_enabled(job.job_id, True)
+        instruments = self._new_instrument_states()
+        for instrument_id, saved in project.detected_instruments.items():
+            state = instruments[instrument_id]
+            state.detection_status = DetectionStatus.READY
+            state.file_count = len(saved.selected_source_files)
+            state.confidence = saved.detection_confidence
+            restored_candidates = (
+                saved.selected_source_folders or saved.selected_source_files
+            )
+            state.candidate_paths = [str(value) for value in restored_candidates]
+            state.ambiguous = bool(saved.ambiguous_candidates)
+            state.timestamp_warnings = list(saved.timestamp_warnings)
+            state.utc_start_time = saved.utc_start_time
+            state.utc_end_time = saved.utc_end_time
+            state.processing_status = (
+                "complete" if instrument_id in completed_instruments else "idle"
+            )
+            if instrument_id in completed_instruments:
+                state.processing_progress = 100.0
+                state.processing_step = "Previously processed — skipped by default"
+            state.output_files = [str(value) for value in saved.output_locations]
+        quicklook_file = project.output_locations.get("noseboom_quicklook")
+        if quicklook_file and Path(quicklook_file).is_file():
+            try:
+                instruments["noseboom"].quicklook = json.loads(
+                    Path(quicklook_file).read_text(encoding="utf-8")
+                )
+                instruments["noseboom"].processing_status = "complete"
+                self._noseboom_straight_settings = dict(
+                    instruments["noseboom"].quicklook.get("straight_settings", {})
+                )
+            except (OSError, json.JSONDecodeError) as exc:
+                instruments["noseboom"].warnings.append(
+                    f"Saved Noseboom browser state could not be loaded: {exc}"
+                )
+        gopro_quicklook = project.output_locations.get("gopro_quicklook")
+        if gopro_quicklook and Path(gopro_quicklook).is_file():
+            try:
+                instruments["gopro"].quicklook = json.loads(
+                    Path(gopro_quicklook).read_text(encoding="utf-8")
+                )
+                instruments["gopro"].processing_status = "complete"
+            except (OSError, json.JSONDecodeError) as exc:
+                instruments["gopro"].warnings.append(
+                    f"Saved GoPro browser state could not be loaded: {exc}"
+                )
+        flir_browser = project.output_locations.get("flir_browser")
+        if flir_browser and Path(flir_browser).is_file():
+            try:
+                instruments["flir"].quicklook = json.loads(
+                    Path(flir_browser).read_text(encoding="utf-8")
+                )
+                instruments["flir"].processing_status = "complete"
+            except (OSError, json.JSONDecodeError) as exc:
+                instruments["flir"].warnings.append(
+                    f"Saved FLIR browser state could not be loaded: {exc}"
+                )
+        sif_browser = project.output_locations.get("sif_browser")
+        if sif_browser and Path(sif_browser).is_file():
+            try:
+                instruments["sif"].quicklook = json.loads(
+                    Path(sif_browser).read_text(encoding="utf-8")
+                )
+                instruments["sif"].processing_status = "complete"
+            except (OSError, json.JSONDecodeError) as exc:
+                instruments["sif"].warnings.append(
+                    f"Saved SIF browser state could not be loaded: {exc}"
+                )
+        ranges = {
+            instrument_id: (
+                saved.utc_start_time,
+                saved.utc_end_time,
+                saved.timestamp_warnings,
+            )
+            for instrument_id, saved in project.detected_instruments.items()
+        }
+        time_state = DashboardTimeState.from_instrument_ranges(
+            ranges, analysis_anchor_id="noseboom"
+        )
+        time_state.display_timezone = project.display_timezone
+        if project.selected_analysis_start and project.selected_analysis_end:
+            time_state.selected_analysis_start = project.selected_analysis_start
+            time_state.selected_analysis_end = project.selected_analysis_end
+        restored_report = None
+        if opened.reused_saved_scan:
+            restored_candidates: list[InstrumentCandidate] = []
+            for instrument_id, saved in project.detected_instruments.items():
+                files = tuple(Path(value) for value in saved.selected_source_files)
+                folders = tuple(Path(value) for value in saved.selected_source_folders)
+                candidate_path = (
+                    folders[0] if folders else
+                    files[0].parent if files else
+                    project.flight_folder_path
+                )
+                restored_candidates.append(
+                    InstrumentCandidate(
+                        instrument_id=instrument_id,
+                        candidate_path=candidate_path,
+                        matched_rules=("restored_project",),
+                        confidence_score=saved.detection_confidence or 1.0,
+                        matching_file_count=len(files),
+                        sample_matching_files=files[:20],
+                        warnings=tuple(saved.timestamp_warnings),
+                        errors=(),
+                        ambiguous=bool(saved.ambiguous_candidates),
+                        matching_files=files,
+                    )
+                )
+            restored_report = ScanReport(
+                root=project.flight_folder_path,
+                candidates=tuple(restored_candidates),
+                files_scanned=sum(
+                    len(saved.selected_source_files)
+                    for saved in project.detected_instruments.values()
+                ),
+                folders_scanned=0,
+                inaccessible_path_count=0,
+                malformed_file_count=0,
+                warnings=(),
+                errors=(),
+                cancelled=False,
+            )
+        with self._lock:
+            self._flight_project = project
+            self._sif_options = {
+                **DEFAULT_SIF_OPTIONS,
+                **project.instrument_options.get("sif", {}),
+            }
+            self.processing_queue = restored_queue
+            self._scheduler = None
+            self._selected_folder = project.flight_folder_path
+            self._selected_camera_folder = project.camera_folder_path
+            self._selected_output_folder = project.output_folder_path
+            self._instruments = instruments
+            self._detected = tuple(project.detected_instruments)
+            self._time_state = time_state
+            self._phase = "complete" if opened.reused_saved_scan else "project_loaded"
+            self._report = restored_report
+            self._files_scanned = restored_report.files_scanned if restored_report else 0
+            self._messages = [
+                "Saved Flight Project loaded.",
+                *(
+                    [] if opened.reused_saved_scan else
+                    ["Raw files changed or are missing; rescan before new processing."]
+                ),
+            ]
+            self._scan_channels = {
+                "flight": self._new_scan_channel("flight", project.flight_folder_path),
+                "camera": self._new_scan_channel("camera", project.camera_folder_path),
+            }
+            self._scan_channels["flight"]["phase"] = "complete"
+            self._scan_channels["camera"]["phase"] = (
+                "complete" if project.camera_folder_path else "not_selected"
+            )
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "project",
+            "Saved Flight Project loaded",
+            file_path=Path(project_file),
+            processing_step="project-open",
+        )
+        return {
+            "cancelled": False,
+            "project_file": str(project_file),
+            "reused_saved_scan": opened.reused_saved_scan,
+            "rescan_required": opened.rescan_required,
+            "state": self.snapshot(),
+        }
+
+    def noseboom_view(self) -> dict[str, object]:
+        with self._lock:
+            state = self._instruments["noseboom"]
+            project = self._flight_project
+            return {
+                "ready": bool(state.quicklook.get("available")),
+                "flight_id": project.flight_id if project else None,
+                "project_file": str(project.project_file) if project else None,
+                "data": dict(state.quicklook),
+                "exports": list(state.output_files),
+                "processing_status": state.processing_status,
+                "processing_step": state.processing_step,
+                "statistics_export": self._noseboom_statistics_export.snapshot(),
+                "statistics_exports": [
+                    {
+                        "name": Path(value).name,
+                        "url": (
+                            "/api/noseboom/statistics/export/download/"
+                            + Path(value).name
+                        ),
+                    }
+                    for value in state.output_files
+                    if Path(value).suffix.casefold() in {".pdf", ".svg", ".png"}
+                ],
+            }
+
+    def gopro_view(self) -> dict[str, object]:
+        """Return the time-corrected GoPro capture map for the active project."""
+        with self._lock:
+            state = self._instruments["gopro"]
+            project = self._flight_project
+            payload = dict(state.quicklook)
+            processing_status = state.processing_status
+            processing_step = state.processing_step
+            noseboom_points = tuple(
+                self._instruments["noseboom"].quicklook.get("points", ())
+            )
+        if (
+            not payload.get("available")
+            and payload.get("inventory")
+            and noseboom_points
+        ):
+            captures = georeference_captures(payload["inventory"], noseboom_points)
+            if captures:
+                payload["captures"] = captures
+                payload["available"] = True
+                payload["reason"] = None
+                payload["matched_count"] = len(captures)
+                payload["unmatched_count"] = max(
+                    0, int(payload.get("image_count", 0)) - len(captures)
+                )
+                with self._lock:
+                    state.quicklook = payload
+                    state.processing_status = "complete"
+                    state.processing_progress = 100.0
+                    state.processing_step = (
+                        f"GoPro map ready with {len(captures)} capture locations"
+                    )
+                    stale_warning = (
+                        "No GoPro image timestamp could be matched to processed "
+                        "Noseboom navigation within 2.5 seconds."
+                    )
+                    state.warnings = [
+                        warning for warning in state.warnings
+                        if warning != stale_warning
+                    ]
+                    job = self.processing_queue.get("gopro_quick")
+                    if job.status is ProcessingStatus.WARNING:
+                        job.status = ProcessingStatus.COMPLETE
+                        job.progress = 100.0
+                        job.current_step = state.processing_step
+                        job.error = None
+                    self._sync_project_queue_state()
+                if project is not None:
+                    quicklook_path = project.output_locations.get("gopro_quicklook")
+                    if quicklook_path:
+                        Path(quicklook_path).write_text(
+                            json.dumps(
+                                payload, ensure_ascii=False, indent=2, allow_nan=False
+                            )
+                            + "\n",
+                            encoding="utf-8",
+                        )
+        captures = [
+            public_capture(item)
+            for item in payload.get("captures", [])
+            if isinstance(item, dict)
+        ]
+        return {
+            "ready": bool(payload.get("available")),
+            "flight_id": project.flight_id if project else None,
+            "project_file": str(project.project_file) if project else None,
+            "processing_status": processing_status,
+            "processing_step": processing_step,
+            "data": {
+                key: value for key, value in payload.items()
+                if key not in {"captures", "inventory"}
+            } | {"captures": captures},
+        }
+
+    def gopro_image_file(self, capture_id: str) -> Path:
+        """Resolve a capture image only when it belongs to the active Camera Folder."""
+        with self._lock:
+            project = self._flight_project
+            captures = tuple(self._instruments["gopro"].quicklook.get("captures", ()))
+        capture = next(
+            (
+                item for item in captures
+                if isinstance(item, dict)
+                and str(item.get("capture_id")) == str(capture_id)
+            ),
+            None,
+        )
+        if capture is None:
+            raise ValueError("Unknown GoPro capture")
+        camera_root = project.camera_folder_path.resolve() if project and project.camera_folder_path else None
+        relative_file = Path(str(capture.get("source_file", "")))
+        path = (
+            (camera_root / relative_file).resolve()
+            if camera_root is not None and not relative_file.is_absolute()
+            else relative_file.resolve()
+        )
+        if (
+            camera_root is None
+            or not path.is_relative_to(camera_root)
+            or path.suffix.casefold() not in {".jpg", ".jpeg", ".png"}
+            or not path.is_file()
+        ):
+            raise ValueError("GoPro image is unavailable")
+        return path
+
+    def flir_view(self) -> dict[str, object]:
+        """Return saved FLIR acquisition and temperature-map products."""
+        with self._lock:
+            state = self._instruments["flir"]
+            project = self._flight_project
+            payload = dict(state.quicklook)
+            coverage = self._time_state.instruments.get("flir")
+            selected_start = self._time_state.selected_analysis_start
+            selected_end = self._time_state.selected_analysis_end
+            if payload.get("available"):
+                message = (
+                    "FLIR acquisition plots, gap diagnostics, and thermal "
+                    "gallery are ready. Configure FLIR Level 2 in the Main GUI "
+                    "to create temperature plots and the Noseboom-matched map."
+                    if not payload.get("temperature_available")
+                    else
+                    "FLIR acquisition plots, radiometric temperature plots, "
+                    "thermal gallery, and Noseboom-matched map are ready."
+                )
+            elif coverage is not None and coverage.outside_selected_range:
+                message = (
+                    "FLIR UTC data "
+                    f"{_iso(coverage.raw_start)} — {_iso(coverage.raw_end)} "
+                    "do not overlap the selected Noseboom flight interval "
+                    f"{_iso(selected_start)} — {_iso(selected_end)}. "
+                    "Select the FLIR export from this flight."
+                )
+            elif _instrument_is_processable(state):
+                message = (
+                    "FLIR scan is ready. Select FLIR metadata quick check "
+                    "and Start Processing in the Main GUI."
+                )
+            else:
+                message = "Complete FLIR Initial Check in the Main GUI first."
+            return {
+                "ready": bool(payload.get("available")),
+                "temperature_ready": bool(
+                    payload.get("temperature_available")
+                ),
+                "flight_id": project.flight_id if project else None,
+                "project_file": str(project.project_file) if project else None,
+                "processing_status": state.processing_status,
+                "processing_step": state.processing_step,
+                "message": message,
+                "data": payload,
+            }
+
+    def flir_asset_file(self, name: str) -> Path:
+        """Resolve a generated FLIR browser asset below the active output root."""
+        if not name or Path(name).name != name:
+            raise ValueError("Invalid FLIR asset name")
+        with self._lock:
+            state = self._instruments["flir"]
+            project = self._flight_project
+            files = tuple(Path(value) for value in state.output_files)
+        if project is None:
+            raise ValueError("No active Flight Project")
+        output_root = project.flight_output_root.resolve()
+        match = next(
+            (
+                path.resolve()
+                for path in files
+                if path.name == name and path.is_file()
+            ),
+            None,
+        )
+        if (
+            match is None
+            or not match.is_relative_to(output_root)
+            or match.suffix.casefold() not in {".png", ".csv", ".json"}
+        ):
+            raise ValueError("FLIR asset is unavailable")
+        return match
+
+    def log_flir_view_event(self, message: str) -> None:
+        self.logger.log(
+            LogLevel.INFO,
+            "flir-view",
+            message or "FLIR browser interaction",
+            instrument="flir",
+            processing_step="browser-interaction",
+        )
+        self._persist_project_logs()
+
+    def log_gopro_view_event(self, message: str) -> None:
+        self.logger.log(
+            LogLevel.INFO,
+            "gopro-view",
+            message or "GoPro browser interaction",
+            instrument="gopro",
+            processing_step="browser-interaction",
+        )
+        self._persist_project_logs()
+
+    def hatchbox_view(self, page: str) -> dict[str, object]:
+        """Return a saved, precomputed Hatchbox instrument browser payload."""
+        normalized = page.casefold()
+        if normalized not in {"opc", "partector", "ins_gimbal", "sif"}:
+            raise ValueError(f"Unknown Hatchbox page: {page}")
+        key = {
+            "opc": "opc_browser",
+            "partector": "partector_browser",
+            "ins_gimbal": "ins_gimbal_browser",
+            "sif": "sif_browser",
+        }[normalized]
+        with self._lock:
+            project = self._flight_project
+            path = project.output_locations.get(key) if project else None
+            instrument_ids = {
+                "opc": ("opc_hbx4", "opc_hbx5"),
+                "partector": ("partector",),
+                "ins_gimbal": ("ins_gimbal",),
+                "sif": ("sif",),
+            }[normalized]
+            exports = [
+                value
+                for instrument_id in instrument_ids
+                for value in self._instruments[instrument_id].output_files
+            ]
+            status = {
+                instrument_id: {
+                    "processing_status": self._instruments[instrument_id].processing_status,
+                    "processing_step": self._instruments[instrument_id].processing_step,
+                    "processing_progress": self._instruments[instrument_id].processing_progress,
+                }
+                for instrument_id in instrument_ids
+            }
+            sif_state = self._instruments["sif"]
+            sif_coverage = self._time_state.instruments.get("sif")
+            sif_scan_ready = (
+                normalized == "sif"
+                and _instrument_is_processable(sif_state)
+                and sif_coverage is not None
+                and not sif_coverage.outside_selected_range
+                and (sif_coverage.availability_percentage or 0) > 0
+            )
+        if path is None or not Path(path).is_file():
+            return {
+                "ready": False,
+                "flight_id": project.flight_id if project else None,
+                "message": {
+                    "opc": "Process both OPC HBX-4 and HBX-5 from the Main GUI first.",
+                    "partector": "Process Partector Pro from the Main GUI first.",
+                    "ins_gimbal": "Process INS Gimbal from the Main GUI first.",
+                    "sif": (
+                        "SIF / FLOX scan is ready. Select Include and Start "
+                        "Processing in the Main GUI."
+                        if sif_scan_ready else
+                        "Configure and process SIF / FLOX from the Main GUI first."
+                    ),
+                }[normalized],
+                "status": status,
+                "exports": exports,
+                "options": dict(self._sif_options) if normalized == "sif" else None,
+            }
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            self.logger.capture_exception(
+                "hatchbox-view", f"Saved {normalized} browser payload could not be read",
+                exc, processing_step="browser-load", file_path=Path(path),
+            )
+            return {
+                "ready": False,
+                "flight_id": project.flight_id if project else None,
+                "message": f"Saved {normalized} browser data is unreadable: {exc}",
+                "status": status,
+                "exports": exports,
+            }
+        return {
+            "ready": bool(data.get("available")),
+            "flight_id": project.flight_id if project else data.get("flight_id"),
+            "project_file": str(project.project_file) if project else None,
+            "data": data,
+            "status": status,
+            "exports": exports,
+            "options": dict(self._sif_options) if normalized == "sif" else None,
+        }
+
+    def log_hatchbox_view_event(self, page: str, message: str) -> None:
+        self.logger.log(
+            LogLevel.INFO, "hatchbox-view", message,
+            instrument=(page.casefold() if page.casefold() in {"partector", "ins_gimbal", "sif"} else None),
+            processing_step="browser-interaction",
+        )
+        self._persist_project_logs()
+
+    def _publish_hatchbox_browser(
+        self, project: FlightProject, instrument_id: str, source: Path
+    ) -> Path:
+        from instruments.hatchbox_payload import write_json_atomic
+
+        payload = json.loads(Path(source).read_text(encoding="utf-8"))
+        name = (
+            "partector_browser.json"
+            if instrument_id == "partector"
+            else f"{instrument_id}_browser.json"
+        )
+        target = project.flight_output_root / "quicklooks" / name
+        write_json_atomic(target, payload)
+        key = "partector_browser" if instrument_id == "partector" else f"{instrument_id}_browser"
+        with self._lock:
+            project.output_locations[key] = target
+            state = self._instruments[instrument_id]
+            if str(target) not in state.output_files:
+                state.output_files.append(str(target))
+            saved = project.detected_instruments.get(instrument_id)
+            if saved is not None and target not in saved.output_locations:
+                saved.output_locations.append(target)
+            if instrument_id == "partector":
+                project.output_locations["partector_browser"] = target
+        self.logger.log(
+            LogLevel.SUCCESS, "hatchbox-view",
+            f"{instrument_id} responsive browser payload saved",
+            instrument=instrument_id, file_path=target,
+            processing_step="browser-payload",
+        )
+        return target
+
+    def update_sif_options(
+        self, request: Mapping[str, object] | None
+    ) -> dict[str, object]:
+        """Validate and persist operator-controlled SIF scientific options."""
+        request = request or {}
+        modes = [
+            str(value).upper()
+            for value in request.get("modes", self._sif_options["modes"])
+        ]
+        modes = list(dict.fromkeys(mode for mode in modes if mode in {"FULL", "FLUO"}))
+        if not modes:
+            raise ValueError("Select at least one SIF mode: FULL or FLUO")
+        position_mode = str(
+            request.get("position_mode", self._sif_options["position_mode"])
+        )
+        if position_mode not in {"uav_airship", "tower"}:
+            raise ValueError("SIF position mode must be UAV/Airship or Tower")
+        gap = float(
+            request.get(
+                "max_position_gap_seconds",
+                self._sif_options["max_position_gap_seconds"],
+            )
+        )
+        if not 0.01 <= gap <= 10:
+            raise ValueError("SIF maximum position gap must be 0.01–10 seconds")
+        raw_min_kb = float(
+            request.get("raw_min_kb", self._sif_options["raw_min_kb"])
+        )
+        if not 0 <= raw_min_kb <= 1_000_000:
+            raise ValueError(
+                "SIF raw-file minimum size must be between 0 and 1,000,000 KB"
+            )
+        options = {
+            "modes": modes,
+            "position_mode": position_mode,
+            "raw_min_kb": raw_min_kb,
+            "apply_nonlinearity_correction": request.get(
+                "apply_nonlinearity_correction",
+                self._sif_options["apply_nonlinearity_correction"],
+            ) is True,
+            "spectral_shift_correction": request.get(
+                "spectral_shift_correction",
+                self._sif_options["spectral_shift_correction"],
+            ) is True,
+            "drop_unmatched_telemetry": request.get(
+                "drop_unmatched_telemetry",
+                self._sif_options["drop_unmatched_telemetry"],
+            ) is True,
+            "drop_invalid_spectral_rows": request.get(
+                "drop_invalid_spectral_rows",
+                self._sif_options["drop_invalid_spectral_rows"],
+            ) is True,
+            "altitude_filter": request.get(
+                "altitude_filter", self._sif_options["altitude_filter"]
+            ) is True,
+            "max_position_gap_seconds": gap,
+            "static_lat": _optional_float(request.get("static_lat")),
+            "static_lon": _optional_float(request.get("static_lon")),
+            "static_alt": _optional_float(request.get("static_alt")),
+        }
+        if position_mode == "tower":
+            lat, lon = options["static_lat"], options["static_lon"]
+            if lat is not None and not -90 <= lat <= 90:
+                raise ValueError("SIF static latitude must be between -90 and 90")
+            if lon is not None and not -180 <= lon <= 180:
+                raise ValueError("SIF static longitude must be between -180 and 180")
+        with self._lock:
+            self._sif_options = options
+            if self._flight_project is not None:
+                self._flight_project.instrument_options["sif"] = dict(options)
+        self.logger.log(
+            LogLevel.INFO,
+            "sif-options",
+            "SIF processing options saved",
+            instrument="sif",
+            processing_step="configuration",
+        )
+        self._checkpoint_project()
+        return dict(options)
+
+    def _refresh_opc_combined_browser(self, project: FlightProject) -> Path | None:
+        """Build the shared OPC page after both sensor payloads are available."""
+        from instruments.hatchbox_payload import combine_opc_payloads, write_json_atomic
+
+        with self._hatchbox_view_lock:
+            with self._lock:
+                paths = {
+                    instrument_id: [Path(value) for value in self._instruments[instrument_id].output_files]
+                    for instrument_id in ("opc_hbx4", "opc_hbx5")
+                }
+            selected: dict[str, Path] = {}
+            for instrument_id, candidates in paths.items():
+                browser = next(
+                    (
+                        value for value in reversed(candidates)
+                        if value.name == f"{instrument_id}_browser.json"
+                        and "quicklooks" not in value.parts
+                    ),
+                    None,
+                )
+                if browser is None or not browser.is_file():
+                    return None
+                selected[instrument_id] = browser
+            payload = combine_opc_payloads(
+                json.loads(selected["opc_hbx4"].read_text(encoding="utf-8")),
+                json.loads(selected["opc_hbx5"].read_text(encoding="utf-8")),
+                flight_id=project.flight_id,
+            )
+            target = project.flight_output_root / "quicklooks" / "opc_browser.json"
+            write_json_atomic(target, payload)
+            with self._lock:
+                project.output_locations["opc_browser"] = target
+                for instrument_id in ("opc_hbx4", "opc_hbx5"):
+                    state = self._instruments[instrument_id]
+                    if str(target) not in state.output_files:
+                        state.output_files.append(str(target))
+                    saved = project.detected_instruments.get(instrument_id)
+                    if saved is not None and target not in saved.output_locations:
+                        saved.output_locations.append(target)
+            self.logger.log(
+                LogLevel.SUCCESS,
+                "hatchbox-view",
+                "Combined OPC browser payload saved with independent HBX-4/HBX-5 axes",
+                file_path=target,
+                processing_step="browser-payload",
+            )
+            return target
+    def start_noseboom_straight_recalculation(
+        self, settings: dict[str, object]
+    ) -> dict[str, object]:
+        """Start a non-blocking straight-flight preview with live progress."""
+        with self._lock:
+            if self._noseboom_recalculation.get("running"):
+                raise RuntimeError("A straight-flight recalculation is already running")
+            job_id = uuid4().hex
+            self._noseboom_recalculation = {
+                "job_id": job_id,
+                "running": True,
+                "ready": False,
+                "progress": 0.0,
+                "message": "Preparing straight-flight recalculation.",
+                "error": None,
+                "result": None,
+                "started_monotonic": time.monotonic(),
+            }
+            worker = threading.Thread(
+                target=self._run_noseboom_straight_recalculation,
+                args=(job_id, dict(settings or {})),
+                name="ccflux-noseboom-straight-recalculation",
+                daemon=True,
+            )
+            self._noseboom_recalculation_thread = worker
+            worker.start()
+        return self.noseboom_straight_recalculation_progress()
+
+    def noseboom_straight_recalculation_progress(self) -> dict[str, object]:
+        """Return a lock-safe progress snapshot for browser polling."""
+        with self._lock:
+            state = dict(self._noseboom_recalculation)
+        started = state.pop("started_monotonic", None)
+        state["elapsed_seconds"] = (
+            max(0.0, time.monotonic() - float(started)) if started else 0.0
+        )
+        return state
+
+    def _run_noseboom_straight_recalculation(
+        self, job_id: str, settings: dict[str, object]
+    ) -> None:
+        def report(progress: float, message: str) -> None:
+            with self._lock:
+                if self._noseboom_recalculation.get("job_id") != job_id:
+                    return
+                self._noseboom_recalculation["progress"] = max(
+                    0.0, min(100.0, float(progress))
+                )
+                self._noseboom_recalculation["message"] = str(message)
+
+        try:
+            result = self.preview_noseboom_straight_settings(
+                settings, progress_callback=report
+            )
+        except Exception as exc:
+            self.logger.capture_exception(
+                "noseboom-settings",
+                "Straight-flight recalculation failed",
+                exc,
+                instrument="noseboom",
+                processing_step="straight-flight-recalculation",
+            )
+            with self._lock:
+                if self._noseboom_recalculation.get("job_id") == job_id:
+                    self._noseboom_recalculation.update({
+                        "running": False,
+                        "ready": False,
+                        "error": str(exc),
+                        "message": "Straight-flight recalculation failed.",
+                    })
+            self._persist_project_logs()
+            return
+        with self._lock:
+            if self._noseboom_recalculation.get("job_id") == job_id:
+                self._noseboom_recalculation.update({
+                    "running": False,
+                    "ready": True,
+                    "progress": 100.0,
+                    "message": "Straight-flight recalculation complete.",
+                    "error": None,
+                    "result": result,
+                })
+    def preview_noseboom_straight_settings(
+        self, settings: dict[str, object], *,
+        progress_callback: Callable[[float, str], None] | None = None,
+    ) -> dict[str, object]:
+        """Recalculate straight legs without changing the saved Flight Project."""
+        from instruments.noseboom.adapter import _map_payload
+        from instruments.noseboom.legacy_bridge import LegacyNoseboomBridge
+
+        def report_progress(percent: float, message: str) -> None:
+            if progress_callback is not None:
+                progress_callback(max(0.0, min(100.0, float(percent))), str(message))
+
+        report_progress(2.0, "Validating straight-flight settings.")
+
+        allowed = {
+            "min_speed_mps", "max_turn_rate_dps", "max_roll_deg",
+            "heading_window_s", "max_heading_range_deg", "min_leg_seconds",
+            "min_leg_distance_m", "target_leg_distance_m",
+            "max_leg_heading_drift_deg", "max_cross_track_m",
+            "max_altitude_deviation_m",
+        }
+        if not isinstance(settings, dict) or not settings:
+            raise ValueError("Straight-flight settings must be a non-empty object")
+        parsed: dict[str, float] = {}
+        for key, value in settings.items():
+            if key not in allowed:
+                raise ValueError(f"Unsupported straight-flight setting: {key}")
+            number = float(value)
+            if number <= 0:
+                raise ValueError(f"{key} must be greater than zero")
+            parsed[key] = number
+        if parsed.get("target_leg_distance_m", 0) < parsed.get("min_leg_distance_m", 0):
+            raise ValueError("Target leg distance must be at least the minimum leg distance")
+        report_progress(7.0, "Straight-flight settings validated.")
+
+        with self._lock:
+            report = self._report
+            project = self._flight_project
+            selected_start = self._time_state.selected_analysis_start
+            selected_end = self._time_state.selected_analysis_end
+            current_view = dict(self._instruments["noseboom"].quicklook)
+        if report is None or project is None or selected_start is None or selected_end is None:
+            raise RuntimeError("Complete Initial Check, apply the Time Filter, and process Noseboom first")
+        paths = tuple(dict.fromkeys(
+            path
+            for candidate in report.candidates
+            if candidate.instrument_id == "noseboom"
+            for path in candidate.all_matching_files
+        ))
+        if not paths:
+            raise RuntimeError("No selected Noseboom source files are available")
+        report_progress(10.0, "Preparing the selected Noseboom source interval.")
+
+        self.logger.log(
+            LogLevel.INFO,
+            "noseboom-settings",
+            "Recalculating straight-flight legs for temporary visualization",
+            instrument="noseboom",
+            processing_step="straight-flight-recalculation",
+        )
+        bridge = LegacyNoseboomBridge()
+        data = bridge.load_csv_window(
+            paths,
+            int(selected_start.timestamp() * 1_000_000_000),
+            int(selected_end.timestamp() * 1_000_000_000),
+            progress=lambda percent, message: report_progress(
+                min(58.0, 12.0 + 1.15 * float(percent)), message
+            ),
+        )
+        report_progress(60.0, f"Loaded {len(data):,} selected Noseboom rows.")
+        report_progress(65.0, "Resampling the selected interval to validated 1 Hz navigation.")
+        one_hz = bridge.module.one_hz(data)
+        report_progress(75.0, "Detecting candidate straight-flight legs.")
+        straight = bridge.module.detect_straight(one_hz, parsed)
+        report_progress(88.0, "Preparing recalculated leg geometry and statistics.")
+        recalculated = _map_payload(straight)
+        report_progress(92.0, "Updating the temporary Straight Flight visualization.")
+        for key in (
+            "hist", "frequency", "altitude_profile", "spectra", "time_bounds",
+            "browser_limits", "source",
+        ):
+            if key in current_view:
+                recalculated[key] = current_view[key]
+        recalculated["straight_settings"] = dict(
+            straight.attrs.get("straight_params", parsed)
+        )
+        with self._lock:
+            self._noseboom_preview_quicklook = dict(recalculated)
+            self._noseboom_preview_settings = dict(recalculated["straight_settings"])
+        report_progress(98.0, "Finalizing the temporary straight-flight preview.")
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "noseboom-settings",
+            f"Temporary straight-flight recalculation complete: {len(recalculated.get('straight_legs', []))} legs",
+            instrument="noseboom",
+            processing_step="straight-flight-recalculation",
+        )
+        self._persist_project_logs()
+        report_progress(100.0, "Straight-flight recalculation complete.")
+        return {
+            "saved": False,
+            "temporary": True,
+            "settings": dict(recalculated["straight_settings"]),
+            "data": recalculated,
+        }
+
+    def save_noseboom_straight_preview(self) -> dict[str, object]:
+        """Commit the latest straight-leg preview into the active Flight Project."""
+        with self._lock:
+            preview = getattr(self, "_noseboom_preview_quicklook", None)
+            settings = getattr(self, "_noseboom_preview_settings", None)
+            project = self._flight_project
+            if not preview or not settings or project is None:
+                raise RuntimeError("No recalculated straight-flight preview is available to save")
+            state = self._instruments["noseboom"]
+            state.quicklook = dict(preview)
+            self._noseboom_straight_settings = dict(settings)
+            quicklook_path = project.flight_output_root / "quicklooks" / "noseboom_browser.json"
+            project.output_locations["noseboom_quicklook"] = quicklook_path
+        quicklook_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = quicklook_path.with_suffix(".json.temporary")
+        temporary.write_text(
+            json.dumps(preview, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(quicklook_path)
+        project_file = self.save_project()
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "noseboom-settings",
+            "Straight-flight settings and recalculated legs saved in the Flight Project",
+            instrument="noseboom",
+            file_path=project_file,
+            processing_step="straight-flight-settings-save",
+        )
+        self._persist_project_logs()
+        return {
+            "saved": True,
+            "temporary": False,
+            "settings": dict(settings),
+            "data": dict(preview),
+            "project_file": str(project_file),
+        }
+
+    def export_noseboom_data(self, options: dict[str, object]) -> Path:
+        """Create a user-selected scientific table without altering processed data."""
+        from instruments.noseboom.legacy_bridge import LegacyNoseboomBridge
+
+        format_name = str(options.get("format", "csv")).strip().casefold()
+        if format_name not in {"csv", "xlsx", "txt"}:
+            raise ValueError("Download format must be CSV, XLSX, or TXT")
+        frequency_hz = float(options.get("frequency_hz", 1.0))
+        if not 1.0 <= frequency_hz <= 100.0:
+            raise ValueError("Download frequency must be between 1 and 100 Hz")
+        with self._lock:
+            report = self._report
+            project = self._flight_project
+            selected_start = self._time_state.selected_analysis_start
+            selected_end = self._time_state.selected_analysis_end
+        if report is None or project is None or selected_start is None or selected_end is None:
+            raise RuntimeError("Complete Initial Check and apply the Time Filter before downloading")
+        paths = tuple(dict.fromkeys(
+            path
+            for candidate in report.candidates
+            if candidate.instrument_id == "noseboom"
+            for path in candidate.all_matching_files
+        ))
+        if not paths:
+            raise RuntimeError("No selected Noseboom source files are available")
+        bridge = LegacyNoseboomBridge()
+        data = bridge.load_csv_window(
+            paths,
+            int(selected_start.timestamp() * 1_000_000_000),
+            int(selected_end.timestamp() * 1_000_000_000),
+        )
+        source = bridge.module.make_export_source(data)
+        table = bridge.module.resample_export_data(source, frequency_hz)
+        destination = project.flight_output_root / "exports" / "noseboom"
+        destination.mkdir(parents=True, exist_ok=True)
+        safe_flight = "".join(
+            value if value.isalnum() or value in "-_" else "_"
+            for value in (project.flight_id or "Flight")
+        )
+        frequency_label = f"{frequency_hz:g}Hz".replace(".", "p")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        target = destination / f"{safe_flight}_noseboom_{frequency_label}_{stamp}.{format_name}"
+        if format_name == "csv":
+            table.to_csv(target, index=False, encoding="utf-8-sig")
+        elif format_name == "txt":
+            table.to_csv(target, index=False, sep="\t", encoding="utf-8")
+        else:
+            table.to_excel(target, index=False, engine="openpyxl")
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "noseboom-export",
+            f"Noseboom {format_name.upper()} download prepared at {frequency_hz:g} Hz ({len(table):,} rows)",
+            instrument="noseboom",
+            file_path=target,
+            processing_step="interactive-data-export",
+        )
+        self._persist_project_logs()
+        return target
+    def update_noseboom_straight_settings(self, settings: dict[str, object]) -> dict[str, float]:
+        allowed = {
+            "min_speed_mps", "max_turn_rate_dps", "max_roll_deg",
+            "heading_window_s", "max_heading_range_deg", "min_leg_seconds",
+            "min_leg_distance_m", "target_leg_distance_m",
+            "max_leg_heading_drift_deg", "max_cross_track_m",
+            "max_altitude_deviation_m",
+        }
+        if not isinstance(settings, dict) or not settings:
+            raise ValueError("Straight-flight settings must be a non-empty object")
+        parsed: dict[str, float] = {}
+        for key, value in settings.items():
+            if key not in allowed:
+                raise ValueError(f"Unsupported straight-flight setting: {key}")
+            number = float(value)
+            if number <= 0:
+                raise ValueError(f"{key} must be greater than zero")
+            parsed[key] = number
+        if parsed.get("target_leg_distance_m", 0) and parsed.get("min_leg_distance_m", 0) and parsed["target_leg_distance_m"] < parsed["min_leg_distance_m"]:
+            raise ValueError("Target leg distance must be at least the minimum leg distance")
+        with self._lock:
+            state = self._instruments["noseboom"]
+            current = dict(state.quicklook.get("straight_settings", {}))
+            current.update(parsed)
+            if (
+                current.get("target_leg_distance_m", 0)
+                and current.get("min_leg_distance_m", 0)
+                and current["target_leg_distance_m"] < current["min_leg_distance_m"]
+            ):
+                raise ValueError("Target leg distance must be at least the minimum leg distance")
+            self._noseboom_straight_settings = current
+            state.quicklook["straight_settings"] = dict(current)
+            project = self._flight_project
+            quicklook_file = (
+                project.output_locations.get("noseboom_quicklook") if project else None
+            )
+        if quicklook_file:
+            try:
+                quicklook_path = Path(quicklook_file)
+                quicklook_path.write_text(
+                    json.dumps(state.quicklook, indent=2, allow_nan=False),
+                    encoding="utf-8",
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                self.logger.log(
+                    LogLevel.WARNING,
+                    "noseboom-settings",
+                    f"Straight-flight settings were kept in memory but could not be saved: {exc}",
+                    instrument="noseboom",
+                    processing_step="straight-flight-settings",
+                )
+        self.logger.log(
+            LogLevel.INFO,
+            "noseboom-settings",
+            "Straight-flight thresholds saved for the next Noseboom processing run",
+            instrument="noseboom",
+            processing_step="straight-flight-settings",
+        )
+        self._persist_project_logs()
+        return dict(current)
+    def log_noseboom_view_event(self, message: str) -> None:
+        self.logger.log(
+            LogLevel.INFO,
+            "noseboom-browser",
+            message.strip() or "Noseboom browser interaction",
+            instrument="noseboom",
+            processing_step="browser-view",
+        )
+        self._persist_project_logs()
+
+    def noseboom_export_file(self) -> Path:
+        with self._lock:
+            project = self._flight_project
+            candidates = [
+                Path(value) for value in self._instruments["noseboom"].output_files
+                if Path(value).suffix.casefold() in {".csv", ".txt", ".h5"}
+            ]
+            if project is not None:
+                saved = project.detected_instruments.get("noseboom")
+                if saved is not None:
+                    candidates.extend(
+                        Path(value) for value in saved.output_locations
+                        if Path(value).suffix.casefold() in {".csv", ".txt", ".h5"}
+                    )
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        if project is not None:
+            run_root = project.flight_output_root / "processed" / "noseboom" / "runs"
+            if run_root.is_dir():
+                discovered = sorted(
+                    run_root.glob("*/exports/*_noseboom_export_1Hz.csv"),
+                    key=lambda value: value.stat().st_mtime,
+                    reverse=True,
+                )
+                if discovered:
+                    return discovered[0]
+        raise ValueError(
+            "No processed Noseboom navigation export is available. Process Noseboom first."
+        )
+
+    def start_noseboom_statistics_export(
+        self, options: dict[str, object]
+    ) -> dict[str, object]:
+        with self._lock:
+            project = self._flight_project
+            payload = dict(self._instruments["noseboom"].quicklook)
+            if project is None:
+                raise ValueError("Load a Flight Project before exporting figures")
+            if not payload.get("available"):
+                raise ValueError("Process Noseboom before exporting figures")
+            destination = (
+                project.flight_output_root / "reports" / "noseboom_statistics"
+            )
+            flight_name = project.flight_id
+        raw_formats = options.get("formats", ["pdf"])
+        if not isinstance(raw_formats, list):
+            raise ValueError("Export formats must be a list")
+        formats = tuple(str(value).lower() for value in raw_formats)
+        dpi = int(options.get("dpi", 300))
+        return self._noseboom_statistics_export.start(
+            payload, destination, flight_name, formats, dpi
+        )
+
+    def noseboom_statistics_export_progress(self) -> dict[str, object]:
+        return self._noseboom_statistics_export.snapshot()
+
+    def noseboom_statistics_export_file(self, name: str) -> Path:
+        safe_name = Path(name).name
+        if safe_name != name:
+            raise ValueError("Invalid Noseboom export filename")
+        try:
+            return self._noseboom_statistics_export.file(name)
+        except ValueError:
+            with self._lock:
+                project = self._flight_project
+                candidates = [
+                    Path(value)
+                    for value in self._instruments["noseboom"].output_files
+                ]
+                if project is not None:
+                    saved = project.detected_instruments.get("noseboom")
+                    if saved is not None:
+                        candidates.extend(saved.output_locations)
+            for candidate in candidates:
+                if (
+                    candidate.name == safe_name
+                    and candidate.suffix.casefold() in {".pdf", ".svg", ".png"}
+                    and candidate.is_file()
+                ):
+                    return candidate
+        raise ValueError("Requested Noseboom publication export is unavailable")
+
+    def _save_noseboom_statistics_exports(self, outputs: list[Path]) -> None:
+        with self._lock:
+            project = self._flight_project
+            state = self._instruments["noseboom"]
+            for output in outputs:
+                value = str(output)
+                if value not in state.output_files:
+                    state.output_files.append(value)
+            if project is not None:
+                saved = project.detected_instruments.get("noseboom")
+                if saved is not None:
+                    for output in outputs:
+                        if output not in saved.output_locations:
+                            saved.output_locations.append(output)
+                if outputs:
+                    project.output_locations[
+                        "noseboom_statistics_export_directory"
+                    ] = outputs[0].parent
+                self._project_store.save_project(project, overwrite=True)
+        self._persist_project_logs()
+    def confirm_candidate(self, instrument_id: str, candidate_path: Path) -> None:
+        selected = str(Path(candidate_path))
+        with self._lock:
+            if instrument_id not in self._instruments:
+                raise ValueError(f"Unknown instrument ID: {instrument_id}")
+            state = self._instruments[instrument_id]
+            if not state.ambiguous:
+                raise ValueError(f"{instrument_id} has no ambiguous candidates")
+            if selected not in state.candidate_paths:
+                raise ValueError("Selected path is not a registered candidate")
+            state.candidate_paths = [selected]
+            state.ambiguous = False
+            state.warnings = [
+                warning
+                for warning in state.warnings
+                if "multiple candidate" not in warning.casefold()
+            ]
+            if state.errors:
+                state.detection_status = DetectionStatus.FAILED
+            elif state.warnings:
+                state.detection_status = DetectionStatus.WARNING
+            else:
+                state.detection_status = DetectionStatus.READY
+            self._messages.append(
+                f"Candidate confirmed for {state.display_name}: {selected}"
+            )
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "flight-scanner",
+            "Ambiguous instrument candidate confirmed",
+            instrument=instrument_id,
+            job_id=self._scan_id,
+            file_path=Path(selected),
+            processing_step="candidate-confirmation",
+        )
+
+    def _processing_configuration_is_busy(self) -> bool:
+        """Whether a dispatched integrated job still owns the processing workflow."""
+        return any(
+            job.enabled
+            and job.task is not None
+            and job.status in {ProcessingStatus.QUEUED, ProcessingStatus.PROCESSING}
+            for job in (
+                self.processing_queue.get(snapshot.job_id)
+                for snapshot in self.processing_queue.ordered()
+            )
+        )
+
+    def _require_processing_configuration_idle(self) -> None:
+        if self._processing_configuration_is_busy():
+            raise ValueError("Please wait! System is busy now!")
+
+    def update_time_filter(self, request: dict[str, object]) -> None:
+        action = str(request.get("action", "set"))
+        with self._lock:
+            self._require_processing_configuration_idle()
+            if action in {"full", "reset"}:
+                if action == "reset":
+                    self._time_state.reset_to_detected_limits()
+                else:
+                    self._time_state.use_full_detected_interval()
+            elif action == "common":
+                self._time_state.use_common_overlap()
+            elif action == "display":
+                display_timezone = request.get("display_timezone")
+                if not isinstance(display_timezone, str) or not display_timezone:
+                    raise ValueError("display_timezone must be a non-empty IANA timezone")
+                try:
+                    ZoneInfo(display_timezone)
+                except ZoneInfoNotFoundError as exc:
+                    raise ValueError(
+                        f"Unknown display timezone: {display_timezone}"
+                    ) from exc
+                self._time_state.display_timezone = display_timezone
+            elif action == "set":
+                self._time_state.set_selected_interval(
+                    parse_dashboard_datetime(request.get("start")),
+                    parse_dashboard_datetime(request.get("end")),
+                )
+            else:
+                raise ValueError(f"Unknown time-filter action: {action}")
+            self._sync_project_time_state()
+            start = self._time_state.selected_analysis_start
+            end = self._time_state.selected_analysis_end
+        self.logger.log(
+            LogLevel.INFO,
+            "time-filter",
+            (
+                f"Dashboard time filter changed ({action}): "
+                f"{_iso(start) or 'not set'} to {_iso(end) or 'not set'}"
+            ),
+            job_id=self._scan_id,
+            processing_step="time-filter",
+        )
+
+    def update_instrument_time_override(
+        self,
+        instrument_id: str,
+        start: object = None,
+        end: object = None,
+    ) -> None:
+        """Reject deprecated per-instrument intervals in favour of one global filter."""
+        raise ValueError(
+            "Instrument-specific intervals are no longer used. Set the global Time Filter instead."
+        )
+    def update_resources(
+        self, *, worker_count: object, memory_bytes: object
+    ) -> None:
+        with self._lock:
+            self._require_processing_configuration_idle()
+        limits = self.resource_manager.create_limits(worker_count, memory_bytes)
+        with self._lock:
+            self._resource_limits = limits
+            self._resources_auto_selected = False
+            if self._flight_project is not None:
+                self._flight_project.cpu_allocation = limits.worker_count
+                self._flight_project.ram_allocation_bytes = limits.memory_bytes
+        self.logger.log(
+            LogLevel.INFO,
+            "resource-manager",
+            (
+                f"Resource limits changed: {limits.worker_count} worker(s), "
+                f"{limits.memory_bytes} bytes RAM"
+            ),
+            job_id=self._scan_id,
+            processing_step="resource-allocation",
+        )
+
+    def update_queue(self, request: dict[str, object]) -> None:
+        self._require_processing_configuration_idle()
+        action = str(request.get("action", ""))
+        job_id = str(request.get("job_id", ""))
+        if action == "reorder":
+            job_ids = request.get("job_ids")
+            if not isinstance(job_ids, list) or not all(
+                isinstance(value, str) for value in job_ids
+            ):
+                raise ValueError("job_ids must be a list of strings")
+            self.processing_queue.reorder(job_ids)
+        elif action == "enable":
+            job = self.processing_queue.get(job_id)
+            state = self._instruments[job.instrument_id]
+            if job_id not in INTEGRATED_PROCESSING_JOB_IDS:
+                raise ValueError(
+                    f"{job.display_name} processing is not integrated in the main queue"
+                )
+            if not _instrument_is_processable(state):
+                raise ValueError(
+                    f"{job.display_name} is not ready for selection; review its scan health first"
+                )
+            self.processing_queue.set_enabled(job_id, True)
+        elif action == "disable":
+            self.processing_queue.set_enabled(job_id, False)
+        elif action == "pause":
+            self.processing_queue.pause(job_id)
+        elif action == "resume":
+            self.processing_queue.resume(job_id)
+        elif action == "cancel":
+            self.processing_queue.cancel(job_id)
+        elif action == "retry":
+            self.processing_queue.retry(job_id)
+        elif action == "reprocess":
+            if request.get("confirmed") is not True:
+                raise ValueError(
+                    "Explicit confirmation is required before reprocessing "
+                    "previously completed data"
+                )
+            job = self.processing_queue.get(job_id)
+            state = self._instruments[job.instrument_id]
+            if job.detailed or job_id not in INTEGRATED_PROCESSING_JOB_IDS:
+                raise ValueError(
+                    "Only integrated Level 1 instrument jobs can be reprocessed here"
+                )
+            if job.status not in {
+                ProcessingStatus.COMPLETE,
+                ProcessingStatus.WARNING,
+            }:
+                raise ValueError(
+                    f"{job.display_name} has no completed result to reprocess"
+                )
+            if not _instrument_is_processable(state):
+                raise ValueError(
+                    f"{job.display_name} source data is not ready for reprocessing"
+                )
+            job.enabled = True
+            job.status = ProcessingStatus.QUEUED
+            job.progress = 0.0
+            job.current_step = "Queued for explicitly confirmed reprocessing"
+            job.elapsed_time = timedelta(0)
+            job.error = None
+            job.task = None
+        elif action == "start_detailed":
+            raise ValueError(
+                "Detailed processing requires routine selection and explicit confirmation"
+            )
+        else:
+            raise ValueError(f"Unknown queue action: {action}")
+        with self._lock:
+            self._sync_project_queue_state()
+            scheduler = self._scheduler
+            if job_id:
+                self._on_job_update(self.processing_queue.get(job_id).snapshot())
+        if action in {"retry", "resume"} and scheduler is not None:
+            scheduler.dispatch()
+        self.logger.log(
+            LogLevel.INFO,
+            "processing-queue",
+            f"Queue action {action} applied",
+            instrument=(
+                self.processing_queue.get(job_id).instrument_id
+                if job_id
+                else None
+            ),
+            job_id=job_id or None,
+            processing_step="queue-management",
+        )
+
+    def start_detailed_processing(self, request: dict[str, object]) -> None:
+        """Start one explicitly confirmed Level 2 camera job."""
+        job_id = str(request.get("job_id", ""))
+        if request.get("confirmed") is not True:
+            raise ValueError("Explicit Level 2 processing confirmation is required")
+        job = self.processing_queue.get(job_id)
+        if not job.detailed or job.worker_group.value != "camera_detailed":
+            raise ValueError("Requested job is not a Level 2 camera job")
+        selected = validate_level2_selection(
+            job.instrument_id, request.get("selected_routines")
+        )
+        with self._lock:
+            if self._phase != "complete" or self._report is None:
+                raise ValueError("Flight Folder scan must complete before Level 2 processing")
+            if self._selected_output_folder is None or self._flight_project is None:
+                raise ValueError("Select an Output Folder before Level 2 processing")
+            state = self._instruments[job.instrument_id]
+            if state.detection_status in {
+                DetectionStatus.NOT_DETECTED, DetectionStatus.FAILED
+            }:
+                raise ValueError(f"{state.display_name} data is not ready")
+            if state.ambiguous:
+                raise ValueError(f"Resolve ambiguous {state.display_name} data first")
+            if self._resource_limits.worker_count < 4:
+                raise ValueError(
+                    "Level 2 camera processing requires at least 4 workers so its "
+                    "dedicated pool does not displace fast or metadata jobs"
+                )
+            if job.instrument_id != "flir":
+                raise ValueError(
+                    "No selected MicaSense Level 2 routine is executable in the modular runtime"
+                )
+            job.task = lambda context: self._flir_detailed_task(context, selected)
+            job.safely_cancellable = False
+            self.processing_queue.set_enabled(job_id, True)
+            if job.status is ProcessingStatus.PAUSED:
+                self.processing_queue.resume(job_id)
+            if self._scheduler is None:
+                self._scheduler = ProcessingScheduler(
+                    self.processing_queue,
+                    total_workers=self._resource_limits.worker_count,
+                    logger=self.logger,
+                    result_callback=self._on_job_update,
+                )
+            scheduler = self._scheduler
+            self._sync_project_queue_state()
+            self._checkpoint_project()
+        self.logger.log(
+            LogLevel.INFO,
+            "camera-level2",
+            "Explicitly confirmed Level 2 routines: " + ", ".join(selected),
+            instrument=job.instrument_id,
+            job_id=job_id,
+            processing_step="level2-confirmation",
+        )
+        scheduler.dispatch()
+
+    def log_remote_sensing_workflow(self, request: dict[str, object]) -> None:
+        """Persist operator decisions from the guided remote-sensing workflow."""
+        message = str(request.get("message", "")).strip()
+        step = str(request.get("step", "workflow")).strip() or "workflow"
+        if not message:
+            raise ValueError("Remote-sensing workflow log message is required")
+        if len(message) > 1000:
+            raise ValueError("Remote-sensing workflow log message is too long")
+        if len(step) > 64:
+            raise ValueError("Remote-sensing workflow log step is too long")
+        self.logger.log(
+            LogLevel.INFO,
+            "remote-sensing-workflow",
+            message,
+            job_id=self._scan_id,
+            processing_step=step,
+        )
+        self._checkpoint_project()
+    def start_remote_sensing(
+        self, request: dict[str, object] | None = None
+    ) -> list[str]:
+        """Dispatch only camera-product jobs in their isolated worker pool."""
+        request = request or {}
+        time_mode = str(request.get("time_mode", "current"))
+        if time_mode == "custom":
+            self.update_time_filter(
+                {
+                    "action": "set",
+                    "start": request.get("start"),
+                    "end": request.get("end"),
+                }
+            )
+        elif time_mode != "current":
+            raise ValueError("Remote-sensing time mode must be 'current' or 'custom'")
+
+        camera_tasks = {
+            "micasense_quick": self._micasense_quick_task,
+            "flir_quick": self._flir_quick_task,
+            "gopro_quick": self._gopro_quick_task,
+        }
+        with self._lock:
+            camera_channel = self._scan_channels["camera"]
+            if (
+                camera_channel["phase"] != "complete"
+                or camera_channel["cancelled"]
+                or camera_channel["error"] is not None
+            ):
+                raise ValueError(
+                    "Camera scanning must finish successfully before remote-sensing processing"
+                )
+            if self._selected_output_folder is None or self._flight_project is None:
+                raise ValueError(
+                    "Select an Output Folder before remote-sensing processing"
+                )
+            start = self._time_state.selected_analysis_start
+            end = self._time_state.selected_analysis_end
+            if start is None or end is None or start >= end:
+                raise ValueError(
+                    "Select a valid current or custom time frame before remote-sensing processing"
+                )
+            self._flight_project.output_folder_path = self._selected_output_folder
+            registered: list[str] = []
+            skipped: list[str] = []
+            for job_id, task in camera_tasks.items():
+                job = self.processing_queue.get(job_id)
+                state = self._instruments[job.instrument_id]
+                if (
+                    state.detection_status in {
+                        DetectionStatus.NOT_DETECTED,
+                        DetectionStatus.FAILED,
+                    }
+                    or state.ambiguous
+                ):
+                    skipped.append(state.display_name)
+                    continue
+                if job.status in {
+                    ProcessingStatus.PROCESSING,
+                    ProcessingStatus.COMPLETE,
+                    ProcessingStatus.WARNING,
+                }:
+                    continue
+                if job.status is ProcessingStatus.CANCELLED:
+                    skipped.append(f"{state.display_name} (cancelled)")
+                    continue
+                self.processing_queue.set_enabled(job_id, True)
+                job.task = task
+                registered.append(job_id)
+            if not registered:
+                raise ValueError(
+                    "No detected camera product is ready for remote-sensing processing"
+                )
+            if self._scheduler is None:
+                self._scheduler = ProcessingScheduler(
+                    self.processing_queue,
+                    total_workers=self._resource_limits.worker_count,
+                    logger=self.logger,
+                    result_callback=self._on_job_update,
+                )
+            scheduler = self._scheduler
+            self._sync_project_queue_state()
+            self._checkpoint_project()
+        self.logger.log(
+            LogLevel.INFO,
+            "remote-sensing",
+            (
+                "Remote-sensing jobs dispatched independently using "
+                f"{time_mode} time frame: " + ", ".join(registered)
+            ),
+            processing_step="remote-sensing",
+        )
+        if skipped:
+            self.logger.log(
+                LogLevel.WARNING,
+                "remote-sensing",
+                "Skipped unavailable camera products: " + ", ".join(skipped),
+                processing_step="remote-sensing",
+            )
+        scheduler.dispatch()
+        return registered
+    def start_processing(self, *, confirmed_limited_coverage: bool = False) -> None:
+        with self._lock:
+            self._require_processing_configuration_idle()
+            integrated_tasks = {
+                "noseboom": self._noseboom_task,
+                "miro": self._miro_task,
+                "picarro": self._picarro_task,
+                "opc_hbx4": lambda context: self._opc_task("opc_hbx4", context),
+                "opc_hbx5": lambda context: self._opc_task("opc_hbx5", context),
+                "partector": self._partector_task,
+                "ins_gimbal": self._ins_gimbal_task,
+                "sif": self._sif_task,
+                "micasense_quick": self._micasense_quick_task,
+                "flir_quick": self._flir_quick_task,
+                "gopro_quick": self._gopro_quick_task,
+            }
+            self._validate_processing_preflight(integrated_tasks)
+            limited_coverage = self._limited_coverage_messages(integrated_tasks)
+            if limited_coverage and not confirmed_limited_coverage:
+                raise ValueError(
+                    "Selected instruments have limited coverage in the global Time Filter: "
+                    + "; ".join(limited_coverage)
+                    + ". Review availability and confirm processing."
+                )
+            registered = []
+            skipped = []
+            for job_id, task in integrated_tasks.items():
+                job = self.processing_queue.get(job_id)
+                instrument_id = job.instrument_id
+                state = self._instruments[instrument_id]
+                if not _instrument_is_processable(state):
+                    if job.enabled and not job.detailed:
+                        skipped.append(
+                            f"{state.display_name} ({state.detection_status.value})"
+                        )
+                    continue
+                if job.status in {
+                    ProcessingStatus.COMPLETE,
+                    ProcessingStatus.WARNING,
+                    ProcessingStatus.PROCESSING,
+                    ProcessingStatus.CANCELLED,
+                }:
+                    continue
+                job.task = task
+                if job.status is ProcessingStatus.PAUSED and job.enabled:
+                    self.processing_queue.resume(job_id)
+                registered.append(job_id)
+            if not registered:
+                raise ValueError(
+                    "No detected, confirmed, integrated instrument is ready to process"
+                )
+            if self._scheduler is None:
+                self._scheduler = ProcessingScheduler(
+                    self.processing_queue,
+                    total_workers=self._resource_limits.worker_count,
+                    logger=self.logger,
+                    result_callback=self._on_job_update,
+                )
+            self._scheduler.dispatch()
+            self._checkpoint_project()
+        self.logger.log(
+            LogLevel.INFO,
+            "processing-queue",
+            "Integrated adapter jobs dispatched: " + ", ".join(registered),
+        )
+        if skipped:
+            self.logger.log(
+                LogLevel.WARNING,
+                "processing-queue",
+                "Skipped instruments that are not READY: " + ", ".join(skipped),
+            )
+
+    def _limited_coverage_messages(self, tasks) -> list[str]:
+        """Describe selected ready inputs that cover only part of the global interval."""
+        messages: list[str] = []
+        for job in self.processing_queue.ordered():
+            if (
+                not job.enabled
+                or job.detailed
+                or job.job_id not in tasks
+                or not _instrument_is_processable(self._instruments[job.instrument_id])
+            ):
+                continue
+            coverage = self._time_state.instruments.get(job.instrument_id)
+            percentage = None if coverage is None else coverage.availability_percentage
+            if percentage is not None and 0 < percentage < 100:
+                messages.append(f"{job.display_name} ({percentage:.1f}% available)")
+        return messages
+    def _validate_processing_preflight(self, tasks) -> None:
+        if self._selected_folder is None:
+            raise ValueError("Select a Flight Folder before processing")
+        if self._selected_output_folder is None:
+            raise ValueError("Select an Output Folder before processing")
+        if self._report is None or self._phase not in {
+            "complete",
+            "scanning_camera",
+        }:
+            raise ValueError(
+                "Flight Folder discovery and validation must complete before processing"
+            )
+        start, end = self._time_state.selected_analysis_start, self._time_state.selected_analysis_end
+        if start is None or end is None or start >= end:
+            raise ValueError("Select a valid analysis time interval before processing")
+        self.resource_manager.create_limits(
+            self._resource_limits.worker_count, self._resource_limits.memory_bytes
+        )
+        if self._resource_limits.worker_count < 1:
+            raise ValueError("At least one CPU worker is required")
+        jobs = self.processing_queue.ordered()
+        if len({job.job_id for job in jobs}) != len(jobs) or any(job.priority not in {1, 2, 3} for job in jobs):
+            raise ValueError("Processing priority queue is invalid")
+        enabled = [
+            job for job in jobs if job.enabled and not job.detailed and job.job_id in tasks
+            and _instrument_is_processable(self._instruments[job.instrument_id])
+        ]
+        if not enabled:
+            raise ValueError("Select at least one scientifically usable instrument for processing")
+        unavailable = []
+        for job in enabled:
+            coverage = self._time_state.instruments.get(job.instrument_id)
+            percentage = None if coverage is None else coverage.availability_percentage
+            if percentage is None or percentage <= 0:
+                unavailable.append(job.display_name)
+        if unavailable:
+            raise ValueError(
+                "The global Time Filter has no available data for: "
+                + ", ".join(unavailable)
+                + ". Change the Time Filter or deselect these instruments."
+            )
+        if self._flight_project:
+            self._flight_project.output_folder_path = self._selected_output_folder
+            self._flight_project.validate()
+
+    def _persist_project_logs(self) -> Path | None:
+        with self._lock:
+            project = self._flight_project
+            output = self._selected_output_folder
+        if project is None or output is None:
+            return None
+        destination = project.flight_output_root / "logs" / "processing.jsonl"
+        project.output_locations["processing_log"] = destination
+        try:
+            return self.logger.export_logs(destination, overwrite=True)
+        except Exception as exc:
+            self.logger.capture_exception(
+                "project",
+                "Project diagnostics log export failed",
+                exc,
+                processing_step="log-checkpoint",
+            )
+            return None
+    def _checkpoint_project(self) -> None:
+        with self._lock:
+            if self._flight_project is None or self._selected_output_folder is None:
+                return
+            self._flight_project.output_folder_path = self._selected_output_folder
+            self._sync_project_queue_state()
+            self._sync_project_time_state()
+            project = self._flight_project
+        try:
+            self._persist_project_logs()
+            self._project_store.save_project(project, overwrite=True)
+        except Exception as exc:
+            self.logger.capture_exception(
+                "project", "Processing project checkpoint failed", exc,
+                job_id=self._scan_id, processing_step="checkpoint",
+            )
+
+    def shutdown(self) -> None:
+        with self._lock:
+            scheduler = self._scheduler
+            tokens = tuple(self._scan_tokens.values())
+            worker = self._worker
+            self._checkpoint_project()
+        for token in tokens:
+            token.cancel()
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=5)
+        if scheduler is not None:
+            scheduler.shutdown(wait=True, cancel_pending=True)
+            with self._lock:
+                self._sync_project_queue_state()
+                self._checkpoint_project()
+
+    def _default_scanner(self) -> FlightFolderScanner:
+        configuration = load_detection_configuration(
+            self.application_root / "configs" / "instrument_detection.yaml",
+            self.application_root / "configs" / "file_patterns.yaml",
+        )
+        return FlightFolderScanner(configuration)
+
+    def _run_scan(
+        self,
+        root: Path,
+        camera_root: Path | None,
+        flight_token: ScanCancellationToken,
+        camera_token: ScanCancellationToken | None,
+    ) -> None:
+        roots = {"flight": root}
+        tokens = {"flight": flight_token}
+        if camera_root is not None and camera_token is not None:
+            roots["camera"] = camera_root
+            tokens["camera"] = camera_token
+        reports: dict[str, ScanReport] = {}
+
+        def merged_successful_report() -> ScanReport | None:
+            values = list(reports.values())
+            if not values:
+                return None
+            combined = values[0]
+            for value in values[1:]:
+                combined = _merge_scan_reports(combined, value)
+            return replace(combined, cancelled=False)
+
+        try:
+            # One bounded discovery worker keeps the browser, disk, and scientific
+            # applications responsive even when a camera tree contains many files.
+            with ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="ccflux-discovery"
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        self._scanner_factory().scan,
+                        scan_root,
+                        cancellation=tokens[source],
+                        progress_callback=(
+                            lambda update, scan_source=source:
+                            self._on_progress(update, scan_source)
+                        ),
+                    ): source
+                    for source, scan_root in roots.items()
+                }
+                for future in as_completed(futures):
+                    source = futures[future]
+                    scan_root = roots[source]
+                    try:
+                        report = future.result()
+                    except Exception as exc:
+                        with self._lock:
+                            channel = self._scan_channels[source]
+                            channel["running"] = False
+                            channel["phase"] = "failed"
+                            channel["error"] = str(exc)
+                            channel["message"] = f"{source.title()} scanning failed: {exc}"
+                            self._error = str(exc)
+                            self._messages.append(str(channel["message"]))
+                        self.logger.capture_exception(
+                            f"{source}-scanner",
+                            f"{source.title()} data scan failed",
+                            exc,
+                            job_id=f"{self._scan_id}-{source}",
+                            file_path=scan_root,
+                            processing_step="discovery",
+                        )
+                        continue
+
+                    with self._lock:
+                        channel = self._scan_channels[source]
+                        channel["files_scanned"] = report.files_scanned
+                        channel["cancelled"] = report.cancelled
+                        channel["phase"] = (
+                            "cancelled" if report.cancelled else "post_scan_checks"
+                        )
+                        channel["progress"] = (
+                            channel["progress"] if report.cancelled else None
+                        )
+                        channel["message"] = (
+                            f"{source.title()} scan cancelled safely."
+                            if report.cancelled
+                            else (
+                                "File inventory complete. Validating detected "
+                                "instruments and time coverage..."
+                            )
+                        )
+
+                    if report.cancelled:
+                        self.logger.log(
+                            LogLevel.WARNING,
+                            f"{source}-scanner",
+                            (
+                                f"{source.title()} scan cancelled after "
+                                f"{report.files_scanned} files"
+                            ),
+                            job_id=f"{self._scan_id}-{source}",
+                            processing_step="discovery",
+                        )
+                    else:
+                        reports[source] = replace(report, cancelled=False)
+                        combined = merged_successful_report()
+                        if combined is not None:
+                            with self._lock:
+                                self._report = combined
+                                other_running = any(
+                                    bool(item["running"])
+                                    for item_source, item in self._scan_channels.items()
+                                    if item_source != source
+                                )
+                                channel = self._scan_channels[source]
+                                channel["phase"] = "post_scan_checks"
+                                channel["progress"] = None
+                                channel["message"] = (
+                                    "Building the instrument inventory and checking "
+                                    "timestamp coverage..."
+                                )
+                            self._apply_report(combined, final=not other_running)
+                        self.logger.log(
+                            LogLevel.SUCCESS,
+                            f"{source}-scanner",
+                            (
+                                f"{source.title()} scan complete: "
+                                f"{report.files_scanned} files, "
+                                f"{len(report.detected_instrument_ids)} "
+                                "instruments detected"
+                            ),
+                            job_id=f"{self._scan_id}-{source}",
+                            processing_step="discovery",
+                        )
+
+                    with self._lock:
+                        channel = self._scan_channels[source]
+                        channel["running"] = False
+                        if not report.cancelled:
+                            channel["phase"] = "complete"
+                            channel["progress"] = 100.0
+                            channel["message"] = (
+                                "Processing is done! close the window! "
+                                f"{source.title()} scan inspected "
+                                f"{report.files_scanned} files and completed all checks."
+                            )
+                            self._messages.append(str(channel["message"]))
+                        if not any(
+                            bool(item["running"])
+                            for item in self._scan_channels.values()
+                        ):
+                            if reports:
+                                self._phase = "complete"
+                                self._progress = 100.0
+                                self._cancelled = False
+                            elif any(
+                                item["error"] for item in self._scan_channels.values()
+                            ):
+                                self._phase = "failed"
+                            else:
+                                self._phase = "cancelled"
+                                self._cancelled = True
+        except Exception as exc:
+            with self._lock:
+                self._phase = "failed"
+                self._error = str(exc)
+                self._messages.append(f"Scanning failed: {exc}")
+            self.logger.capture_exception(
+                "flight-scanner",
+                "Independent scan coordinator failed",
+                exc,
+                job_id=self._scan_id,
+                file_path=root,
+                processing_step="discovery",
+            )
+        with self._lock:
+            scan_completed = self._phase == "complete" and self._report is not None
+        if scan_completed:
+            # Covers the opposite workflow order: Output Folder selected first,
+            # then Initial Check. Save the validated scan when it completes.
+            self._checkpoint_project()
+
+    def _on_progress(self, update: ScanProgress, source: str = "flight") -> None:
+        with self._lock:
+            channel = self._scan_channels[source]
+            old_ids = set(channel["detected_instruments"])
+            new_ids = set(update.detected_candidate_instruments) - old_ids
+            is_post_scan_check = update.phase == "complete" and not update.cancelled
+            channel["phase"] = "post_scan_checks" if is_post_scan_check else update.phase
+            channel["running"] = True
+            channel["current_folder"] = (
+                update.current_folder or channel["current_folder"]
+            )
+            channel["current_file"] = update.current_file or channel["current_file"]
+            channel["files_scanned"] = update.files_scanned
+            channel["progress"] = (
+                None if update.phase in {"inventory", "complete"} else update.progress
+            )
+            channel["detected_instruments"] = update.detected_candidate_instruments
+            channel["message"] = (
+                f"Counting files in {update.current_folder or channel['root']}"
+                if update.phase == "inventory"
+                else (
+                    "File inventory complete. Preparing validation checks..."
+                    if is_post_scan_check
+                    else f"Scanning {update.current_file or update.current_folder or channel['root']}"
+                )
+            )
+            all_detected = {
+                instrument_id
+                for item in self._scan_channels.values()
+                for instrument_id in item["detected_instruments"]
+            }
+            self._phase = f"scanning_{source}"
+            self._current_folder = update.current_folder
+            self._current_file = update.current_file
+            self._files_scanned = sum(
+                int(item["files_scanned"])
+                for item in self._scan_channels.values()
+            )
+            self._progress = channel["progress"]
+            display_ids = update.detected_candidate_instruments
+            channel["current_instrument"] = (
+                ", ".join(
+                    self._instruments[item].display_name
+                    for item in display_ids
+                    if item in self._instruments
+                )
+                or "Identifying instrument"
+            )
+            self._current_instrument = str(channel["current_instrument"])
+            self._detected = tuple(sorted(all_detected))
+            if update.files_scanned == 1 or (
+                update.files_scanned > 0 and update.files_scanned % 100 == 0
+            ):
+                self.logger.log(
+                    LogLevel.INFO,
+                    f"{source}-scanner",
+                    (
+                        f"Live scan checkpoint: {update.files_scanned} files, "
+                        f"{round(update.progress or 0.0, 1)}%"
+                    ),
+                    job_id=f"{self._scan_id}-{source}",
+                    file_path=update.current_file or update.current_folder,
+                    processing_step=update.phase,
+                )
+            for instrument_id in sorted(new_ids):
+                self._instruments[instrument_id].detection_status = (
+                    DetectionStatus.DETECTED
+                )
+                message = f"{source.title()} candidate detected: {instrument_id}"
+                self._messages.append(message)
+                self.logger.log(
+                    LogLevel.INFO,
+                    f"{source}-scanner",
+                    message,
+                    instrument=instrument_id,
+                    job_id=f"{self._scan_id}-{source}",
+                    file_path=update.current_file,
+                    processing_step="detection",
+                )
+    def _apply_report(self, report: ScanReport, *, final: bool = True) -> None:
+        grouped: dict[str, list[InstrumentCandidate]] = {}
+        for candidate in report.candidates:
+            grouped.setdefault(candidate.instrument_id, []).append(candidate)
+        expanded_source_files: dict[str, tuple[Path, ...]] = {}
+        opc_files = {
+            instrument_id: {
+                path.resolve()
+                for candidate in grouped.get(instrument_id, ())
+                for path in candidate.all_matching_files
+            }
+            for instrument_id in ("opc_hbx4", "opc_hbx5")
+        }
+        ambiguous_opc_files = opc_files["opc_hbx4"] & opc_files["opc_hbx5"]
+        extractor = TimestampExtractor()
+        validation_items = tuple(grouped.items())
+        validation_total = len(validation_items)
+        for validation_index, (instrument_id, candidates) in enumerate(
+            validation_items, start=1
+        ):
+            with self._lock:
+                display_name = self._instruments[instrument_id].display_name
+                self._phase = "validating"
+                self._current_folder = None
+                self._current_file = None
+                self._current_instrument = display_name
+                self._progress = (
+                    100.0 * (validation_index - 1) / validation_total
+                    if validation_total
+                    else 100.0
+                )
+                self._messages.append(
+                    f"Validating {display_name} "
+                    f"({validation_index}/{validation_total})..."
+                )
+                self._instruments[instrument_id].detection_status = (
+                    DetectionStatus.VALIDATING
+                )
+            unique_source_files = self._validation_source_files(
+                instrument_id, candidates
+            )
+            expanded_source_files[instrument_id] = unique_source_files
+            file_count = len(unique_source_files)
+            confidence = max(item.confidence_score for item in candidates)
+            candidate_paths = [str(item.candidate_path) for item in candidates]
+            ambiguous = any(item.ambiguous for item in candidates)
+            warnings = list(
+                dict.fromkeys(
+                    warning for item in candidates for warning in item.warnings
+                )
+            )
+            errors = list(
+                dict.fromkeys(error for item in candidates for error in item.errors)
+            )
+            if instrument_id in opc_files and ambiguous_opc_files:
+                ambiguous = True
+                warnings.append(
+                    "One or more CSV files match both OPC identities; confirm "
+                    "the HBX-4/HBX-5 assignment before processing."
+                )
+                candidate_paths.extend(
+                    str(path) for path in sorted(ambiguous_opc_files)
+                    if str(path) not in candidate_paths
+                )
+            time_result = extractor.extract_instrument(
+                instrument_id, unique_source_files
+            )
+            timestamp_warnings = list(time_result.timestamp_quality_warnings)
+            card_timestamp_warnings = timestamp_warnings
+            if instrument_id == "miro":
+                # MIRO text deliveries can contain a few blank boundary rows or
+                # repeated timestamps where logger segments meet. They remain
+                # recorded in timestamp diagnostics, but a valid TXT dataset
+                # must not be presented as waiting for TDMS or blocked from
+                # processing. Invalid/non-monotonic time remains a card warning.
+                card_timestamp_warnings = [
+                    warning
+                    for warning in timestamp_warnings
+                    if "duplicated timestamp" not in warning
+                    and "missing timestamp value" not in warning
+                ]
+            warnings.extend(card_timestamp_warnings)
+            with self._lock:
+                state = self._instruments[instrument_id]
+                state.file_count = file_count
+                state.confidence = confidence
+                state.candidate_paths = candidate_paths
+                state.ambiguous = ambiguous
+                state.warnings = list(dict.fromkeys(warnings))
+                state.timestamp_warnings = timestamp_warnings
+                state.errors = errors
+                state.utc_start_time = time_result.utc_start_time
+                state.utc_end_time = time_result.utc_end_time
+                state.original_start_time = time_result.original_min_timestamp
+                state.original_end_time = time_result.original_max_timestamp
+                if instrument_id == "gopro" and time_result.utc_start_time:
+                    state.processing_step = (
+                        "Time corrected during detection: Europe/Berlin → UTC"
+                    )
+                    state.quicklook = {
+                        **state.quicklook,
+                        "time_correction_complete": True,
+                        "camera_timezone": "Europe/Berlin (CET/CEST)",
+                        "navigation_timezone": "UTC",
+                        "corrected_start_utc": _iso(time_result.utc_start_time),
+                        "corrected_end_utc": _iso(time_result.utc_end_time),
+                    }
+                if state.errors:
+                    state.detection_status = DetectionStatus.FAILED
+                elif state.ambiguous or state.warnings:
+                    state.detection_status = DetectionStatus.WARNING
+                else:
+                    state.detection_status = DetectionStatus.READY
+                self._progress = (
+                    100.0 * validation_index / validation_total
+                    if validation_total
+                    else 100.0
+                )
+                self._messages.append(
+                    f"{display_name} validation finished: "
+                    f"{state.detection_status.value}."
+                )
+                if instrument_id == "gopro" and time_result.utc_start_time:
+                    self._messages.append(
+                        "GoPro camera time corrected from Europe/Berlin "
+                        "(CET/CEST) to UTC during detection."
+                    )
+        with self._lock:
+            self._time_state = DashboardTimeState.from_instrument_ranges(
+                {
+                    key: (
+                        value.utc_start_time,
+                        value.utc_end_time,
+                        value.timestamp_warnings,
+                    )
+                    for key, value in self._instruments.items()
+                    if value.detection_status is not DetectionStatus.NOT_DETECTED
+                },
+                analysis_anchor_id="noseboom",
+            )
+            self._sync_project_from_report(
+                report, expanded_source_files=expanded_source_files
+            )
+            if final:
+                self._phase = "complete"
+                self._current_instrument = None
+                self._progress = 100.0
+                self._messages.append(
+                    f"Scan complete: {report.files_scanned} files inspected."
+                )
+            else:
+                self._phase = "scanning_camera"
+                self._current_instrument = "Camera System"
+                self._progress = None
+            if any(item.ambiguous for item in report.candidates):
+                self._messages.append(
+                    "Ambiguous candidates require user confirmation."
+                )
+
+    @staticmethod
+    def _validation_source_files(
+        instrument_id: str, candidates: Sequence[InstrumentCandidate]
+    ) -> tuple[Path, ...]:
+        """Expand GoPro candidates before time validation.
+
+        Discovery deliberately retains only a small camera sample. GoPro time
+        correction, availability, and the user's Time Filter must instead use
+        every media file in the detected GoPro folder.
+        """
+        retained = [
+            path
+            for candidate in candidates
+            for path in candidate.all_matching_files
+        ]
+        if instrument_id != "gopro":
+            return tuple(dict.fromkeys(retained))
+        supported = {".jpg", ".jpeg", ".png", ".mp4", ".mov"}
+        expanded: list[Path] = []
+        for candidate in candidates:
+            root = candidate.candidate_path
+            if root.is_dir():
+                expanded.extend(
+                    path
+                    for path in root.rglob("*")
+                    if path.is_file() and path.suffix.casefold() in supported
+                )
+            elif root.is_file() and root.suffix.casefold() in supported:
+                expanded.append(root)
+        expanded.extend(
+            path
+            for path in retained
+            if path.is_file() and path.suffix.casefold() in supported
+        )
+        return tuple(dict.fromkeys(expanded))
+
+    def _sync_project_from_report(
+        self,
+        report: ScanReport,
+        *,
+        expanded_source_files: Mapping[str, tuple[Path, ...]] | None = None,
+    ) -> None:
+        if self._flight_project is None:
+            return
+        previous_instruments = dict(
+            self._flight_project.detected_instruments
+        )
+        completed_instruments = {
+            job.instrument_id
+            for job in self.processing_queue.ordered()
+            if job.status in {
+                ProcessingStatus.COMPLETE,
+                ProcessingStatus.WARNING,
+            }
+        }
+        grouped: dict[str, list[InstrumentCandidate]] = {}
+        for candidate in report.candidates:
+            grouped.setdefault(candidate.instrument_id, []).append(candidate)
+        project_instruments: dict[str, InstrumentProjectState] = {}
+        for instrument_id, candidates in grouped.items():
+            scan_state = self._instruments[instrument_id]
+            previous = previous_instruments.get(instrument_id)
+            project_instruments[instrument_id] = InstrumentProjectState(
+                instrument_id=instrument_id,
+                selected_source_files=list(
+                    (expanded_source_files or {}).get(instrument_id)
+                    or dict.fromkeys(
+                        path
+                        for candidate in candidates
+                        for path in candidate.all_matching_files
+                    )
+                ),
+                selected_source_folders=[
+                    Path(value) for value in scan_state.candidate_paths
+                ],
+                detection_confidence=scan_state.confidence,
+                ambiguous_candidates=(
+                    [Path(value) for value in scan_state.candidate_paths]
+                    if scan_state.ambiguous
+                    else []
+                ),
+                utc_start_time=scan_state.utc_start_time,
+                utc_end_time=scan_state.utc_end_time,
+                timestamp_warnings=list(scan_state.timestamp_warnings),
+                processing_priority=self._registry.find_by_id(
+                    instrument_id
+                ).effective_priority,
+                enabled=(
+                    previous.enabled
+                    if previous is not None
+                    else self._registry.find_by_id(
+                        instrument_id
+                    ).effective_enabled
+                ),
+                output_locations=(
+                    list(previous.output_locations)
+                    if previous is not None
+                    else []
+                ),
+            )
+        for instrument_id, previous in previous_instruments.items():
+            if (
+                instrument_id not in project_instruments
+                and instrument_id in completed_instruments
+            ):
+                project_instruments[instrument_id] = previous
+        self._flight_project.detected_instruments = project_instruments
+        self._flight_project.original_start_time = (
+            self._time_state.detected_global_start
+        )
+        self._flight_project.original_end_time = self._time_state.detected_global_end
+        self._flight_project.utc_start_time = self._time_state.detected_global_start
+        self._flight_project.utc_end_time = self._time_state.detected_global_end
+        self._sync_project_time_state()
+
+    def _sync_project_time_state(self) -> None:
+        if self._flight_project is None:
+            return
+        self._flight_project.selected_analysis_start = (
+            self._time_state.selected_analysis_start
+        )
+        self._flight_project.selected_analysis_end = (
+            self._time_state.selected_analysis_end
+        )
+        self._flight_project.display_timezone = self._time_state.display_timezone
+        for instrument_id, selection in self._time_state.instruments.items():
+            project_state = self._flight_project.detected_instruments.get(
+                instrument_id
+            )
+            if project_state is not None:
+                project_state.analysis_start_time = selection.override_start
+                project_state.analysis_end_time = selection.override_end
+
+    def _new_instrument_states(self) -> dict[str, InstrumentScanState]:
+        return {
+            item.instrument_id: InstrumentScanState(
+                instrument_id=item.instrument_id,
+                display_name=item.display_name,
+                physical_group=item.physical_group.value,
+            )
+            for item in self._registry.list_all()
+        }
+
+    def _summary(self) -> dict[str, object]:
+        states = tuple(self._instruments.values())
+        detected = tuple(
+            item
+            for item in states
+            if item.detection_status is not DetectionStatus.NOT_DETECTED
+        )
+        starts = [item.utc_start_time for item in detected if item.utc_start_time]
+        ends = [item.utc_end_time for item in detected if item.utc_end_time]
+        return {
+            "detected_count": len(detected),
+            "ready_count": sum(
+                item.detection_status is DetectionStatus.READY for item in states
+            ),
+            "warning_count": sum(
+                item.detection_status is DetectionStatus.WARNING for item in states
+            ),
+            "failed_count": sum(
+                item.detection_status is DetectionStatus.FAILED for item in states
+            ),
+            "global_start_time": _iso(min(starts)) if starts else None,
+            "global_end_time": _iso(max(ends)) if ends else None,
+        }
+
+    def _resource_snapshot(self) -> dict[str, object]:
+        system = self.resource_manager.system
+        minimum_workers = 1
+        maximum_workers = system.safely_available_workers
+        recommended_workers = min(
+            maximum_workers, max(minimum_workers, system.total_logical_cores // 4)
+        )
+        minimum_ram = min(GIB, system.safely_available_ram_bytes)
+        recommended_ram_target = min(
+            system.safely_available_ram_bytes,
+            max(minimum_ram, int(system.total_ram_bytes * 0.25)),
+        )
+        ram_options = [
+            value * GIB
+            for value in (1, 2, 4, 8, 16, 32, 64, 128)
+            if minimum_ram <= value * GIB <= system.safely_available_ram_bytes
+        ]
+        if minimum_ram not in ram_options:
+            ram_options.append(minimum_ram)
+        if system.safely_available_ram_bytes not in ram_options:
+            ram_options.append(system.safely_available_ram_bytes)
+        ram_options = sorted(set(ram_options))
+        recommended_ram = max(
+            (value for value in ram_options if value <= recommended_ram_target),
+            default=minimum_ram,
+        )
+        return {
+            "total_logical_cores": system.total_logical_cores,
+            "reserved_gui_cores": system.reserved_gui_cores,
+            "safe_worker_count": maximum_workers,
+            "minimum_worker_count": minimum_workers,
+            "maximum_worker_count": maximum_workers,
+            "recommended_worker_count": recommended_workers,
+            "selected_worker_count": self._resource_limits.worker_count,
+            "total_ram_bytes": system.total_ram_bytes,
+            "safe_ram_bytes": system.safely_available_ram_bytes,
+            "minimum_ram_bytes": minimum_ram,
+            "maximum_ram_bytes": system.safely_available_ram_bytes,
+            "recommended_ram_bytes": recommended_ram,
+            "selected_ram_bytes": self._resource_limits.memory_bytes,
+            "selection_mode": (
+                "automatic" if self._resources_auto_selected else "operator"
+            ),
+            "worker_options": list(range(minimum_workers, maximum_workers + 1)),
+            "ram_options": ram_options,
+            "worker_environment": self.resource_manager.worker_environment(
+                self._resource_limits
+            ),
+        }
+    def _queue_snapshot(self) -> dict[str, object]:
+        jobs = self.processing_queue.ordered()
+        job_payload: list[dict[str, object]] = []
+        selectable_job_ids: set[str] = set()
+        for job in jobs:
+            payload = _job_dict(job)
+            state = self._instruments[job.instrument_id]
+            integrated = job.job_id in INTEGRATED_PROCESSING_JOB_IDS
+            coverage = self._time_state.instruments.get(job.instrument_id)
+            interval_selected = (
+                self._time_state.selected_analysis_start is not None
+                and self._time_state.selected_analysis_end is not None
+            )
+            noseboom_range = self._time_state.instruments.get("noseboom")
+            noseboom_anchor_active = (
+                noseboom_range is not None
+                and noseboom_range.available_start is not None
+                and noseboom_range.available_end is not None
+                and interval_selected
+            )
+            has_selected_time = (
+                not noseboom_anchor_active
+                or (
+                    coverage is not None
+                    and coverage.availability_percentage is not None
+                    and coverage.availability_percentage > 0
+                    and not coverage.outside_selected_range
+                )
+            )
+            previously_completed = job.status in {
+                ProcessingStatus.COMPLETE,
+                ProcessingStatus.WARNING,
+            }
+            ready = (
+                integrated
+                and _instrument_is_processable(state)
+                and has_selected_time
+                and not previously_completed
+            )
+            if ready:
+                selectable_job_ids.add(job.job_id)
+            payload["available_for_selection"] = ready
+            payload["previously_completed"] = previously_completed
+            payload["skip_by_default"] = previously_completed
+            payload["selection_reason"] = (
+                "Previously processed; skipped by default. Use Reprocess only "
+                "when you intentionally want to replace this result."
+                if previously_completed else
+                "Ready for processing" if ready and state.detection_status is DetectionStatus.READY else
+                "Available with scan warning; review during health check" if ready else
+
+                "Configure the available FLIR Level 2 routines to create "
+                "temperature plots and the Noseboom-matched map"
+                if job.job_id == "flir_detailed"
+                and _instrument_is_processable(state)
+                and has_selected_time else
+                "Scientific adapter is not integrated" if not integrated else
+                "Resolve ambiguous input data" if state.ambiguous else
+                "UTC data do not overlap the selected Noseboom flight interval"
+                if _instrument_is_processable(state) and not has_selected_time else
+                f"Scan health: {state.detection_status.value.replace('_', ' ')}"
+            )
+            job_payload.append(payload)
+        selected = [
+            job for job in jobs
+            if job.enabled and not job.detailed and job.job_id in selectable_job_ids
+        ]
+        busy = self._processing_configuration_is_busy()
+        interval_ready = (
+            self._time_state.selected_analysis_start is not None
+            and self._time_state.selected_analysis_end is not None
+        )
+        scan_ready = self._report is not None and self._phase in {"complete", "scanning_camera"}
+        can_start = bool(
+            selected
+            and not busy
+            and interval_ready
+            and scan_ready
+        )
+        return {
+            "jobs": job_payload,
+            "busy": busy,
+            "selected_count": len(selected),
+            "can_start": can_start,
+            "workflow": {
+                "scan_ready": scan_ready,
+                "interval_ready": interval_ready,
+                "selection_required": not selected,
+                "next_step": (
+                    "Wait for active processing to finish" if busy else
+                    "Select at least one instrument" if not selected else
+                    "Finish flight scanning and choose the global Time Filter" if not (scan_ready and interval_ready) else
+                    "Ready to start; an Output Folder will be requested" if self._selected_output_folder is None else
+                    "Ready to start processing"
+                ),
+            },
+            "worker_groups": {
+                group: [job.job_id for job in jobs if job.worker_group.value == group]
+                for group in (
+                    "fast_science",
+                    "camera_metadata",
+                    "camera_detailed",
+                )
+            },
+        }
+
+    def _sync_project_queue_state(self) -> None:
+        if self._flight_project is None:
+            return
+        jobs = self.processing_queue.ordered()
+        self._flight_project.processing_priority = [job.job_id for job in jobs]
+        self._flight_project.enabled_instruments = list(
+            dict.fromkeys(job.instrument_id for job in jobs if job.enabled)
+        )
+        self._flight_project.completed_jobs = [
+            job.job_id for job in jobs if job.status.value in {"complete", "warning"}
+        ]
+        self._flight_project.failed_jobs = [
+            job.job_id for job in jobs if job.status.value == "failed"
+        ]
+        self._flight_project.cancelled_jobs = [
+            job.job_id for job in jobs if job.status.value == "cancelled"
+        ]
+
+    def _instrument_processing_interval(
+        self, instrument_id: str
+    ) -> tuple[datetime | None, datetime | None]:
+        """Intersect the one dashboard interval with an instrument's availability."""
+        selected_start = self._time_state.selected_analysis_start
+        selected_end = self._time_state.selected_analysis_end
+        selection = self._time_state.instruments.get(instrument_id)
+        if selection is not None:
+            if selection.available_start is not None:
+                selected_start = max(selected_start, selection.available_start) if selected_start else selection.available_start
+            if selection.available_end is not None:
+                selected_end = min(selected_end, selection.available_end) if selected_end else selection.available_end
+        if selected_start is not None and selected_end is not None and selected_start >= selected_end:
+            raise RuntimeError(
+                f"The selected Time Filter does not overlap {instrument_id} data"
+            )
+        return selected_start, selected_end
+
+    @staticmethod
+    def _run_output_root(project: FlightProject, instrument_id: str) -> Path:
+        """Return an immutable per-attempt output folder so retries never collide."""
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+        return project.flight_output_root / "processed" / instrument_id / "runs" / stamp
+    def _noseboom_task(self, context: ProcessingContext) -> JobOutcome | None:
+        from instruments.noseboom import NoseboomAdapter
+
+        with self._lock:
+            report = self._report
+            project = self._flight_project
+            selected_start = self._time_state.selected_analysis_start
+            selected_end = self._time_state.selected_analysis_end
+            rack_bridge = self._miro_rack_bridge
+        if report is None or project is None:
+            raise RuntimeError("Flight scan and project state are required")
+        candidates = [
+            candidate for candidate in report.candidates
+            if candidate.instrument_id == "noseboom"
+        ]
+        paths = tuple(
+            dict.fromkeys(
+                path
+                for candidate in candidates
+                for path in candidate.all_matching_files
+            )
+        )
+        if not paths:
+            raise RuntimeError("No selected Noseboom source files are available")
+        if selected_start is None or selected_end is None:
+            raise RuntimeError("A selected Noseboom analysis interval is required")
+        estimated_peak = 256 * 1024 * 1024
+        self.resource_manager.admit_task(
+            estimated_peak,
+            self._resource_limits,
+            task_name="Noseboom selected-interval streaming load",
+        )
+        adapter = NoseboomAdapter(
+            output_root=self._run_output_root(project, "noseboom"),
+            flight_name=project.flight_id,
+            logger=self.logger,
+        )
+        adapter.report_progress(
+            lambda update: context.report_progress(
+                update.progress or 0.0, update.phase
+            )
+        )
+        loaded = adapter.load_time_window(
+            InputCandidate(
+                instrument_id="noseboom",
+                paths=paths,
+                confidence=1.0,
+                reason="Confirmed Flight Folder scan candidate",
+            ),
+            selected_start,
+            selected_end,
+        )
+        result = adapter.process_quicklook(
+            loaded,
+            {
+                "analysis_start": selected_start,
+                "analysis_end": selected_end,
+                "trim_minutes": 2.0,
+                "terrain": True,
+                "straight_settings": dict(self._noseboom_straight_settings),
+            },
+        )
+        outputs = adapter.export_results(
+            result, adapter.output_root, ("csv",)
+        )
+        quicklook = dict(result.metadata.get("map", {}))
+        quicklook_path = project.flight_output_root / "quicklooks" / "noseboom_browser.json"
+        quicklook_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = quicklook_path.with_suffix(".json.temporary")
+        temporary.write_text(
+            json.dumps(quicklook, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(quicklook_path)
+        with self._lock:
+            state = self._instruments["noseboom"]
+            state.output_files = [str(value.path) for value in outputs]
+            state.quicklook = quicklook
+            saved_state = project.detected_instruments.get("noseboom")
+            if saved_state is not None:
+                saved_state.output_locations = [
+                    *(Path(value.path) for value in outputs),
+                    quicklook_path,
+                ]
+            project.output_locations["noseboom_quicklook"] = quicklook_path
+            project.output_locations["processing_log"] = (
+                project.flight_output_root / "logs" / "processing.jsonl"
+            )
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "noseboom-browser",
+            "Noseboom browser state saved for project reload",
+            instrument="noseboom",
+            file_path=quicklook_path,
+            processing_step="browser-state-save",
+        )
+        if rack_bridge is not None and hasattr(
+            rack_bridge, "prepare_map_during_main_processing"
+        ):
+            context.report_progress(
+                99.0, "Preparing saved MIRO/Picarro Mapview navigation"
+            )
+            rack_bridge.prepare_map_during_main_processing()
+        self._persist_project_logs()
+        return JobOutcome(warning=result.warnings[0] if result.warnings else None)
+
+    def _miro_task(self, context: ProcessingContext) -> JobOutcome | None:
+        from instruments.miro import MiroAdapter
+
+        with self._lock:
+            report = self._report
+            project = self._flight_project
+            selected_start, selected_end = self._instrument_processing_interval("miro")
+            rack_bridge = self._miro_rack_bridge
+        if report is None or project is None:
+            raise RuntimeError("Flight scan and project state are required")
+        candidates = [
+            candidate for candidate in report.candidates
+            if candidate.instrument_id == "miro"
+        ]
+        paths = tuple(
+            dict.fromkeys(
+                path
+                for candidate in candidates
+                for path in candidate.all_matching_files
+            )
+        )
+        if not paths:
+            raise RuntimeError("No selected MIRO source files are available")
+        estimated_peak = max(
+            sum(path.stat().st_size for path in paths) * 8,
+            256 * 1024 * 1024,
+        )
+        self.resource_manager.admit_task(
+            estimated_peak,
+            self._resource_limits,
+            task_name="MIRO legacy text load and analysis",
+        )
+        output_root = self._run_output_root(project, "miro")
+        adapter = MiroAdapter(
+            output_root=output_root,
+            flight_name=project.flight_id,
+            logger=self.logger,
+        )
+        adapter.report_progress(
+            lambda update: context.report_progress(
+                min(78.0, (update.progress or 0.0) * 0.78), update.phase
+            )
+        )
+        loaded = adapter.load(
+            InputCandidate(
+                instrument_id="miro",
+                paths=paths,
+                confidence=1.0,
+                reason="Confirmed Flight Folder scan candidate",
+            )
+        )
+        result = adapter.process_quicklook(
+            loaded,
+            {
+                "analysis_start": selected_start,
+                "analysis_end": selected_end,
+                "gas": "NO2 wet",
+                "smooth_seconds": 300.0,
+                "remove_seconds": 30.0,
+            },
+        )
+        figures = adapter.create_plots(result, adapter.output_root)
+        rack_outputs: list[str] = []
+        if rack_bridge is not None and hasattr(
+            rack_bridge, "publish_main_processing_instrument"
+        ):
+            context.report_progress(
+                80.0,
+                "Preparing original-resolution MIRO Rack results and 1 Hz Mapview copy",
+            )
+            published = rack_bridge.publish_main_processing_instrument(
+                instrument_id="miro",
+                data=loaded.data,
+                metadata=loaded.load_metadata,
+                analysis=result.metadata.get("analysis"),
+                source_paths=paths,
+                selected_start=selected_start,
+                selected_end=selected_end,
+                output_root=output_root,
+                progress_callback=lambda fraction, message: context.report_progress(
+                    80.0 + min(1.0, max(0.0, float(fraction))) * 16.0,
+                    message,
+                ),
+            )
+            rack_outputs = [str(value) for value in published.get("outputs", ())]
+            if published.get("project_saved"):
+                context.report_progress(
+                    99.0, "MIRO Rack project saved; finalizing MIRO processing"
+                )
+        with self._lock:
+            state = self._instruments["miro"]
+            state.output_files = [
+                *(str(value.path) for value in figures),
+                *rack_outputs,
+            ]
+        context.report_progress(100.0, "MIRO processing complete")
+        return JobOutcome(warning=result.warnings[0] if result.warnings else None)
+
+    def _picarro_task(self, context: ProcessingContext) -> JobOutcome | None:
+        with self._lock:
+            report = self._report
+            project = self._flight_project
+            selected_start, selected_end = self._instrument_processing_interval(
+                "picarro"
+            )
+            rack_bridge = self._miro_rack_bridge
+        if report is None or project is None:
+            raise RuntimeError("Flight scan and project state are required")
+        if rack_bridge is None or not hasattr(
+            rack_bridge, "process_picarro_from_main"
+        ):
+            raise RuntimeError("The shared MIRO Rack processing bridge is unavailable")
+        paths = tuple(
+            dict.fromkeys(
+                path
+                for candidate in report.candidates
+                if candidate.instrument_id == "picarro"
+                for path in candidate.all_matching_files
+            )
+        )
+        if not paths:
+            raise RuntimeError("No selected Picarro source files are available")
+        output_root = self._run_output_root(project, "picarro")
+        result = rack_bridge.process_picarro_from_main(
+            source_paths=paths,
+            selected_start=selected_start,
+            selected_end=selected_end,
+            output_root=output_root,
+            progress_callback=lambda percent, message: context.report_progress(
+                min(99.0, max(0.0, float(percent))), message
+            ),
+        )
+        with self._lock:
+            self._instruments["picarro"].output_files = [
+                str(value) for value in result.get("outputs", ())
+            ]
+        context.report_progress(100.0, "Picarro processing complete")
+        warnings = list(result.get("warnings", ()))
+        return JobOutcome(warning=warnings[0] if warnings else None)
+    def _opc_task(
+        self, instrument_id: str, context: ProcessingContext
+    ) -> JobOutcome | None:
+        if instrument_id == "opc_hbx4":
+            from instruments.opc_hbx4 import OpcHbx4Adapter as Adapter
+        elif instrument_id == "opc_hbx5":
+            from instruments.opc_hbx5 import OpcHbx5Adapter as Adapter
+        else:
+            raise ValueError(f"Unknown OPC instrument: {instrument_id}")
+
+        with self._lock:
+            report = self._report
+            project = self._flight_project
+            scan_state = self._instruments[instrument_id]
+            assigned_candidates = tuple(scan_state.candidate_paths)
+            selected_start, selected_end = self._instrument_processing_interval(instrument_id)
+        if report is None or project is None:
+            raise RuntimeError("Flight scan and project state are required")
+        explicitly_assigned_files = tuple(
+            Path(value) for value in assigned_candidates
+            if Path(value).is_file()
+        )
+        if explicitly_assigned_files:
+            paths = explicitly_assigned_files
+        else:
+            assigned_roots = {
+                Path(value).resolve(strict=False) for value in assigned_candidates
+            }
+            paths = tuple(
+                dict.fromkeys(
+                    path
+                    for candidate in report.candidates
+                    if candidate.instrument_id == instrument_id
+                    and (
+                        not assigned_roots
+                        or candidate.candidate_path.resolve(strict=False)
+                        in assigned_roots
+                    )
+                    for path in candidate.all_matching_files
+                )
+            )
+        if len(paths) != 1:
+            raise RuntimeError(
+                f"{instrument_id} requires exactly one confirmed source CSV"
+            )
+        self.resource_manager.admit_task(
+            max(paths[0].stat().st_size * 12, 128 * 1024 * 1024),
+            self._resource_limits,
+            task_name=f"{instrument_id} legacy CSV evaluation",
+        )
+        adapter = Adapter(
+            output_root=self._run_output_root(project, instrument_id),
+            flight_name=project.flight_id,
+            logger=self.logger,
+        )
+        adapter.report_progress(
+            lambda update: context.report_progress(
+                update.progress or 0.0, update.phase
+            )
+        )
+        loaded = adapter.load(
+            InputCandidate(
+                instrument_id,
+                paths,
+                1.0,
+                "Confirmed Flight Folder scan candidate",
+            )
+        )
+        result = adapter.process_quicklook(
+            loaded,
+            {
+                "analysis_start": selected_start,
+                "analysis_end": selected_end,
+                "gap_seconds": 10.0,
+                "bin_units": "auto",
+            },
+        )
+        figures = adapter.create_plots(result, adapter.output_root)
+        adapter.export_results(result, adapter.output_root, ("csv", "json"))
+        browser = adapter.export_browser_data(result, adapter.output_root)
+        with self._lock:
+            state = self._instruments[instrument_id]
+            state.output_files = [
+                str(value.path) for value in (*figures, *result.output_files)
+            ]
+            saved = project.detected_instruments.get(instrument_id)
+            if saved is not None:
+                saved.output_locations = [Path(value) for value in state.output_files]
+        self._publish_hatchbox_browser(project, instrument_id, browser.path)
+        self._refresh_opc_combined_browser(project)
+        return JobOutcome(warning=result.warnings[0] if result.warnings else None)
+
+    def _partector_task(
+        self, context: ProcessingContext
+    ) -> JobOutcome | None:
+        from instruments.partector import PartectorAdapter
+
+        with self._lock:
+            report = self._report
+            project = self._flight_project
+            scan_state = self._instruments["partector"]
+            assigned_candidates = tuple(scan_state.candidate_paths)
+            selected_start, selected_end = self._instrument_processing_interval("partector")
+        if report is None or project is None:
+            raise RuntimeError("Flight scan and project state are required")
+        assigned_roots = {
+            Path(value).resolve(strict=False) for value in assigned_candidates
+        }
+        explicit_files = tuple(
+            Path(value) for value in assigned_candidates if Path(value).is_file()
+        )
+        paths = explicit_files or tuple(
+            dict.fromkeys(
+                path
+                for candidate in report.candidates
+                if candidate.instrument_id == "partector"
+                and (
+                    not assigned_roots
+                    or candidate.candidate_path.resolve(strict=False)
+                    in assigned_roots
+                )
+                for path in candidate.all_matching_files
+            )
+        )
+        if len(paths) != 1:
+            raise RuntimeError(
+                "Partector Pro requires exactly one confirmed source CSV"
+            )
+        self.resource_manager.admit_task(
+            max(paths[0].stat().st_size * 15, 192 * 1024 * 1024),
+            self._resource_limits,
+            task_name="Partector Pro legacy CSV quicklook",
+        )
+        adapter = PartectorAdapter(
+            output_root=self._run_output_root(project, "partector"),
+            flight_name=project.flight_id,
+            logger=self.logger,
+        )
+        adapter.report_progress(
+            lambda update: context.report_progress(
+                update.progress or 0.0, update.phase
+            )
+        )
+        loaded = adapter.load(
+            InputCandidate(
+                "partector",
+                paths,
+                1.0,
+                "Confirmed Flight Folder scan candidate",
+            )
+        )
+        result = adapter.process_quicklook(
+            loaded,
+            {
+                "analysis_start": selected_start,
+                "analysis_end": selected_end,
+                "session": "all",
+                "session_gap_minutes": 10.0,
+                "trim_start_minutes": 0.0,
+                "flow_min_lpm": 0.45,
+                "flow_max_lpm": 0.55,
+            },
+        )
+        figures = adapter.create_plots(result, adapter.output_root)
+        adapter.export_results(result, adapter.output_root, ("csv", "json", "md"))
+        browser = adapter.export_browser_data(result, adapter.output_root)
+        with self._lock:
+            state = self._instruments["partector"]
+            state.output_files = [
+                str(value.path) for value in (*figures, *result.output_files)
+            ]
+            saved = project.detected_instruments.get("partector")
+            if saved is not None:
+                saved.output_locations = [Path(value) for value in state.output_files]
+        self._publish_hatchbox_browser(project, "partector", browser.path)
+        return JobOutcome(warning=result.warnings[0] if result.warnings else None)
+
+    def _ins_gimbal_task(
+        self, context: ProcessingContext
+    ) -> JobOutcome | None:
+        from instruments.ins_gimbal import InsGimbalAdapter
+
+        with self._lock:
+            report, project = self._report, self._flight_project
+            start, end = self._instrument_processing_interval("ins_gimbal")
+        if report is None or project is None:
+            raise RuntimeError("Flight scan and project state are required")
+        paths = tuple(dict.fromkeys(
+            path for candidate in report.candidates
+            if candidate.instrument_id == "ins_gimbal"
+            for path in candidate.all_matching_files
+        ))
+        if len(paths) != 1:
+            raise RuntimeError("INS Gimbal requires one confirmed source CSV")
+        self.resource_manager.admit_task(
+            max(paths[0].stat().st_size * 15, 192 * 1024 * 1024),
+            self._resource_limits, task_name="INS Gimbal quicklook",
+        )
+        adapter = InsGimbalAdapter(
+            output_root=self._run_output_root(project, "ins_gimbal"),
+            flight_name=project.flight_id, logger=self.logger,
+        )
+        adapter.report_progress(lambda update: context.report_progress(
+            update.progress or 0.0, update.phase
+        ))
+        loaded = adapter.load(InputCandidate(
+            "ins_gimbal", paths, 1.0, "Confirmed scan candidate"
+        ))
+        result = adapter.process_quicklook(loaded, {
+            "analysis_start": start, "analysis_end": end,
+            "gap_seconds": 10.0, "rms_seconds": 30.0,
+            "maneuver_threshold_dps": 10.0,
+        })
+        figures = adapter.create_plots(result, adapter.output_root)
+        outputs = adapter.export_results(
+            result, adapter.output_root, ("csv", "json", "md")
+        )
+        browser = adapter.export_browser_data(result, adapter.output_root)
+        with self._lock:
+            state = self._instruments["ins_gimbal"]
+            state.output_files = [
+                str(value.path) for value in (*figures, *outputs, browser)
+            ]
+            saved = project.detected_instruments.get("ins_gimbal")
+            if saved is not None:
+                saved.output_locations = [Path(value) for value in state.output_files]
+        self._publish_hatchbox_browser(project, "ins_gimbal", browser.path)
+        return JobOutcome()
+
+    def _sif_task(self, context: ProcessingContext) -> JobOutcome | None:
+        from instruments.sif import SifAdapter
+        with self._lock:
+            report, project = self._report, self._flight_project
+            start, end = self._instrument_processing_interval("sif")
+        if report is None or project is None:
+            raise RuntimeError("Flight scan and project state are required")
+        paths = tuple(dict.fromkeys(
+            path for candidate in report.candidates if candidate.instrument_id == "sif"
+            for path in candidate.all_matching_files
+        ))
+        if not paths: raise RuntimeError("No selected SIF raw files are available")
+        self.resource_manager.admit_task(
+            max(sum(path.stat().st_size for path in paths) * 12, 512 * 1024 * 1024),
+            self._resource_limits, task_name="AirFloX SIF spectral processing",
+        )
+        adapter = SifAdapter(
+            output_root=self._run_output_root(project, "sif"),
+            flight_name=project.flight_id, logger=self.logger,
+        )
+        adapter.report_progress(lambda update: context.report_progress(update.progress or 0.0, update.phase))
+        loaded = adapter.load(InputCandidate("sif", paths, 1.0, "Confirmed scan candidate"))
+        with self._lock:
+            sif_options = dict(self._sif_options)
+        result = adapter.process_quicklook(loaded, {
+            "analysis_start": start, "analysis_end": end,
+            "flight_root": project.flight_folder_path,
+            **sif_options,
+        })
+        outputs = adapter.export_results(result, adapter.output_root, ("csv", "gis"))
+        adapter.create_plots(result, adapter.output_root)
+        browser = adapter.export_browser_data(result, adapter.output_root)
+        with self._lock:
+            state = self._instruments["sif"]
+            state.output_files = [
+                str(value.path) for value in (*outputs, browser)
+            ]
+            state.quicklook = json.loads(browser.path.read_text(encoding="utf-8"))
+            saved = project.detected_instruments.get("sif")
+            if saved is not None:
+                saved.output_locations = [
+                    Path(value) for value in state.output_files
+                ]
+            project.instrument_options["sif"] = dict(sif_options)
+        self._publish_hatchbox_browser(project, "sif", browser.path)
+        return JobOutcome(warning=result.warnings[0] if result.warnings else None)
+
+    def _camera_quick_task(
+        self, instrument_id: str, context: ProcessingContext
+    ) -> JobOutcome | None:
+        """Bounded discovery metadata only; never decode complete camera datasets."""
+        with self._lock:
+            report = self._report
+        if report is None:
+            raise RuntimeError("Flight scan is required for camera metadata checks")
+        candidates = [
+            item for item in report.candidates if item.instrument_id == instrument_id
+        ]
+        if not candidates:
+            raise RuntimeError(f"No detected {instrument_id} camera data")
+        context.report_progress(20.0, "Reviewing scanner metadata")
+        file_count = sum(item.matching_file_count for item in candidates)
+        samples = tuple(
+            dict.fromkeys(
+                path for item in candidates for path in item.all_matching_files
+            )
+        )
+        total_sample_bytes = 0
+        for index, path in enumerate(samples, 1):
+            context.check_cancelled()
+            try:
+                total_sample_bytes += path.stat().st_size
+            except OSError as exc:
+                self.logger.file_read_error(exc, path, instrument=instrument_id)
+            context.report_progress(
+                20.0 + 70.0 * index / max(1, len(samples)),
+                f"Inspecting bounded metadata sample {index}/{len(samples)}",
+            )
+        with self._lock:
+            state = self._instruments[instrument_id]
+            state.warnings = list(dict.fromkeys(
+                state.warnings + [
+                    "Metadata-only camera quick check; no images were fully decoded."
+                ]
+            ))
+        self.logger.log(
+            LogLevel.SUCCESS, "camera-metadata",
+            f"{instrument_id} metadata quick check complete: {file_count} files",
+            instrument=instrument_id, processing_step="metadata-quick-check",
+        )
+        return JobOutcome(
+            warning=(
+                f"Metadata-only quick check ({file_count} files; "
+                f"{total_sample_bytes} sampled bytes)"
+            )
+        )
+
+    def _micasense_quick_task(self, context: ProcessingContext) -> JobOutcome | None:
+        """Run the bounded Level 1 adapter in the camera-metadata worker group."""
+        with self._lock:
+            report, project = self._report, self._flight_project
+            limits = self._resource_limits
+        if report is None or project is None:
+            raise RuntimeError("Flight scan and project state are required")
+        candidates = [
+            item for item in report.candidates if item.instrument_id == "micasense"
+        ]
+        roots = tuple(dict.fromkeys(item.candidate_path for item in candidates))
+        paths: list[Path] = []
+        archives: list[Path] = []
+        for root in roots:
+            context.check_cancelled()
+            if root.is_dir():
+                paths.extend(
+                    path
+                    for path in root.rglob("*")
+                    if path.is_file() and path.suffix.casefold() in {".tif", ".tiff"}
+                )
+                archives.extend(
+                    path for path in root.rglob("*.zip") if path.is_file()
+                )
+            elif root.suffix.casefold() in {".tif", ".tiff"}:
+                paths.append(root)
+            elif root.suffix.casefold() == ".zip":
+                archives.append(root)
+        for item in candidates:
+            paths.extend(
+                path
+                for path in item.all_matching_files
+                if path.suffix.casefold() in {".tif", ".tiff"} and path.is_file()
+            )
+            archives.extend(
+                path for path in item.all_matching_files
+                if path.suffix.casefold() == ".zip" and path.is_file()
+            )
+        paths = list(dict.fromkeys((*paths, *archives)))
+        if not paths:
+            raise RuntimeError("No MicaSense TIFF images are available")
+        adapter = MicaSenseLevel1Adapter(
+            output_root=project.flight_output_root / "processed" / "micasense",
+            flight_name=project.flight_id,
+            resource_limits=limits,
+            batch_policy=CameraBatchPolicy(
+                maximum_batch_files=max(1, min(32, len(paths))),
+                maximum_thumbnail_count=24,
+            ),
+            logger=self.logger,
+        )
+        adapter.report_progress(
+            lambda update: context.report_progress(
+                update.progress or 0.0, update.phase
+            )
+        )
+        loaded = adapter.load(
+            InputCandidate(
+                "micasense",
+                tuple(paths),
+                1.0,
+                "Confirmed Flight Folder scan candidate",
+            )
+        )
+        result = adapter.process_quicklook(loaded, {})
+        outputs = adapter.export_results(
+            result, adapter.output_root, ("csv", "json")
+        )
+        adapter.create_plots(result, adapter.output_root)
+        with self._lock:
+            state = self._instruments["micasense"]
+            state.output_files = [
+                str(value.path) for value in outputs
+            ] + [str(value.path) for value in result.figures]
+        return JobOutcome(warning=result.warnings[0] if result.warnings else None)
+
+    def _flir_quick_task(self, context: ProcessingContext) -> JobOutcome | None:
+        """Run FLIR Level 1 without invoking any temperature conversion."""
+        with self._lock:
+            report, project = self._report, self._flight_project
+            limits = self._resource_limits
+        if report is None or project is None:
+            raise RuntimeError("Flight scan and project state are required")
+        selected_start, selected_end = self._instrument_processing_interval(
+            "flir"
+        )
+        candidates = [item for item in report.candidates if item.instrument_id == "flir"]
+        roots = tuple(dict.fromkeys(item.candidate_path for item in candidates))
+        paths: list[Path] = []
+        for root in roots:
+            context.check_cancelled()
+            if root.is_dir():
+                paths.extend(path for path in root.rglob("*.json") if path.is_file())
+            elif root.is_file() and root.suffix.casefold() == ".json":
+                paths.append(root)
+        for item in candidates:
+            paths.extend(
+                path for path in item.all_matching_files
+                if path.is_file() and path.suffix.casefold() == ".json"
+            )
+        paths = list(dict.fromkeys(paths))
+        if not paths:
+            raise RuntimeError("No FLIR JSON frame exports are available")
+        adapter = FlirLevel1Adapter(
+            output_root=self._run_output_root(project, "flir"),
+            flight_name=project.flight_id,
+            resource_limits=limits,
+            batch_policy=CameraBatchPolicy(
+                maximum_batch_files=max(1, min(8, len(paths))),
+                maximum_thumbnail_count=12,
+            ),
+            logger=self.logger,
+        )
+        adapter.report_progress(
+            lambda update: context.report_progress(update.progress or 0.0, update.phase)
+        )
+        loaded = adapter.load(InputCandidate(
+            "flir", tuple(paths), 1.0, "Confirmed Flight Folder scan candidate"
+        ))
+        result = adapter.process_quicklook(
+            loaded,
+            {
+                "analysis_start": selected_start,
+                "analysis_end": selected_end,
+            },
+        )
+        outputs = adapter.export_results(result, adapter.output_root, ("csv", "json"))
+        figures = adapter.create_plots(result, adapter.output_root)
+        browser_payload = {
+            "available": True,
+            "temperature_available": False,
+            "temperature_reason": (
+                "Run confirmed FLIR Level 2 radiometric temperature conversion "
+                "to activate the land-surface-temperature map."
+            ),
+            "temperature_interpretation": (
+                "FLIR Planck apparent temperature; atmospheric, emissivity, "
+                "distance, and external-optics corrections are not applied."
+            ),
+            "utc_start": _iso(result.utc_start_time),
+            "utc_end": _iso(result.utc_end_time),
+            "summary": dict(result.metadata),
+            "acquisition_intervals_seconds": list(
+                result.metadata.get("acquisition_intervals_seconds", ())
+            ),
+            "gaps": list(adapter.acquisition_gaps()),
+            "samples": list(adapter.sample_records()),
+            "thumbnails": [
+                {
+                    "name": value.path.name,
+                    "url": f"/api/flir/asset/{value.path.name}",
+                    "caption": value.title,
+                }
+                for value in figures
+            ],
+            "temperature_records": [],
+            "map_points": [],
+            "warnings": list(result.warnings),
+        }
+        quicklook_path = (
+            project.flight_output_root / "quicklooks" / "flir_browser.json"
+        )
+        quicklook_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = quicklook_path.with_suffix(".json.temporary")
+        temporary.write_text(
+            json.dumps(
+                browser_payload,
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(quicklook_path)
+        with self._lock:
+            state = self._instruments["flir"]
+            state.output_files = [
+                str(value.path) for value in outputs
+            ] + [str(value.path) for value in figures] + [str(quicklook_path)]
+            state.quicklook = browser_payload
+            saved = project.detected_instruments.get("flir")
+            if saved is not None:
+                saved.output_locations = [
+                    Path(value) for value in state.output_files
+                ]
+            project.output_locations["flir_browser"] = quicklook_path
+        return JobOutcome(warning=result.warnings[0] if result.warnings else None)
+
+    def _flir_detailed_task(
+        self, context: ProcessingContext, selected_routines: tuple[str, ...]
+    ) -> JobOutcome | None:
+        """Invoke only the validated, batch-oriented FLIR Level 2 routine."""
+        with self._lock:
+            report, project, limits = (
+                self._report, self._flight_project, self._resource_limits
+            )
+            noseboom_points = tuple(
+                self._instruments["noseboom"].quicklook.get("points", ())
+            )
+        if report is None or project is None:
+            raise RuntimeError("Flight scan and project state are required")
+        paths: list[Path] = []
+        for item in report.candidates:
+            if item.instrument_id != "flir":
+                continue
+            root = item.candidate_path
+            if root.is_dir():
+                paths.extend(path for path in root.rglob("*.json") if path.is_file())
+            elif root.is_file() and root.suffix.casefold() == ".json":
+                paths.append(root)
+            paths.extend(
+                path for path in item.all_matching_files
+                if path.is_file() and path.suffix.casefold() == ".json"
+            )
+        paths = list(dict.fromkeys(paths))
+        if not paths:
+            raise RuntimeError("No FLIR JSON frame exports are available")
+        context.report_progress(2, "Loading validated FLIR Level 2 routine")
+        from core.legacy_paths import legacy_integration_path
+
+        source = legacy_integration_path("FLIR", "FLIR_Processing_pipeline.py")
+        spec = importlib.util.spec_from_file_location(
+            "ccflux_legacy_flir_level2", source
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError("Validated FLIR Level 2 source could not be loaded")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        context.check_cancelled()
+        chunk_bytes = max(
+            64 * 1024,
+            min(8 * 1024 * 1024, limits.memory_bytes // max(1, limits.worker_count * 8)),
+        )
+        tasks = []
+        total_bytes = sum(path.stat().st_size for path in paths)
+        for path in paths:
+            for start in range(0, path.stat().st_size, chunk_bytes):
+                tasks.append((path, start, min(start + chunk_bytes, path.stat().st_size), 4096))
+        entries = []
+        scanned = 0
+        for index, task in enumerate(tasks, 1):
+            context.check_cancelled()
+            bytes_done, _, part = module.scan_one_byte_range(task)
+            scanned += bytes_done
+            entries.extend(part)
+            context.report_progress(
+                5 + 25 * scanned / max(1, total_bytes),
+                f"Indexing FLIR frames {index}/{len(tasks)}",
+            )
+        entries.sort(key=lambda item: (item[0], str(item[1]), item[2]))
+        start = self._time_state.selected_analysis_start
+        end = self._time_state.selected_analysis_end
+        if start and end:
+            entries = [
+                item for item in entries
+                if (parsed := module.parse_timestamp(item[0])) is not None
+                and start <= parsed.replace(tzinfo=parsed.tzinfo or start.tzinfo) <= end
+            ]
+        if not entries:
+            raise RuntimeError("No FLIR frames fall inside the selected analysis interval")
+        output_dir = project.flight_output_root / "processed" / "flir" / "level2"
+        output_file = output_dir / "flir_radiometric_temperature_statistics.csv"
+        if output_file.exists():
+            raise FileExistsError(f"FLIR Level 2 output already exists: {output_file}")
+        context.report_progress(32, "Radiometric conversion and frame statistics")
+        processed = module.calculate_selected_window(
+            entries,
+            paths,
+            batch_size=max(1, min(8, limits.memory_bytes // (128 * 1024 * 1024))),
+            workers=1,
+            output_csv=output_file,
+        )
+        context.report_progress(
+            94, "Matching FLIR temperature frames to Noseboom navigation"
+        )
+        with output_file.open(
+            "r", encoding="utf-8-sig", newline=""
+        ) as stream:
+            level2_rows = list(csv.DictReader(stream))
+        temperature_records = [
+            {
+                "frame_id": str(
+                    row.get("record_index_in_selected_scan") or index
+                ),
+                "timestamp_utc": str(row.get("timestamp.$date") or ""),
+                "temperature_min_c": _finite_or_none(
+                    row.get("pixel_temperature.min_c")
+                ),
+                "temperature_max_c": _finite_or_none(
+                    row.get("pixel_temperature.max_c")
+                ),
+                "temperature_mean_c": _finite_or_none(
+                    row.get("pixel_temperature.mean_c")
+                ),
+                "temperature_median_c": _finite_or_none(
+                    row.get("pixel_temperature.median_c")
+                ),
+                "temperature_std_c": _finite_or_none(
+                    row.get("pixel_temperature.std_c")
+                ),
+                "valid_pixel_count": _integer_or_none(
+                    row.get("pixel_temperature.valid_pixel_count")
+                ),
+                "status": str(
+                    row.get("calculated_temperature.status") or ""
+                ),
+            }
+            for index, row in enumerate(level2_rows, start=1)
+        ]
+        map_points = georeference_temperature_records(
+            level2_rows, noseboom_points
+        )
+        with self._lock:
+            browser_payload = dict(self._instruments["flir"].quicklook)
+        browser_payload.update(
+            {
+                "available": True,
+                "temperature_available": bool(map_points),
+                "temperature_reason": (
+                    None
+                    if map_points
+                    else "Temperature statistics were calculated, but no frame "
+                    "could be matched to Noseboom navigation within 2.5 seconds."
+                ),
+                "temperature_interpretation": (
+                    "FLIR Planck apparent land-surface temperature; "
+                    "atmospheric, emissivity, distance, and external-optics "
+                    "corrections are not applied."
+                ),
+                "temperature_records": temperature_records,
+                "map_points": map_points,
+                "processed_temperature_frames": len(temperature_records),
+                "georeferenced_temperature_frames": len(map_points),
+                "matching_method": (
+                    "Nearest Noseboom UTC navigation sample; maximum "
+                    "difference 2.5 seconds"
+                ),
+            }
+        )
+        quicklook_path = (
+            project.flight_output_root / "quicklooks" / "flir_browser.json"
+        )
+        quicklook_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = quicklook_path.with_suffix(".json.temporary")
+        temporary.write_text(
+            json.dumps(
+                browser_payload,
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(quicklook_path)
+        context.report_progress(100, "FLIR Level 2 and temperature map complete")
+        with self._lock:
+            state = self._instruments["flir"]
+            for value in (output_file, quicklook_path):
+                if str(value) not in state.output_files:
+                    state.output_files.append(str(value))
+            state.quicklook = browser_payload
+            saved = project.detected_instruments.get("flir")
+            if saved is not None:
+                saved.output_locations = [
+                    Path(value) for value in state.output_files
+                ]
+            project.output_locations["flir_browser"] = quicklook_path
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "camera-level2",
+            f"FLIR Level 2 completed for {processed} frame(s)",
+            instrument="flir",
+            job_id="flir_detailed",
+            file_path=output_file,
+            processing_step=",".join(selected_routines),
+        )
+        return None
+
+    def _gopro_quick_task(self, context: ProcessingContext) -> JobOutcome | None:
+        """Inventory GoPro media and match CET/CEST captures to Noseboom UTC."""
+        with self._lock:
+            report, project = self._report, self._flight_project
+            limits = self._resource_limits
+        if report is None or project is None:
+            raise RuntimeError("Flight scan and project state are required")
+        selected_start, selected_end = self._instrument_processing_interval(
+            "gopro"
+        )
+        candidates = [item for item in report.candidates if item.instrument_id == "gopro"]
+        roots = tuple(dict.fromkeys(item.candidate_path for item in candidates))
+        supported = {".jpg", ".jpeg", ".png", ".mp4", ".mov"}
+        paths: list[Path] = []
+        for root in roots:
+            context.check_cancelled()
+            if root.is_dir():
+                paths.extend(path for path in root.rglob("*") if path.is_file() and path.suffix.casefold() in supported)
+            elif root.is_file() and root.suffix.casefold() in supported:
+                paths.append(root)
+        for item in candidates:
+            paths.extend(path for path in item.all_matching_files if path.is_file() and path.suffix.casefold() in supported)
+        paths = list(dict.fromkeys(paths))
+        if not paths:
+            raise RuntimeError("No supported GoPro images or videos are available")
+        adapter = GoProLevel1Adapter(
+            output_root=self._run_output_root(project, "gopro"),
+            flight_name=project.flight_id,
+            resource_limits=limits,
+            batch_policy=CameraBatchPolicy(
+                maximum_batch_files=max(1, min(16, len(paths))),
+                maximum_thumbnail_count=12,
+            ),
+            logger=self.logger,
+        )
+        adapter.report_progress(lambda update: context.report_progress(update.progress or 0.0, update.phase))
+        loaded = adapter.load(InputCandidate("gopro", tuple(paths), 1.0, "Confirmed Flight Folder scan candidate"))
+        result = adapter.process_quicklook(
+            loaded,
+            {
+                "analysis_start": selected_start,
+                "analysis_end": selected_end,
+            },
+        )
+        outputs = adapter.export_results(result, adapter.output_root, ("csv", "json"))
+        adapter.create_plots(result, adapter.output_root)
+        context.report_progress(82, "Matching GoPro Europe/Berlin time to Noseboom UTC")
+        camera_root = project.camera_folder_path.resolve() if project.camera_folder_path else None
+        records = [
+            {
+                **item,
+                "source_file": (
+                    str(Path(str(item["source_file"])).resolve().relative_to(camera_root))
+                    if camera_root is not None
+                    and Path(str(item["source_file"])).resolve().is_relative_to(camera_root)
+                    else Path(str(item["source_file"])).name
+                ),
+                "timestamp": (
+                    item["timestamp"].isoformat()
+                    if isinstance(item.get("timestamp"), datetime)
+                    else item.get("timestamp")
+                ),
+            }
+            for item in adapter.media_records()
+        ]
+        # Noseboom and camera metadata run in separate worker groups. Read the
+        # navigation payload only after the slower camera inventory completes,
+        # rather than retaining an empty snapshot from job start.
+        with self._lock:
+            noseboom_points = tuple(
+                self._instruments["noseboom"].quicklook.get("points", ())
+            )
+        captures = georeference_captures(records, noseboom_points)
+        image_count = sum(
+            1 for item in adapter.media_records() if item.get("kind") == "image"
+        )
+        payload = {
+            "available": bool(captures),
+            "reason": (
+                None if captures
+                else "No GoPro image timestamp could be matched to processed Noseboom navigation within 2.5 seconds."
+            ),
+            "camera_timezone": "Europe/Berlin (CET/CEST)",
+            "navigation_timezone": "UTC",
+            "matching_method": "Nearest Noseboom 1 Hz sample; maximum difference 2.5 seconds",
+            "image_count": image_count,
+            "matched_count": len(captures),
+            "unmatched_count": max(0, image_count - len(captures)),
+            "inventory": records,
+            "captures": captures,
+        }
+        quicklook_path = (
+            project.flight_output_root / "quicklooks" / "gopro_browser.json"
+        )
+        quicklook_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = quicklook_path.with_suffix(".json.temporary")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(quicklook_path)
+        with self._lock:
+            state = self._instruments["gopro"]
+            state.quicklook = payload
+            state.output_files = [
+                str(value.path) for value in outputs
+            ] + [str(value.path) for value in result.figures] + [str(quicklook_path)]
+            project.output_locations["gopro_quicklook"] = quicklook_path
+            saved = project.detected_instruments.get("gopro")
+            if saved is not None:
+                saved.output_locations = [
+                    *(Path(value.path) for value in outputs),
+                    *(Path(value.path) for value in result.figures),
+                    quicklook_path,
+                ]
+        context.report_progress(100, f"GoPro map ready with {len(captures)} capture locations")
+        warning = result.warnings[0] if result.warnings else None
+        if not captures:
+            warning = str(payload["reason"])
+        return JobOutcome(warning=warning)
+
+    def _on_job_update(self, job: ProcessingJob) -> None:
+        with self._lock:
+            if job.status in {
+                ProcessingStatus.COMPLETE,
+                ProcessingStatus.WARNING,
+            }:
+                active_job = self.processing_queue.get(job.job_id)
+                active_job.enabled = False
+            state = self._instruments.get(job.instrument_id)
+            if state is not None:
+                state.processing_status = job.status.value
+                state.processing_progress = job.progress
+                state.processing_step = job.current_step
+                state.processing_elapsed_seconds = job.elapsed_time.total_seconds()
+                if job.error:
+                    state.errors = list(dict.fromkeys(state.errors + [job.error]))
+                if job.status is ProcessingStatus.WARNING and job.current_step:
+                    state.warnings = list(
+                        dict.fromkeys(state.warnings + [job.current_step])
+                    )
+            self._sync_project_queue_state()
+            self._checkpoint_project()
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _finite_or_none(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
+
+
+def _integer_or_none(value: object) -> int | None:
+    number = _finite_or_none(value)
+    return int(number) if number is not None else None
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None or str(value).strip() == "":
+        return None
+    number = _finite_or_none(value)
+    if number is None:
+        raise ValueError(f"Expected a finite numeric value, received: {value}")
+    return number
+
+
+def _assert_directory_responsive(path: Path, timeout_seconds: float = 8.0) -> None:
+    """Avoid starting an uncancellable scan on a stalled external mount."""
+    probe = (
+        "import os,sys; iterator=os.scandir(sys.argv[1]); "
+        "next(iterator,None); iterator.close()"
+    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", probe, str(path)],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(
+            "Camera System Folder did not respond within "
+            f"{timeout_seconds:g} seconds. Check the external disk or select "
+            "the flight-specific camera subfolder."
+        ) from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or "directory enumeration failed"
+        raise ValueError(f"Camera System Folder is not readable: {detail}")
+
+
+def _merge_scan_reports(primary: ScanReport, camera: ScanReport) -> ScanReport:
+    """Combine independent raw roots while retaining every candidate."""
+    candidates = list(primary.candidates) + list(camera.candidates)
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        counts[candidate.instrument_id] = counts.get(candidate.instrument_id, 0) + 1
+    merged_candidates = tuple(
+        replace(
+            candidate,
+            ambiguous=candidate.ambiguous or counts[candidate.instrument_id] > 1,
+            warnings=tuple(
+                dict.fromkeys(
+                    (
+                        *candidate.warnings,
+                        *(
+                            ("Multiple candidate paths matched this instrument across selected roots.",)
+                            if counts[candidate.instrument_id] > 1
+                            else ()
+                        ),
+                    )
+                )
+            ),
+        )
+        for candidate in candidates
+    )
+    return ScanReport(
+        root=primary.root,
+        candidates=merged_candidates,
+        files_scanned=primary.files_scanned + camera.files_scanned,
+        folders_scanned=primary.folders_scanned + camera.folders_scanned,
+        inaccessible_path_count=primary.inaccessible_path_count + camera.inaccessible_path_count,
+        malformed_file_count=primary.malformed_file_count + camera.malformed_file_count,
+        warnings=tuple(dict.fromkeys((*primary.warnings, *camera.warnings))),
+        errors=tuple(dict.fromkeys((*primary.errors, *camera.errors))),
+        cancelled=primary.cancelled or camera.cancelled,
+    )
+
+
+def _job_dict(job: ProcessingJob) -> dict[str, object]:
+    return {
+        "job_id": job.job_id,
+        "instrument_id": job.instrument_id,
+        "display_name": job.display_name,
+        "worker_group": job.worker_group.value,
+        "priority": job.priority,
+        "enabled": job.enabled,
+        "status": job.status.value,
+        "progress": job.progress,
+        "current_step": job.current_step,
+        "elapsed_seconds": job.elapsed_time.total_seconds(),
+        "safely_cancellable": job.safely_cancellable,
+        "detailed": job.detailed,
+        "task_registered": job.task is not None,
+        "error": job.error,
+    }

@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "instrument_id": "noseboom",
+      "display_name": "Noseboom",
+      "pattern_set": "noseboom",
+      "requires_confirmation": false,
+      "todo": []
+    },
+    {
+      "instrument_id": "miro",
+      "display_name": "MIRO",
+      "pattern_set": "miro",
+      "requires_confirmation": false,
+      "todo": []
+    },
+    {
+      "instrument_id": "picarro",
+      "display_name": "Picarro",
+      "pattern_set": "picarro",
+      "requires_confirmation": false,
+      "todo": []
+    },
+    {
+      "instrument_id": "opc_hbx4",
+      "display_name": "OPC HBX-4",
+      "pattern_set": "opc_hbx4",
+      "requires_confirmation": false,
+      "todo": []
+    },
+    {
+      "instrument_id": "opc_hbx5",
+      "display_name": "OPC HBX-5",
+      "pattern_set": "opc_hbx5",
+      "requires_confirmation": false,
+      "todo": []
+    },
+    {
+      "instrument_id": "partector",
+      "display_name": "Partector Pro",
+      "pattern_set": "partector",
+      "requires_confirmation": false,
+      "todo": []
+    },
+    {
+      "instrument_id": "ins_gimbal",
+      "display_name": "INS Gimbal",
+      "pattern_set": "ins_gimbal",
+      "requires_confirmation": false,
+      "todo": []
+    },
+    {
+      "instrument_id": "sif",
+      "display_name": "SIF / FLOX",
+      "pattern_set": "sif",
+      "requires_confirmation": false,
+      "todo": []
+    },
+    {
+      "instrument_id": "micasense",
+      "display_name": "MicaSense",
+      "pattern_set": "micasense",
+      "requires_confirmation": true,
+      "todo": [
+        "ZIP discovery is confirmed, but Level 1 processing currently requires TIFF files to be extracted without modifying the archive."
+      ]
+    },
+    {
+      "instrument_id": "flir",
+      "display_name": "FLIR",
+      "pattern_set": "flir",
+      "requires_confirmation": false,
+      "todo": []
+    },
+    {
+      "instrument_id": "gopro",
+      "display_name": "GoPro",
+      "pattern_set": "gopro",
+      "requires_confirmation": false,
+      "todo": []
+    }
+  ]
+}
