@@ -19,7 +19,7 @@ UPDATE_MANIFEST_URL = (
 # installed automatically: a scientific run must not have its software replaced
 # underneath it, and a project written by one version being reopened by another
 # mid-campaign is exactly the situation to avoid.
-UPDATE_DOWNLOAD_URL = "https://uni-koeln.sciebo.de/s/CCFLUX"
+UPDATE_DOWNLOAD_URL = "https://github.com/biplobforestry/CCFLUX_Software-2026"
 
 # Setting this to off/0/false/no disables the check completely.
 UPDATE_CHECK_ENVIRONMENT_VARIABLE = "CCFLUX_UPDATE_CHECK"

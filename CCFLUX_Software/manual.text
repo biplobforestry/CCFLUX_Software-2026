@@ -111,8 +111,8 @@ The **Update** button reports whether a newer release has been published.
 * On start-up, and when the button is pressed, CC-FLUX requests one small file
   from GitHub. If a newer version exists, the button turns green and reads
   **Update available**, and a short notice appears once.
-* **Nothing is downloaded or installed automatically.** The dialog links to the
-  download page. Finish any processing and save your Flight Project before
+* **Nothing is downloaded or installed automatically.** The dialog links to
+  the release page at https://github.com/biplobforestry/CCFLUX_Software-2026. Finish any processing and save your Flight Project before
   updating, so that a project written by one version is not reopened by another
   part-way through a campaign.
 * If the machine is offline the check fails silently. Every function of the
