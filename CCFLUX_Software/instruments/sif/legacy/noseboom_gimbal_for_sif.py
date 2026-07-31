@@ -56,21 +56,16 @@ def parse_datetime(value: str) -> datetime:
     text = value.strip()
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
+    # CCFLUX discovery fix, not a science change: Noseboom deliveries write
+    # nanosecond precision (…52.602000000), which fromisoformat rejects because
+    # it accepts only 3 or 6 fractional digits. Truncate to microseconds.
     if "." in text:
         prefix, suffix = text.split(".", 1)
         fraction_length = 0
-        while (
-            fraction_length < len(suffix)
-            and suffix[fraction_length].isdigit()
-        ):
+        while fraction_length < len(suffix) and suffix[fraction_length].isdigit():
             fraction_length += 1
         if fraction_length > 6:
-            text = (
-                prefix
-                + "."
-                + suffix[:6]
-                + suffix[fraction_length:]
-            )
+            text = prefix + "." + suffix[:6] + suffix[fraction_length:]
     dt = datetime.fromisoformat(text)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -660,7 +655,8 @@ def find_existing_sif_log(hatchbox: Path) -> Path | None:
 
 
 def find_gimbal_file(hatchbox: Path) -> Path:
-    csv_files = sorted(set(hatchbox.glob("*.csv")) | set(hatchbox.glob("*.CSV")))
+    # CCFLUX discovery fix, not a science change: search subfolders too.
+    csv_files = sorted(set(hatchbox.rglob("*.csv")) | set(hatchbox.rglob("*.CSV")))
     candidates = [path for path in csv_files if "gimbal" in path.name.lower() and "gremsy" in path.name.lower()]
     if not candidates:
         candidates = [path for path in csv_files if "gimbal" in path.name.lower()]
@@ -670,9 +666,8 @@ def find_gimbal_file(hatchbox: Path) -> Path:
 
 
 def find_noseboom_file(hatchbox: Path) -> Path:
-    csv_files = sorted(
-        set(hatchbox.rglob("*.csv")) | set(hatchbox.rglob("*.CSV"))
-    )
+    # CCFLUX discovery fix, not a science change: search subfolders too.
+    csv_files = sorted(set(hatchbox.rglob("*.csv")) | set(hatchbox.rglob("*.CSV")))
     candidates = [path for path in csv_files if "noseboom" in path.name.lower()]
     if not candidates:
         candidates = [path for path in csv_files if "ins" in path.name.lower() and "100hz" in path.name.lower()]
@@ -701,17 +696,19 @@ def prepare_sif_log_from_hatchbox(
             print("warning=Altitude_filter requested, but an existing SIF log was found and used unchanged.")
         return existing_log
 
-    gimbal_csv = find_gimbal_file(hatchbox)
+    # CCFLUX discovery fix, not a science change: deliveries commonly keep the
+    # gimbal or the processed NoseBoom product outside the HATCH-BOX tree, so
+    # fall back to the whole flight folder before giving up.
+    try:
+        gimbal_csv = find_gimbal_file(hatchbox)
+    except FileNotFoundError:
+        gimbal_csv = find_gimbal_file(Path(flight_root))
+        print(f"warning=Gimbal position was discovered outside HATCH-BOX: {gimbal_csv}")
     try:
         noseboom_csv = find_noseboom_file(hatchbox)
     except FileNotFoundError:
-        # Campaign deliveries commonly keep the processed NoseBoom product
-        # beside the influxdb tree rather than inside HATCH-BOX.
         noseboom_csv = find_noseboom_file(Path(flight_root))
-        print(
-            "warning=Noseboom position was discovered outside HATCH-BOX: "
-            f"{noseboom_csv}"
-        )
+        print(f"warning=Noseboom position was discovered outside HATCH-BOX: {noseboom_csv}")
     output_path = Path(output_dir) / "_combined" / f"{Path(flight_root).name}_noseboom_gimbal_sif_log.csv"
     args = argparse.Namespace(
         gimbal_csv=gimbal_csv,

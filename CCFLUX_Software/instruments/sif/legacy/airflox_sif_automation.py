@@ -55,7 +55,7 @@ def header_value_positions(d):
 def filter_raw(r,k):
     return AirFloXRaw(r.e[:,k],r.dc_e[:,k],r.e2[:,k],r.l[:,k],r.dc_l[:,k],r.it_e_ms[k],r.it_l_ms[k],[v for v,x in zip(r.date,k) if x],[v for v,x in zip(r.time,k) if x],r.temp1[k],r.humidity[k],[v for v,x in zip(r.gps_time,k) if x],[v for v,x in zip(r.gps_date,k) if x],[v for v,x in zip(r.gps_lat,k) if x],[v for v,x in zip(r.gps_lon,k) if x],r.cpu1[k],r.cpu2[k])
 
-def read_drox_full(p,n,drop_e500_zero=False,drop_zero_gps=True):
+def read_drox_full(p,n,drop_e500_zero=False):
     d=read_semicolon_csv(p)
     if d.empty: raise ValueError(f'Empty AirFloX raw file: {p}')
     candidate_rows=np.flatnonzero((d.iloc[:,0]=='WR').to_numpy())-1
@@ -74,9 +74,7 @@ def read_drox_full(p,n,drop_e500_zero=False,drop_zero_gps=True):
     if len(rows)==0: raise ValueError(f'No complete AirFloX measurement blocks found in {p}')
     pos=header_value_positions(d); mv=lambda k:[str(v) for v in d.iloc[rows,pos[k]].tolist()]; mn=lambda k:pd.to_numeric(d.iloc[rows,pos[k]],errors='coerce').to_numpy(float); spec=lambda off:numeric_frame(d.iloc[rows+off,1:]).iloc[:,:n].to_numpy(float).T
     r=AirFloXRaw(spec(1),spec(4),spec(3),spec(2),spec(5),mn('it_e')/1000,mn('it_l')/1000,[str(v) for v in d.iloc[rows,1].tolist()],[str(v) for v in d.iloc[rows,2].tolist()],mn('temp1'),mn('humidity'),mv('gps_time'),mv('gps_date'),mv('gps_lat'),mv('gps_lon'),mn('cpu1'),mn('cpu2'))
-    keep=np.ones(len(r.date),dtype=bool)
-    if drop_zero_gps:
-        keep &= ~(pd.to_numeric(pd.Series(r.gps_lat),errors='coerce').to_numpy(float)==0)
+    keep=~(pd.to_numeric(pd.Series(r.gps_lat),errors='coerce').to_numpy(float)==0)
     if drop_e500_zero and r.e.shape[0]>=500:
         keep=keep & ~(r.e[499,:]==0)
     return filter_raw(r,keep)
@@ -156,17 +154,6 @@ def _r_datetime(time_value,date_value):
     try: return datetime(ymd[0],ymd[1],ymd[2],hms[0],hms[1],hms[2],tzinfo=timezone.utc)
     except Exception: return pd.NaT
 
-def _record_clock_datetime(time_value,date_value):
-    """Parse the AirFloX record clock, whose date field is YYMMDD."""
-    hms=_r_time_to_hms(time_value)
-    text=str(date_value).strip().split('.')[0]
-    if hms is None or not text or text.lower().startswith('nan'): return pd.NaT
-    text=text.zfill(6)
-    try:
-        return datetime(2000+int(text[0:2]),int(text[2:4]),int(text[4:6]),hms[0],hms[1],hms[2],tzinfo=timezone.utc)
-    except Exception:
-        return pd.NaT
-
 def get_gps_utc(raw):
     clock_dates=pd.to_numeric(pd.Series(raw.date),errors='coerce').to_numpy(float)
     invalid=(clock_dates==181818)|(clock_dates==4516585)|(clock_dates==191919)|(clock_dates<180000)|(~np.isfinite(clock_dates))
@@ -181,20 +168,18 @@ def get_gps_utc(raw):
     bad_idx=np.flatnonzero(invalid)
     for i in bad_idx:
         if 0<i<len(fixed_clock_dates): fixed_clock_dates[i]=fixed_clock_dates[i-1]
-    clock=[_record_clock_datetime(t,d) for t,d in zip(raw.time,fixed_clock_dates)]
+    clock=[_r_datetime(t,d) for t,d in zip(raw.time,fixed_clock_dates)]
     diffs=[]
     for i in range(len(clock)-1):
         if pd.isna(clock[i]) or pd.isna(clock[i+1]): diffs.append(0.0)
         else: diffs.append((clock[i+1]-clock[i]).total_seconds())
     if diffs: diffs.append(diffs[-1])
     else: diffs=[0.0]*len(clock)
-    clock_fallback=np.zeros(len(utc),dtype=bool)
     for i in range(min(len(utc),len(clock))):
-        if pd.isna(clock[i]): continue
-        if pd.isna(utc[i]) or abs((utc[i].date()-clock[i].date()).days)>1:
-            utc[i]=clock[i]
-            clock_fallback[i]=True
-    if len(utc)>1 and not clock_fallback[0] and not pd.isna(utc[1]):
+        if pd.isna(utc[i]) or pd.isna(clock[i]): continue
+        if abs((utc[i].date()-clock[i].date()).days)>1 and i+1<len(utc) and not pd.isna(utc[i+1]):
+            utc[i]=utc[i+1]-timedelta(seconds=diffs[i])
+    if len(utc)>1 and not pd.isna(utc[1]):
         utc[0]=utc[1]-timedelta(seconds=diffs[0])
     for i in range(len(utc)):
         if pd.isna(utc[i]):
@@ -391,8 +376,8 @@ def apply_time_window(m,r,start_utc=None,end_utc=None):
     r['E']=r['E'][:,keep]; r['L']=r['L'][:,keep]; r['Ref']=r['Ref'][:,keep]
     return m,r
 
-def process_common(raw_path,cal,index_path,mode,apply_nl=False,spectral_shift_correction=False,retain_zero_gps=False):
-    wl=cal['wl'].to_numpy(float); raw=read_drox_full(raw_path,len(wl),drop_e500_zero=(mode=='FLUO'),drop_zero_gps=not retain_zero_gps); raw=apply_optional_nl(raw,cal,apply_nl)
+def process_common(raw_path,cal,index_path,mode,apply_nl=False,spectral_shift_correction=False):
+    wl=cal['wl'].to_numpy(float); raw=read_drox_full(raw_path,len(wl),drop_e500_zero=(mode=='FLUO')); raw=apply_optional_nl(raw,cal,apply_nl)
     e=get_radiance(raw.e-raw.dc_e,raw.it_e_ms,cal['up_coef'].to_numpy(float)); e2=get_radiance(raw.e2-raw.dc_e,raw.it_e_ms,cal['up_coef'].to_numpy(float)); l=get_radiance(raw.l-raw.dc_l,raw.it_l_ms,cal['dw_coef'].to_numpy(float))
     if mode=='FULL':
         e,e2,l,_shift_nm=apply_full_spectral_shift(wl,e,e2,l,spectral_shift_correction)
@@ -418,8 +403,8 @@ def process_common(raw_path,cal,index_path,mode,apply_nl=False,spectral_shift_co
         out.update({'Incoming at 750nm FLUO [W m-2nm-1sr-1]':ein750,'Reflected 750nm FLUO [W m-2nm-1sr-1]':lin750,'E_stability FLUO [%]':est,'sat value L FLUO':(np.nanmax(raw.l,axis=0)>=200000).astype(int),'sat value E FLUO':(np.nanmax(raw.e,axis=0)>=200000).astype(int),'sat value E2 FLUO':(np.nanmax(raw.e2,axis=0)>=200000).astype(int),'Dynamic range E FLUO [%]':np.nanmax(raw.e,axis=0)*100/200000,'Dynamic range L FLUO [%]':np.nanmax(raw.l,axis=0)*100/200000,'SIF_A_ifld [mW m-2nm-1sr-1]':sif_a,'SIF_B_ifld [mW m-2nm-1sr-1]':sif_b})
     out.update(idx)
     return {'out':pd.DataFrame(out),'wl':wl,'E':e,'L':l,'Ref':ref}
-def process_full(raw,cal,idx,apply_nonlinearity_correction=False,spectral_shift_correction=False,retain_zero_gps=False): return process_common(raw,read_full_calibration(cal),idx,'FULL',apply_nonlinearity_correction,spectral_shift_correction,retain_zero_gps)
-def process_fluo(raw,cal,idx,apply_nonlinearity_correction=False,spectral_shift_correction=False,retain_zero_gps=False): return process_common(raw,read_full_calibration(cal),idx,'FLUO',apply_nonlinearity_correction,False,retain_zero_gps)
+def process_full(raw,cal,idx,apply_nonlinearity_correction=False,spectral_shift_correction=False): return process_common(raw,read_full_calibration(cal),idx,'FULL',apply_nonlinearity_correction,spectral_shift_correction)
+def process_fluo(raw,cal,idx,apply_nonlinearity_correction=False,spectral_shift_correction=False): return process_common(raw,read_full_calibration(cal),idx,'FLUO',apply_nonlinearity_correction,False)
 
 def match_data(air,log):
     """Match AirFloX rows to telemetry exactly like the R MATCH_data() routine.
