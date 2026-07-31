@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import threading
 import traceback as traceback_module
 from dataclasses import asdict, dataclass, field
@@ -434,14 +433,11 @@ class ProcessingLogManager:
                 f"Log export already exists and was not overwritten: {destination}"
             )
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if (
-            not visible_only
-            and severities is None
-            and instrument is None
-            and self.persistent_log_file.exists()
-        ):
-            shutil.copyfile(self.persistent_log_file, destination)
-            return destination
+        # Previously this copied the whole persistent log, which is appended to
+        # across every run of the application, so a project carried diagnostics
+        # from unrelated earlier sessions and flights. Exporting this manager's
+        # own records scopes the project log to the session that produced it.
+        # The complete history remains in the application's persistent log.
         records = self.records(
             severities=severities,
             instrument=instrument,

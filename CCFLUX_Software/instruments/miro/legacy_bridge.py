@@ -8,6 +8,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
+from core.headless_plotting import use_headless_backend
 from core.legacy_paths import legacy_integration_path
 from types import ModuleType
 from typing import Callable, Iterable
@@ -117,6 +118,7 @@ class LegacyMiroBridge:
             raise ImportError(f"Could not load legacy MIRO source: {path}")
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
+        use_headless_backend()
         spec.loader.exec_module(module)
         return module
 

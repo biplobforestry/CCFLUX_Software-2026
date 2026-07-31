@@ -471,6 +471,35 @@ class DashboardScanBackend:
         with self._lock:
             self._miro_rack_bridge = bridge
 
+    def _require_miro_rack_bridge(self) -> object:
+        """Return the MIRO Rack bridge, creating it if nothing attached one.
+
+        Picarro has no standalone adapter — all of its science lives in the
+        preserved MIRO Rack application. Only the HTTP server attached the
+        bridge, so Picarro failed with "the shared MIRO Rack processing bridge
+        is unavailable" whenever processing ran without it, which is every
+        headless run and every test. Building it on demand makes the dependency
+        an implementation detail rather than a launch-order requirement.
+        """
+        with self._lock:
+            bridge = self._miro_rack_bridge
+        if bridge is not None:
+            return bridge
+        try:
+            from .miro_rack_bridge import MiroRackBridge
+
+            bridge = MiroRackBridge(self.application_root, self)
+        except Exception as exc:
+            raise RuntimeError(
+                "Picarro processing needs the preserved MIRO Rack application, "
+                f"which could not be loaded: {exc}"
+            ) from exc
+        with self._lock:
+            # Another thread may have attached one while this was loading.
+            if self._miro_rack_bridge is None:
+                self._miro_rack_bridge = bridge
+            return self._miro_rack_bridge
+
     @staticmethod
     def _new_scan_channel(
         source: str, root: Path | None = None, *, running: bool = False
@@ -2649,6 +2678,34 @@ class DashboardScanBackend:
             "flir_quick": self._flir_quick_task,
             "gopro_quick": self._gopro_quick_task,
         }
+        # Remote Sensing used to enable all three camera products
+        # unconditionally, so an operator who wanted, say, everything except
+        # MicaSense had no way to say so. An explicit selection is honoured;
+        # omitting it keeps the previous behaviour of running whatever is ready.
+        requested = request.get("instruments")
+        if requested is not None:
+            if not isinstance(requested, list) or not all(
+                isinstance(value, str) for value in requested
+            ):
+                raise ValueError("instruments must be a list of instrument IDs")
+            wanted = {str(value).strip() for value in requested if str(value).strip()}
+            if not wanted:
+                raise ValueError(
+                    "Select at least one camera instrument for remote sensing"
+                )
+            unknown = wanted - {
+                self.processing_queue.get(job_id).instrument_id
+                for job_id in camera_tasks
+            }
+            if unknown:
+                raise ValueError(
+                    "Unknown remote-sensing instrument(s): " + ", ".join(sorted(unknown))
+                )
+            camera_tasks = {
+                job_id: task
+                for job_id, task in camera_tasks.items()
+                if self.processing_queue.get(job_id).instrument_id in wanted
+            }
         with self._lock:
             camera_channel = self._scan_channels["camera"]
             if (
@@ -3927,13 +3984,14 @@ class DashboardScanBackend:
             selected_start, selected_end = self._instrument_processing_interval(
                 "picarro"
             )
-            rack_bridge = self._miro_rack_bridge
         if report is None or project is None:
             raise RuntimeError("Flight scan and project state are required")
-        if rack_bridge is None or not hasattr(
-            rack_bridge, "process_picarro_from_main"
-        ):
-            raise RuntimeError("The shared MIRO Rack processing bridge is unavailable")
+        rack_bridge = self._require_miro_rack_bridge()
+        if not hasattr(rack_bridge, "process_picarro_from_main"):
+            raise RuntimeError(
+                "The loaded MIRO Rack application does not expose Picarro "
+                "processing; check legacy_integration/MIRO_Rack."
+            )
         paths = tuple(
             dict.fromkeys(
                 path
