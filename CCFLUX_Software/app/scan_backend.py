@@ -33,6 +33,12 @@ from core.flight_project import (
 )
 from core.gopro_georeference import georeference_captures, public_capture
 from core.flir_georeference import georeference_temperature_records
+from core.flir_discovery import (
+    describe_selection,
+    discover_flir_exports,
+    locate_time_window_bytes,
+    select_exports_for_interval,
+)
 from core.instrument_registry import InstrumentRegistry
 from core.logging_manager import LogLevel, ProcessingLogManager
 from .noseboom_statistics_export import NoseboomStatisticsExportManager
@@ -4323,23 +4329,13 @@ class DashboardScanBackend:
         selected_start, selected_end = self._instrument_processing_interval(
             "flir"
         )
-        candidates = [item for item in report.candidates if item.instrument_id == "flir"]
-        roots = tuple(dict.fromkeys(item.candidate_path for item in candidates))
-        paths: list[Path] = []
-        for root in roots:
-            context.check_cancelled()
-            if root.is_dir():
-                paths.extend(path for path in root.rglob("*.json") if path.is_file())
-            elif root.is_file() and root.suffix.casefold() == ".json":
-                paths.append(root)
-        for item in candidates:
-            paths.extend(
-                path for path in item.all_matching_files
-                if path.is_file() and path.suffix.casefold() == ".json"
+        context.check_cancelled()
+        context.report_progress(1, "Selecting the FLIR export covering the interval")
+        paths = list(
+            self._flir_exports_for_interval(
+                report, selected_start, selected_end, level="level1"
             )
-        paths = list(dict.fromkeys(paths))
-        if not paths:
-            raise RuntimeError("No FLIR JSON frame exports are available")
+        )
         adapter = FlirLevel1Adapter(
             output_root=self._run_output_root(project, "flir"),
             flight_name=project.flight_id,
@@ -4426,6 +4422,50 @@ class DashboardScanBackend:
             project.output_locations["flir_browser"] = quicklook_path
         return JobOutcome(warning=result.warnings[0] if result.warnings else None)
 
+    def _flir_exports_for_interval(
+        self,
+        report: ScanReport,
+        selected_start: datetime | None,
+        selected_end: datetime | None,
+        *,
+        level: str,
+    ) -> tuple[Path, ...]:
+        """Choose FLIR exports by UTC coverage rather than by folder position.
+
+        A campaign disk commonly holds several ``camera.FLIR_*.json`` files —
+        a bench recording, an earlier flight, the flight under review — under
+        the same name. Picking whichever one sits in the selected folder made
+        the choice an accident of layout, so a stale export silently produced
+        "does not overlap". Coverage is read from each file's first and last
+        timestamps, which costs ~32 MiB per file regardless of its size.
+        """
+        roots: list[Path] = []
+        for item in report.candidates:
+            if item.instrument_id != "flir":
+                continue
+            roots.append(item.candidate_path)
+            roots.extend(item.all_matching_files)
+        exports = discover_flir_exports(
+            dict.fromkeys(roots),
+            max_workers=max(1, self._resource_limits.worker_count),
+        )
+        accepted, rejected = select_exports_for_interval(
+            exports, selected_start, selected_end
+        )
+        summary = describe_selection(
+            accepted, rejected, selected_start, selected_end
+        )
+        if not accepted:
+            raise RuntimeError(summary)
+        self.logger.log(
+            LogLevel.WARNING if rejected else LogLevel.INFO,
+            "flir-discovery",
+            summary,
+            instrument="flir",
+            processing_step=f"{level}-export-selection",
+        )
+        return tuple(item.path for item in accepted)
+
     def _flir_detailed_task(
         self, context: ProcessingContext, selected_routines: tuple[str, ...]
     ) -> JobOutcome | None:
@@ -4446,22 +4486,12 @@ class DashboardScanBackend:
             flir_coverage = self._time_state.instruments.get("flir")
         if report is None or project is None:
             raise RuntimeError("Flight scan and project state are required")
-        paths: list[Path] = []
-        for item in report.candidates:
-            if item.instrument_id != "flir":
-                continue
-            root = item.candidate_path
-            if root.is_dir():
-                paths.extend(path for path in root.rglob("*.json") if path.is_file())
-            elif root.is_file() and root.suffix.casefold() == ".json":
-                paths.append(root)
-            paths.extend(
-                path for path in item.all_matching_files
-                if path.is_file() and path.suffix.casefold() == ".json"
+        context.report_progress(1, "Selecting the FLIR export covering the interval")
+        paths = list(
+            self._flir_exports_for_interval(
+                report, selected_start, selected_end, level="level2"
             )
-        paths = list(dict.fromkeys(paths))
-        if not paths:
-            raise RuntimeError("No FLIR JSON frame exports are available")
+        )
         context.report_progress(2, "Loading validated FLIR Level 2 routine")
         from core.legacy_paths import legacy_integration_path
 
@@ -4481,29 +4511,63 @@ class DashboardScanBackend:
         )
         tasks = []
         total_bytes = 0
+        skipped_bytes = 0
         for path in paths:
             # One stat per file: a multi-gigabyte export produces thousands of
             # chunks, and this was previously re-stat-ing the file for each one.
             size = path.stat().st_size
-            total_bytes += size
-            for start in range(0, size, chunk_bytes):
-                tasks.append((path, start, min(start + chunk_bytes, size), 4096))
-        entries = []
-        scanned = 0
-        for index, task in enumerate(tasks, 1):
-            context.check_cancelled()
-            # FLIR_Processing_pipeline.scan_one_byte_range returns
-            # (minimum, maximum, count, bytes_scanned, entries) — five values.
-            # This unpacked three, which is the shape of the *other* legacy
-            # module (FLIR_Quick_look, used by the Level 1 adapter), so Level 2
-            # raised "too many values to unpack" on its very first chunk.
-            _, _, _, bytes_done, part = module.scan_one_byte_range(task)
-            scanned += bytes_done
-            entries.extend(part)
-            context.report_progress(
-                5 + 25 * scanned / max(1, total_bytes),
-                f"Indexing FLIR frames {index}/{len(tasks)}",
+            # Frames are written in acquisition order, so the byte span that can
+            # contain the selection is bisected instead of indexing the whole
+            # export. On a 39 GB file a one-hour selection out of a five-hour
+            # flight reads a fraction of the bytes.
+            window_start, window_end = locate_time_window_bytes(
+                path, selected_start, selected_end
             )
+            skipped_bytes += size - (window_end - window_start)
+            total_bytes += window_end - window_start
+            for start in range(window_start, window_end, chunk_bytes):
+                tasks.append((path, start, min(start + chunk_bytes, window_end), 4096))
+        if skipped_bytes > 0:
+            self.logger.log(
+                LogLevel.INFO,
+                "flir-discovery",
+                (
+                    f"FLIR Level 2 indexing {total_bytes / 1e9:.1f} GB of the "
+                    f"selected interval; skipped {skipped_bytes / 1e9:.1f} GB "
+                    "outside it"
+                ),
+                instrument="flir",
+                processing_step="level2-byte-window",
+            )
+        entries: list[tuple[str, Path, int]] = []
+        scanned = 0
+        # Byte-range indexing is disk-bound and each range is independent, so
+        # it runs across the allocated workers instead of one chunk at a time.
+        # A 39 GB export is thousands of ranges; serially this dominated the
+        # whole Level 2 run. The Level 1 adapter already indexes this way.
+        index_workers = max(1, min(limits.worker_count, len(tasks)))
+        with ThreadPoolExecutor(
+            max_workers=index_workers, thread_name_prefix="ccflux-flir-level2-index"
+        ) as executor:
+            futures = [
+                executor.submit(module.scan_one_byte_range, task) for task in tasks
+            ]
+            for completed, future in enumerate(as_completed(futures), 1):
+                context.check_cancelled()
+                # FLIR_Processing_pipeline.scan_one_byte_range returns
+                # (minimum, maximum, count, bytes_scanned, entries) — five
+                # values. This unpacked three, which is the shape of the *other*
+                # legacy module (FLIR_Quick_look, used by the Level 1 adapter),
+                # so Level 2 raised "too many values to unpack" on its very
+                # first chunk.
+                _, _, _, bytes_done, part = future.result()
+                scanned += bytes_done
+                entries.extend(part)
+                context.report_progress(
+                    5 + 25 * scanned / max(1, total_bytes),
+                    f"Indexing FLIR frames across {index_workers} worker(s): "
+                    f"{completed}/{len(tasks)} ranges",
+                )
         entries.sort(key=lambda item: (item[0], str(item[1]), item[2]))
         indexed_frame_count = len(entries)
         if selected_start and selected_end:
