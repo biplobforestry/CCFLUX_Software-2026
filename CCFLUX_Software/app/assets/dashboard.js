@@ -118,7 +118,68 @@
   document.getElementById('dataProductsBtn').addEventListener('click', () => {
     openEditableInformation('/data_products.txt', 'Data Products');
   });
-  document.getElementById('softwareUpdateBtn').addEventListener('click', () => {
+  let updateStatus = null;
+
+  function renderUpdateButton() {
+    const button = document.getElementById('softwareUpdateBtn');
+    if (!button || !updateStatus) return;
+    if (updateStatus.update_available) {
+      button.textContent = `Update available · ${updateStatus.latest_version}`;
+      button.classList.add('update-available');
+      button.title = `This installation is ${updateStatus.current_version}.`;
+    } else {
+      button.textContent = 'Update';
+      button.classList.remove('update-available');
+      button.title = updateStatus.checked
+        ? `Version ${updateStatus.current_version} is current.`
+        : (updateStatus.reason || 'Update information is unavailable.');
+    }
+  }
+
+  async function refreshUpdateStatus(announce) {
+    try {
+      updateStatus = await api('/api/update/status');
+    } catch (_) {
+      return;                       // never let a failed check disturb the GUI
+    }
+    renderUpdateButton();
+    if (announce && updateStatus.update_available) {
+      showToast(`Version ${updateStatus.latest_version} is available.`);
+    }
+  }
+
+  function updateDialogHtml() {
+    const status = updateStatus || {};
+    if (!status.checked) {
+      return `<p>${escapeHtml(status.reason || 'Update information is unavailable.')}</p>
+        <p class="muted">The software works normally without this check.
+        It is disabled by setting CCFLUX_UPDATE_CHECK=off.</p>`;
+    }
+    if (!status.update_available) {
+      return `<p><strong>Version ${escapeHtml(status.current_version)} is current.</strong></p>
+        ${status.latest_version ? `<p class="muted">Latest published: ${escapeHtml(status.latest_version)}</p>` : ''}`;
+    }
+    return `<p><strong>Version ${escapeHtml(status.latest_version)} is available.</strong></p>
+      <p class="muted">This installation is ${escapeHtml(status.current_version)}${
+        status.released_utc ? ` · released ${escapeHtml(status.released_utc)}` : ''}.</p>
+      ${status.notice ? `<p>${escapeHtml(status.notice)}</p>` : ''}
+      <p class="muted">Nothing is downloaded or installed automatically. Finish
+      any processing and save your project before updating.</p>
+      <p><a class="btn primary" href="${escapeAttribute(status.download_url)}"
+        target="_blank" rel="noopener">Open the download page</a></p>`;
+  }
+
+  document.getElementById('softwareUpdateBtn').addEventListener('click', async () => {
+    await refreshUpdateStatus(false);
+    modalTitle.textContent = 'Software Update';
+    modalBody.innerHTML = updateDialogHtml()
+      + '<div class="scan-actions"><button class="btn" id="closeUpdate">Close</button></div>';
+    document.getElementById('closeUpdate').onclick = () => modal.classList.remove('show');
+    modal.classList.add('show');
+  });
+
+  document.getElementById('softwareUpdateBtn').addEventListener('contextmenu', event => {
+    event.preventDefault();
     openEditableInformation('/software_update.txt', 'Upcoming Software Update');
   });
   document.getElementById('licenseBtn').addEventListener('click', () => {
@@ -2088,6 +2149,9 @@
     setTimeout(() => { toast.classList.remove('show'); toast.classList.remove('error'); }, isError ? 5200 : 2600);
   }
 
+  // One check per launch, off the critical path; the server has usually
+  // already answered by now because it starts its own on startup.
+  refreshUpdateStatus(true);
   logPoll = setInterval(refreshLogs, 700);
   queuePoll = setInterval(refreshProcessingState, 800);
   refreshLogs();

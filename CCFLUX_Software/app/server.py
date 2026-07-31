@@ -271,6 +271,13 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._send_bytes(status, body, content_type, headers)
         elif path == "/api/scan":
             self._send_json(HTTPStatus.OK, self.server.backend.snapshot())
+        elif path == "/api/update/status":
+            self._send_json(
+                HTTPStatus.OK,
+                self.server.backend.update_status(
+                    refresh=parse_qs(parsed.query).get("refresh") == ["1"]
+                ),
+            )
         elif path == "/api/logs":
             self._send_json(
                 HTTPStatus.OK, {"records": self.server.backend.visible_logs()}
@@ -670,6 +677,8 @@ def main() -> int:
     )
     arguments = parser.parse_args()
     server = create_server(host=arguments.host, port=arguments.port)
+    # Contacts GitHub once, on a daemon thread; CCFLUX_UPDATE_CHECK=off skips it.
+    server.backend.start_background_update_check()
     dashboard_url = f"http://{arguments.host}:{server.server_port}/"
     print(f"CCFLUX dashboard: {dashboard_url}")
     if not arguments.no_browser:

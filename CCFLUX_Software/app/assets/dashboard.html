@@ -1785,6 +1785,13 @@
     .instrument-card.is-complete { border-color: rgba(67,209,122,.68); background: linear-gradient(145deg, rgba(24,117,68,.48), rgba(8,54,39,.88)); box-shadow: 0 0 0 1px rgba(67,209,122,.20) inset, 0 0 26px rgba(67,209,122,.12); }
     .instrument-card.is-warning { border-color: rgba(255,180,84,.70); background: linear-gradient(145deg, rgba(119,77,20,.46), rgba(55,37,12,.88)); }
     .instrument-card.is-failed { border-color: rgba(255,105,115,.76); background: linear-gradient(145deg, rgba(126,34,48,.52), rgba(60,18,28,.9)); }
+    .update-available {
+      background: linear-gradient(135deg, #0f7a4a, #16a34a) !important;
+      border-color: #34d399 !important;
+      color: #ffffff !important;
+      font-weight: 700;
+    }
+    .app-version{opacity:.85;font-weight:600;letter-spacing:.02em}
   </style>
 </head>
 <body>
@@ -2272,7 +2279,7 @@
       </div>
     </div>
     <footer class="app-footer">
-      <span>© 2026 Biplob Dey · Forschungszentrum Jülich GmbH</span>
+      <span>© 2026 Biplob Dey · Forschungszentrum Jülich GmbH · <span class="app-version">Version 1.0.0</span></span>
       <div class="footer-actions">
         <button class="manual-link" id="manualBtn" type="button" aria-haspopup="dialog">Manual</button>
         <button class="license-link" id="licenseBtn" type="button" aria-haspopup="dialog">License</button>

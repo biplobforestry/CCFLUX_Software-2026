@@ -104,7 +104,34 @@ overlaps the Time Filter.
 
 **Load .ccflux** searches the selected location for saved projects and restores the chosen Flight Project. Raw data are not copied into the .ccflux file; the referenced input folders must remain accessible.
 
-## 10. Logs, troubleshooting, and safe operation
+## 7. Software updates and privacy
+
+The **Update** button reports whether a newer release has been published.
+
+* On start-up, and when the button is pressed, CC-FLUX requests one small file
+  from GitHub. If a newer version exists, the button turns green and reads
+  **Update available**, and a short notice appears once.
+* **Nothing is downloaded or installed automatically.** The dialog links to the
+  download page. Finish any processing and save your Flight Project before
+  updating, so that a project written by one version is not reopened by another
+  part-way through a campaign.
+* If the machine is offline the check fails silently. Every function of the
+  software works without it.
+
+**What the check discloses.** Requesting that file tells the server that a
+CC-FLUX installation contacted it, along with the information any web request
+carries: the IP address it came from, the time, and the running version. No
+flight data, folder names, project contents or personal information are sent.
+
+**Switching it off.** Set the environment variable `CCFLUX_UPDATE_CHECK=off`
+before starting the launcher. The Update button then reports that the check is
+disabled and no network request is made.
+
+```bash
+CCFLUX_UPDATE_CHECK=off bash Mac_CCFLUX.command
+```
+
+## 8. Logs, troubleshooting, and safe operation
 
 * Keep the launcher window open while CC-FLUX is running.
 * Read **logs/launcher.log** when startup or library installation fails.
@@ -117,7 +144,7 @@ overlaps the Time Filter.
 * Use **Reset System** only to clear the active GUI state. It does not delete raw input files or existing output products.
 * Use **Exit** to stop the local CC-FLUX server cleanly.
 
-## 11. Scientific responsibility
+## 9. Scientific responsibility
 
 Review warnings, calibration inputs, time alignment, QC information, and generated products before scientific interpretation or publication. The software assists reproducible processing but does not replace instrument-PI validation.
 

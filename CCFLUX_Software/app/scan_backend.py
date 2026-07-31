@@ -68,6 +68,8 @@ from instruments.micasense import MicaSenseLevel1Adapter
 from instruments.flir import FlirLevel1Adapter
 from instruments.gopro import GoProLevel1Adapter
 from core.time_extraction import TimestampExtractor
+from core.update_check import UpdateStatus, check_for_update
+from core.version import SOFTWARE_VERSION
 from core.timestamp_repair import repair_chronology, repair_interval
 
 
@@ -530,6 +532,7 @@ class DashboardScanBackend:
         self._hatchbox_view_lock = threading.RLock()
         self._sif_options = dict(DEFAULT_SIF_OPTIONS)
         self._flir_level2_options = dict(DEFAULT_FLIR_LEVEL2_OPTIONS)
+        self._update_status: UpdateStatus | None = None
         self._last_checkpoint_monotonic = 0.0
         # Set when an operator reconnects the camera disk somewhere new.
         self._gopro_media_root: Path | None = None
@@ -1081,6 +1084,7 @@ class DashboardScanBackend:
                 "level2_capabilities": level2_capability_snapshot(),
                 "sif_options": dict(self._sif_options),
                 "flir_level2_options": dict(self._flir_level2_options),
+                "software_version": SOFTWARE_VERSION,
                 "scans": {
                     source: self._scan_channel_snapshot(channel)
                     for source, channel in self._scan_channels.items()
@@ -4829,6 +4833,56 @@ class DashboardScanBackend:
                 processing_step="delivery-selection",
             )
         return tuple(kept)
+
+    def update_status(self, *, refresh: bool = False) -> dict[str, object]:
+        """Report whether a newer release exists, using a cached answer.
+
+        The check runs at most once per launch unless explicitly refreshed, so
+        opening the dialog does not contact the server again. Nothing is ever
+        downloaded; the operator decides when to update.
+        """
+        with self._lock:
+            cached = self._update_status
+        if cached is not None and not refresh:
+            return cached.to_dict()
+        status = check_for_update(current_version=SOFTWARE_VERSION)
+        with self._lock:
+            self._update_status = status
+        if status.update_available:
+            self.logger.log(
+                LogLevel.INFO, "software-update",
+                (
+                    f"Version {status.latest_version} is available; "
+                    f"this installation is {status.current_version}. "
+                    f"Download: {status.download_url}"
+                ),
+                processing_step="update-check",
+            )
+        elif status.checked and not status.enabled:
+            pass
+        return status.to_dict()
+
+    def start_background_update_check(self) -> None:
+        """Look for a newer release without delaying startup.
+
+        Runs on a daemon thread so a slow or unreachable network cannot hold up
+        the dashboard, and swallows every failure — an update check is never a
+        reason for the application not to work.
+        """
+        from core.update_check import update_check_enabled
+
+        if not update_check_enabled():
+            return
+
+        def run() -> None:
+            try:
+                self.update_status()
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=run, name="ccflux-update-check", daemon=True
+        ).start()
 
     def flir_exports(self) -> list[dict[str, object]]:
         """Downloadable FLIR products, newest run first.
