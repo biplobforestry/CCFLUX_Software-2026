@@ -67,6 +67,7 @@ from instruments.micasense import MicaSenseLevel1Adapter
 from instruments.flir import FlirLevel1Adapter
 from instruments.gopro import GoProLevel1Adapter
 from core.time_extraction import TimestampExtractor
+from core.timestamp_repair import repair_chronology, repair_interval
 
 
 INTEGRATED_PROCESSING_JOB_IDS = frozenset({
@@ -2340,6 +2341,7 @@ class DashboardScanBackend:
 
     def update_time_filter(self, request: dict[str, object]) -> None:
         action = str(request.get("action", "set"))
+        interval_warnings: tuple[str, ...] = ()
         with self._lock:
             self._require_processing_configuration_idle()
             if action in {"full", "reset"}:
@@ -2361,10 +2363,25 @@ class DashboardScanBackend:
                     ) from exc
                 self._time_state.display_timezone = display_timezone
             elif action == "set":
-                self._time_state.set_selected_interval(
-                    parse_dashboard_datetime(request.get("start")),
-                    parse_dashboard_datetime(request.get("end")),
+                # An interval can arrive reversed, half-empty, or reaching past
+                # the data. Repair what is repairable and record every change,
+                # rather than rejecting the whole request.
+                repair = repair_interval(
+                    parse_dashboard_datetime(request.get("start"))
+                    if request.get("start") else None,
+                    parse_dashboard_datetime(request.get("end"))
+                    if request.get("end") else None,
+                    available_start=self._time_state.detected_global_start,
+                    available_end=self._time_state.detected_global_end,
                 )
+                if not repair.usable:
+                    raise ValueError(
+                        "A valid analysis interval could not be derived from the "
+                        "requested times. "
+                        + " ".join(repair.warnings)
+                    )
+                self._time_state.set_selected_interval(repair.start, repair.end)
+                interval_warnings = repair.warnings
             else:
                 raise ValueError(f"Unknown time-filter action: {action}")
             self._sync_project_time_state()
@@ -2380,6 +2397,14 @@ class DashboardScanBackend:
             job_id=self._scan_id,
             processing_step="time-filter",
         )
+        for warning in interval_warnings:
+            self.logger.log(
+                LogLevel.WARNING,
+                "time-filter",
+                f"Analysis interval repaired automatically: {warning}",
+                job_id=self._scan_id,
+                processing_step="time-filter-repair",
+            )
 
     def update_instrument_time_override(
         self,

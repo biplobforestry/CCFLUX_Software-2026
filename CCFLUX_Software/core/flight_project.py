@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from .compat import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -23,6 +25,17 @@ from .exceptions import (
 PROJECT_SCHEMA_VERSION = 1
 PROJECT_FILENAME = "flight_project.ccflux"
 LEGACY_PROJECT_FILENAME = "flight_project.json"
+
+# A .ccflux is a deflate-compressed archive so one file can be handed to a
+# colleague complete. Older plain-JSON projects still open unchanged.
+PROJECT_MANIFEST_NAME = "project.json"
+BUNDLE_MANIFEST_NAME = "manifest.json"
+BUNDLE_PREFIX = "products/"
+# Browser payloads and diagnostics are always bundled; other products are
+# bundled while they stay small, so a project never silently grows to gigabytes.
+ALWAYS_BUNDLED_SUFFIXES = frozenset({".json", ".jsonl", ".md", ".txt"})
+BUNDLED_FILE_BYTE_LIMIT = 8 * 1024 * 1024
+BUNDLED_TOTAL_BYTE_LIMIT = 512 * 1024 * 1024
 INSTRUMENT_IDS = (
     "noseboom",
     "miro",
@@ -231,6 +244,7 @@ class ProjectOpenResult:
     raw_file_changes: tuple[RawFileChange, ...]
     rescan_required: bool
     reused_saved_scan: bool
+    restored_products: tuple[Path, ...] = ()
 
     @property
     def missing_raw_files(self) -> tuple[Path, ...]:
@@ -294,8 +308,18 @@ class FlightProjectStore:
         return project
 
     def save_project(
-        self, project: FlightProject, *, overwrite: bool = False
+        self,
+        project: FlightProject,
+        *,
+        overwrite: bool = False,
+        bundle_products: bool = True,
     ) -> Path:
+        """Write the project as a compressed, self-contained ``.ccflux``.
+
+        The archive holds the project manifest plus the generated products that
+        the browser pages need, so a single file can be handed to a colleague
+        and opened on their machine. Raw campaign data is never copied in.
+        """
         project.validate(require_raw_folder=False)
         self._create_output_structure(project)
         destination = project.project_file
@@ -305,14 +329,41 @@ class FlightProjectStore:
             )
         project.updated_at_utc = datetime.now(timezone.utc)
         payload = _project_to_dict(project)
+        # Unique per call, not per process: a throttled checkpoint running on a
+        # worker thread and an operator pressing Save otherwise raced for the
+        # same temporary name, and whichever renamed second failed with
+        # FileNotFoundError. Writing an archive widened that window.
         temporary = destination.with_name(
-            f".{destination.name}.{os.getpid()}.temporary"
+            f".{destination.name}.{os.getpid()}.{uuid4().hex}.temporary"
         )
         try:
-            temporary.write_text(
-                json.dumps(payload, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
+            with zipfile.ZipFile(
+                temporary, "w", zipfile.ZIP_DEFLATED, compresslevel=6
+            ) as archive:
+                archive.writestr(
+                    PROJECT_MANIFEST_NAME,
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                )
+                bundled, skipped = (
+                    self._bundle_products(archive, project)
+                    if bundle_products
+                    else ([], [])
+                )
+                archive.writestr(
+                    BUNDLE_MANIFEST_NAME,
+                    json.dumps(
+                        {
+                            "schema_version": PROJECT_SCHEMA_VERSION,
+                            "flight_id": project.flight_id,
+                            "written_at_utc": project.updated_at_utc.isoformat(),
+                            "bundled_products": bundled,
+                            "skipped_products": skipped,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                )
             temporary.replace(destination)
         except OSError as exc:
             try:
@@ -322,11 +373,70 @@ class FlightProjectStore:
             raise ProjectFileError(f"Could not save project: {destination}") from exc
         return destination
 
+    @staticmethod
+    def _bundle_products(
+        archive: zipfile.ZipFile, project: FlightProject
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Copy generated products below the flight output root into the archive."""
+        root = project.flight_output_root.resolve(strict=False)
+        candidates: list[Path] = [
+            Path(value) for value in project.output_locations.values()
+        ]
+        for state in project.detected_instruments.values():
+            candidates.extend(Path(value) for value in state.output_locations)
+        # The browser pages read these directly, so they must travel with the
+        # project even when nothing references them yet.
+        quicklooks = root / "quicklooks"
+        if quicklooks.is_dir():
+            candidates.extend(
+                path for path in quicklooks.rglob("*") if path.is_file()
+            )
+
+        bundled: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        seen: set[Path] = set()
+        total = 0
+        for candidate in candidates:
+            path = Path(candidate).resolve(strict=False)
+            if path in seen or not path.is_file():
+                continue
+            seen.add(path)
+            try:
+                relative = path.relative_to(root)
+            except ValueError:
+                # Products written outside the flight output root are left as
+                # references; copying them would break the read-only contract.
+                skipped.append({"path": str(path), "reason": "outside output root"})
+                continue
+            size = path.stat().st_size
+            allowed = (
+                path.suffix.casefold() in ALWAYS_BUNDLED_SUFFIXES
+                or size <= BUNDLED_FILE_BYTE_LIMIT
+            )
+            if not allowed:
+                skipped.append(
+                    {"path": str(relative), "reason": "larger than the bundle limit",
+                     "size_bytes": size}
+                )
+                continue
+            if total + size > BUNDLED_TOTAL_BYTE_LIMIT:
+                skipped.append(
+                    {"path": str(relative), "reason": "bundle size limit reached",
+                     "size_bytes": size}
+                )
+                continue
+            archive.write(path, BUNDLE_PREFIX + relative.as_posix())
+            total += size
+            bundled.append(
+                {"path": str(relative), "size_bytes": size, "role": relative.parts[0]}
+            )
+        return bundled, skipped
+
     def load_project(self, project_file: Path) -> FlightProject:
         path = Path(project_file).resolve(strict=False)
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            payload = self._read_manifest(path)
+        except (OSError, json.JSONDecodeError, KeyError, zipfile.BadZipFile) as exc:
             raise ProjectFileError(f"Invalid or unreadable project file: {path}") from exc
         try:
             project = _project_from_dict(payload)
@@ -335,6 +445,66 @@ class FlightProjectStore:
             raise ProjectFileError(f"Invalid project file: {path}: {exc}") from exc
         self.rebase_output_paths(project, path)
         return project
+
+    @staticmethod
+    def _read_manifest(path: Path) -> Any:
+        """Read the manifest from a compressed project, or a legacy plain file."""
+        if zipfile.is_zipfile(path):
+            with zipfile.ZipFile(path) as archive:
+                return json.loads(archive.read(PROJECT_MANIFEST_NAME))
+        # Projects written before compression are plain JSON documents.
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def is_compressed(path: Path) -> bool:
+        return zipfile.is_zipfile(Path(path))
+
+    @staticmethod
+    def bundled_products(project_file: Path) -> tuple[str, ...]:
+        """Names of the products carried inside a compressed project."""
+        path = Path(project_file)
+        if not zipfile.is_zipfile(path):
+            return ()
+        with zipfile.ZipFile(path) as archive:
+            return tuple(
+                sorted(
+                    name[len(BUNDLE_PREFIX):]
+                    for name in archive.namelist()
+                    if name.startswith(BUNDLE_PREFIX) and not name.endswith("/")
+                )
+            )
+
+    @staticmethod
+    def extract_products(
+        project_file: Path, project: FlightProject, *, overwrite: bool = False
+    ) -> tuple[Path, ...]:
+        """Restore bundled products beside the project, without clobbering newer ones.
+
+        This is what makes a shared ``.ccflux`` usable: the recipient's output
+        tree is empty, so the browser payloads are written out of the archive
+        before the dashboard reads them.
+        """
+        path = Path(project_file)
+        if not zipfile.is_zipfile(path):
+            return ()
+        root = project.flight_output_root
+        restored: list[Path] = []
+        with zipfile.ZipFile(path) as archive:
+            for name in archive.namelist():
+                if not name.startswith(BUNDLE_PREFIX) or name.endswith("/"):
+                    continue
+                relative = PurePosixPath(name[len(BUNDLE_PREFIX):])
+                if relative.is_absolute() or ".." in relative.parts:
+                    # Never let an archive entry escape the output root.
+                    continue
+                target = root.joinpath(*relative.parts)
+                if target.exists() and not overwrite:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(name) as source, target.open("wb") as sink:
+                    shutil.copyfileobj(source, sink)
+                restored.append(target)
+        return tuple(restored)
 
     @staticmethod
     def rebase_output_paths(project: FlightProject, project_file: Path) -> bool:
@@ -354,12 +524,18 @@ class FlightProjectStore:
 
         Returns True when paths were re-anchored.
         """
-        if project_file.parent.name != "project":
-            # Not the documented layout; keep the saved paths rather than guess.
-            return False
-        flight_root = project_file.parent.parent
-        if flight_root.name != project.flight_id:
-            return False
+        if (
+            project_file.parent.name == "project"
+            and project_file.parent.parent.name == project.flight_id
+        ):
+            # Opened in place inside a normal output tree.
+            flight_root = project_file.parent.parent
+        else:
+            # A project handed over on its own — a colleague saving the file to
+            # their Desktop, say. Adopt the folder it now sits in, so bundled
+            # products unpack beside it instead of at a path from another
+            # machine that may not exist or be writable.
+            flight_root = project_file.parent / project.flight_id
         previous_root = project.flight_output_root.resolve(strict=False)
         if previous_root == flight_root.resolve(strict=False):
             return False
@@ -394,6 +570,9 @@ class FlightProjectStore:
         checksum_mode: bool = False,
     ) -> ProjectOpenResult:
         project = self.load_project(project_file)
+        # A project received from someone else has an empty output tree; its
+        # browser payloads live inside the archive until they are written out.
+        restored = self.extract_products(project_file, project)
         changes = self.detect_changed_raw_files(
             project, checksum_mode=checksum_mode
         )
@@ -403,6 +582,7 @@ class FlightProjectStore:
             raw_file_changes=changes,
             rescan_required=force_rescan or changed,
             reused_saved_scan=not force_rescan and not changed,
+            restored_products=restored,
         )
 
     def force_rescan(
