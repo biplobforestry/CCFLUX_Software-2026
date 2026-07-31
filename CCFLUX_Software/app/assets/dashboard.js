@@ -1221,7 +1221,8 @@
         flightFolder: state.selected_folder,
         cameraFolder,
         outputFolder,
-        timeState: state.time_filter || {}
+        timeState: state.time_filter || {},
+        instruments: state.instruments || {}
       });
     } catch (error) {
       showToast(`Remote-sensing setup failed: ${error.message}`);
@@ -1229,12 +1230,39 @@
     }
   }
 
+  const REMOTE_SENSING_INSTRUMENTS = [
+    ['gopro', 'GoPro'],
+    ['flir', 'FLIR'],
+    ['micasense', 'MicaSense']
+  ];
+
+  function remoteSensingChoices(instruments) {
+    // Only offer what discovery actually found, so the operator is never asked
+    // about a camera that is not on this flight.
+    return REMOTE_SENSING_INSTRUMENTS
+      .map(([id, label]) => ({ id, label, state: instruments[id] }))
+      .filter(item => item.state && item.state.detection_status !== 'not_detected');
+  }
+
   function showRemoteTimeFrameDialog(workflow) {
     const timeState = workflow.timeState;
     const displayTimezone = timeState.display_timezone || 'UTC';
+    const choices = remoteSensingChoices(workflow.instruments || {});
     modalTitle.textContent = 'Remote Sensing Timeframe';
     modalBody.innerHTML = `
-      <p>Choose the time and date filter for remote-sensing products.</p>
+      <p>Choose the camera products and the time and date filter for
+      remote-sensing processing.</p>
+      ${choices.length ? `
+      <fieldset class="detail-row" id="remoteInstruments">
+        <legend><strong>Camera products</strong></legend>
+        ${choices.map(item => `
+          <label class="detail-row">
+            <input type="checkbox" name="remoteInstrument" value="${escapeAttribute(item.id)}" checked>
+            <span>${escapeHtml(item.label)}<br><small>${escapeHtml(
+              item.state.detection_status.replace('_', ' ')
+            )} · ${Number(item.state.file_count || 0).toLocaleString()} file(s)</small></span>
+          </label>`).join('')}
+      </fieldset>` : ''}
       <label class="detail-row">
         <input type="radio" name="remoteTimeMode" value="current" checked>
         <span><strong>Use the currently selected timeframe</strong><br><small>${escapeHtml(displayDateTime(timeState.selected_analysis_start, displayTimezone))} – ${escapeHtml(displayDateTime(timeState.selected_analysis_end, displayTimezone))}</small></span>
@@ -1264,6 +1292,20 @@
     document.getElementById('continueRemoteTimeframe').onclick = () => {
       const mode = modalBody.querySelector('input[name="remoteTimeMode"]:checked').value;
       const payload = { time_mode: mode };
+      const selectedInstruments = [
+        ...modalBody.querySelectorAll('input[name="remoteInstrument"]:checked')
+      ].map(input => input.value);
+      if (choices.length) {
+        if (!selectedInstruments.length) {
+          showToast('Select at least one camera product to process.');
+          return;
+        }
+        // Only send a selection when it is a real subset; omitting the field
+        // keeps the backend's "process whatever is ready" behaviour.
+        if (selectedInstruments.length !== choices.length) {
+          payload.instruments = selectedInstruments;
+        }
+      }
       if (
         mode === 'current' &&
         (!timeState.selected_analysis_start || !timeState.selected_analysis_end)
@@ -1293,7 +1335,11 @@
           return;
         }
       }
-      logRemoteWorkflow(`Remote-sensing timeframe selected: ${mode}`, 'timeframe');
+      logRemoteWorkflow(
+        `Remote-sensing timeframe selected: ${mode}; camera products: `
+        + (selectedInstruments.length ? selectedInstruments.join(', ') : 'all ready'),
+        'timeframe'
+      );
       confirmRemoteScanning({ ...workflow, payload });
     };
     modal.classList.add('show');

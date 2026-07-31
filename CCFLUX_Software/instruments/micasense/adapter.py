@@ -9,6 +9,7 @@ is performed here.
 from __future__ import annotations
 
 import csv
+import io
 import json
 import re
 import threading
@@ -245,10 +246,15 @@ class MicaSenseLevel1Adapter(InstrumentBase):
             selected_records = []
             for record in self._records:
                 stamp = _as_utc(record.get("timestamp"))
+                if stamp is not None and stamp.year < 2000:
+                    # A camera powered up without a clock write dates its frames
+                    # from the epoch. Those stamps say nothing about when the
+                    # image was taken, so they must not be used to exclude it.
+                    stamp = None
                 if stamp is None:
-                    # An image with no readable acquisition time cannot be
-                    # placed in the flight; keep it and say so rather than
-                    # silently assuming it belongs.
+                    # An image with no usable acquisition time cannot be placed
+                    # in the flight; keep it and say so rather than silently
+                    # assuming it belongs.
                     undated += 1
                     selected_records.append(record)
                     continue
@@ -289,8 +295,10 @@ class MicaSenseLevel1Adapter(InstrumentBase):
             )
         if undated:
             warnings.append(
-                f"{undated} image(s) have no readable acquisition time and were "
-                "retained without time filtering."
+                f"{undated} image(s) have no usable acquisition time — the EXIF "
+                "timestamp is missing or the camera clock was not set — and were "
+                "retained without time filtering. They cannot be placed on the "
+                "flight timeline."
             )
         missing_gps = sum(not record["gps_present"] for record in self._records)
         missing_exposure = sum(not record["exposure_present"] for record in self._records)
@@ -428,8 +436,15 @@ class MicaSenseLevel1Adapter(InstrumentBase):
         corrupt = False
         metadata: Mapping[str, Any] = {}
         try:
-            metadata = self._metadata(path)
-            _verify_image(path)
+            # Decompress the band once and share it, rather than paying for it
+            # again in verification.
+            payload = (
+                _archive_member_bytes(path)
+                if isinstance(path, ArchiveImage)
+                else None
+            )
+            metadata = self._metadata(path, payload)
+            _verify_image(path, payload)
         except (
             OSError, ValueError, KeyError, zipfile.BadZipFile,
             UnidentifiedImageError,
@@ -485,9 +500,11 @@ class MicaSenseLevel1Adapter(InstrumentBase):
                 continue
         return outputs
 
-    def _metadata(self, source: Any) -> Mapping[str, Any]:
+    def _metadata(
+        self, source: Any, payload: bytes | None = None
+    ) -> Mapping[str, Any]:
         if isinstance(source, ArchiveImage):
-            return _archive_metadata(source)
+            return _archive_metadata(source, payload)
         return self.metadata_reader(source)
 
     def _emit(self, progress: float, phase: str) -> None:
@@ -570,11 +587,56 @@ def _pillow_metadata(path: Path) -> Mapping[str, Any]:
         return result
 
 
-def _archive_metadata(source: ArchiveImage) -> Mapping[str, Any]:
-    with zipfile.ZipFile(source.archive) as bundle:
-        with bundle.open(source.member) as stream:
-            with Image.open(stream) as image:
-                return _metadata_from_image(image)
+_ARCHIVE_HANDLES = threading.local()
+
+
+def _open_archive(archive: Path) -> zipfile.ZipFile:
+    """Reuse this thread's handle when consecutive members share an archive.
+
+    A MicaSense capture is one archive holding a band per file. Metadata and
+    verification each used to open the archive from scratch, so a six-band
+    capture paid twelve central-directory reads over USB. Measured on the
+    campaign disk that was 1.2 s per band — 64 minutes for 3,216 bands.
+
+    The handle is kept in thread-local storage because ZipFile is not safe for
+    concurrent reads, and the inspection pool maps several bands at once.
+    Members arrive sorted, so each worker sees runs from the same archive.
+    """
+    cached = getattr(_ARCHIVE_HANDLES, "handle", None)
+    if cached is not None and getattr(_ARCHIVE_HANDLES, "path", None) == archive:
+        return cached
+    if cached is not None:
+        try:
+            cached.close()
+        except OSError:
+            pass
+    handle = zipfile.ZipFile(archive)
+    _ARCHIVE_HANDLES.handle = handle
+    _ARCHIVE_HANDLES.path = archive
+    return handle
+
+
+def release_archive_handle() -> None:
+    """Close this thread's cached archive handle."""
+    cached = getattr(_ARCHIVE_HANDLES, "handle", None)
+    if cached is not None:
+        try:
+            cached.close()
+        except OSError:
+            pass
+    _ARCHIVE_HANDLES.handle = None
+    _ARCHIVE_HANDLES.path = None
+
+
+def _archive_member_bytes(source: ArchiveImage) -> bytes:
+    """Decompress a band once; metadata and verification then share the buffer."""
+    return _open_archive(source.archive).read(source.member)
+
+
+def _archive_metadata(source: ArchiveImage, payload: bytes | None = None) -> Mapping[str, Any]:
+    data = _archive_member_bytes(source) if payload is None else payload
+    with Image.open(io.BytesIO(data)) as image:
+        return _metadata_from_image(image)
 
 
 def _metadata_from_image(image: Image.Image) -> Mapping[str, Any]:
@@ -637,12 +699,11 @@ def _xmp_metadata(payload: bytes) -> dict[str, Any]:
     return values
 
 
-def _verify_image(source: Any) -> None:
+def _verify_image(source: Any, payload: bytes | None = None) -> None:
     if isinstance(source, ArchiveImage):
-        with zipfile.ZipFile(source.archive) as bundle:
-            with bundle.open(source.member) as stream:
-                with Image.open(stream) as image:
-                    image.verify()
+        data = _archive_member_bytes(source) if payload is None else payload
+        with Image.open(io.BytesIO(data)) as image:
+            image.verify()
         return
     with Image.open(source) as image:
         image.verify()
