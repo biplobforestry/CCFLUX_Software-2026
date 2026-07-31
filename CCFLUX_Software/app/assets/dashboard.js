@@ -1950,11 +1950,29 @@
   }
 
   async function api(url, options = {}) {
-    const response = await fetch(url, {
-      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-      ...options
-    });
-    const payload = await response.json();
+    let response;
+    try {
+      response = await fetch(url, {
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        ...options
+      });
+    } catch (error) {
+      // A bare "Failed to fetch" tells the operator nothing. The request never
+      // reached the server, so the cause is on this side: the launcher window
+      // was closed, the machine slept, or the page was reloaded while a native
+      // chooser was still open.
+      throw new Error(
+        'The CC-FLUX server did not respond. Check that the launcher window is '
+        + 'still open, then use Refresh Status. If it was closed, start the '
+        + 'launcher again and reload this page.'
+      );
+    }
+    let payload;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      throw new Error(`The server returned an unreadable response (${response.status}).`);
+    }
     if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
     return payload;
   }

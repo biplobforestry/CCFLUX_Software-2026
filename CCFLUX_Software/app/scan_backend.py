@@ -350,21 +350,10 @@ class FolderDialog:
 
     def choose_flight_folder(self) -> Path | None:
         if sys.platform == "darwin":
-            script = (
-                'POSIX path of (choose folder with prompt '
-                '"Select the root folder for one Zeppelin flight")'
+            return self._choose_with_osascript(
+                'choose folder with prompt '
+                '"Select the root folder for one Zeppelin flight"'
             )
-            completed = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if completed.returncode != 0:
-                return None
-            selected = completed.stdout.strip()
-            return Path(selected) if selected else None
-
         return self._choose_native(
             "askdirectory",
             title="Select the root folder for one Zeppelin flight",
@@ -372,26 +361,41 @@ class FolderDialog:
 
     def choose_output_folder(self) -> Path | None:
         if sys.platform == "darwin":
-            completed = subprocess.run(
-                ["osascript", "-e", 'POSIX path of (choose folder with prompt "Select the independent CCFLUX Output Folder")'],
-                capture_output=True, text=True, check=False,
+            return self._choose_with_osascript(
+                'choose folder with prompt '
+                '"Select the independent CCFLUX Output Folder"'
             )
-            selected = completed.stdout.strip() if completed.returncode == 0 else ""
-            return Path(selected) if selected else None
         return self._choose_native(
             "askdirectory",
             title="Select CCFLUX Output Folder",
         )
 
     @staticmethod
-    def _choose_with_osascript(script: str) -> Path | None:
-        """Run a macOS chooser out of process.
+    def _choose_with_osascript(chooser_clause: str) -> Path | None:
+        """Run a macOS chooser out of process, in front of the browser.
 
         Tk must own the main thread. These choosers are invoked from an HTTP
         request thread, so building a Tk root there means the panel never
         appears and the request dies — the browser reports "Failed to fetch".
         Every chooser therefore goes through osascript on macOS.
+
+        osascript alone is not enough. It is a background-only process, so a
+        panel it owns opens *behind* the browser: the operator sees the "select
+        a folder" prompt, no window, and an action that appears to hang until
+        the pending request is abandoned. Hosting the chooser inside a Finder
+        tell block gives the panel a foreground owner that can be activated,
+        which is what actually brings it to the front.
+
+        ``chooser_clause`` is the AppleScript expression that returns the
+        selection, for example ``choose folder with prompt "..."``.
         """
+        script = (
+            'tell application "Finder"\n'
+            "\tactivate\n"
+            f"\tset ccfluxSelection to {chooser_clause}\n"
+            "end tell\n"
+            "POSIX path of ccfluxSelection"
+        )
         completed = subprocess.run(
             ["osascript", "-e", script],
             capture_output=True,
@@ -406,8 +410,8 @@ class FolderDialog:
     def choose_project_file(self) -> Path | None:
         if sys.platform == "darwin":
             return self._choose_with_osascript(
-                'POSIX path of (choose file with prompt '
-                '"Open a saved CC-FLUX Flight Project (.ccflux)")'
+                'choose file with prompt '
+                '"Open a saved CC-FLUX Flight Project (.ccflux)"'
             )
         return self._choose_native(
             "askopenfilename",
@@ -421,8 +425,8 @@ class FolderDialog:
     def choose_project_folder(self) -> Path | None:
         if sys.platform == "darwin":
             return self._choose_with_osascript(
-                'POSIX path of (choose folder with prompt '
-                '"Select a folder containing saved CC-FLUX Flight Projects")'
+                'choose folder with prompt '
+                '"Select a folder containing saved CC-FLUX Flight Projects"'
             )
         return self._choose_native(
             "askdirectory",
@@ -431,12 +435,10 @@ class FolderDialog:
 
     def choose_camera_folder(self) -> Path | None:
         if sys.platform == "darwin":
-            completed = subprocess.run(
-                ["osascript", "-e", 'POSIX path of (choose folder with prompt "Select the Camera System data folder for this flight")'],
-                capture_output=True, text=True, check=False,
+            return self._choose_with_osascript(
+                'choose folder with prompt '
+                '"Select the Camera System data folder for this flight"'
             )
-            selected = completed.stdout.strip() if completed.returncode == 0 else ""
-            return Path(selected) if selected else None
         return self._choose_native(
             "askdirectory",
             title="Select the Camera System data folder for this flight",
