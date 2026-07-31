@@ -102,6 +102,23 @@ PROGRESS_CHECKPOINT_INTERVAL_SECONDS = 5.0
 # would have skipped most real ones.
 PROJECT_DISCOVERY_BYTE_LIMIT = 2 * 1024 * 1024 * 1024
 
+GOPRO_IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png"})
+GOPRO_FOLDER_NAME = "GoPro"
+GOPRO_FOLDER_REQUIREMENT = (
+    'The selected folder must be named "GoPro", or contain a folder named '
+    '"GoPro" holding the camera media.'
+)
+GOPRO_RECONNECT_PROMPT = "Do you have the hard disk with the GoPro data?"
+GOPRO_MEDIA_UNAVAILABLE = (
+    "The GoPro image is not available because the camera media is not "
+    "reachable. Reconnect the hard disk holding the GoPro folder."
+)
+GOPRO_NO_DISK_MESSAGE = (
+    "Sorry — the GoPro images are stored on the campaign hard disk and are not "
+    "part of the project file. Please contact Dr. Eva Pfannerstill, "
+    "Dr. Georgios I. Gkatzelis or Biplob Dey."
+)
+
 DEFAULT_SIF_OPTIONS: dict[str, object] = {
     "modes": ["FULL", "FLUO"],
     "position_mode": "uav_airship",
@@ -465,6 +482,9 @@ class DashboardScanBackend:
         self._hatchbox_view_lock = threading.RLock()
         self._sif_options = dict(DEFAULT_SIF_OPTIONS)
         self._last_checkpoint_monotonic = 0.0
+        # Set when an operator reconnects the camera disk somewhere new.
+        self._gopro_media_root: Path | None = None
+        self._gopro_index_cache: tuple[Path, dict[str, Path]] | None = None
 
     def attach_miro_rack_bridge(self, bridge: object) -> None:
         """Connect shared MIRO/Picarro browser science to queue processing."""
@@ -1469,7 +1489,8 @@ class DashboardScanBackend:
                     if quicklook_path:
                         Path(quicklook_path).write_text(
                             json.dumps(
-                                payload, ensure_ascii=False, indent=2, allow_nan=False
+                                _gopro_project_payload(payload),
+                                ensure_ascii=False, indent=2, allow_nan=False,
                             )
                             + "\n",
                             encoding="utf-8",
@@ -1491,10 +1512,42 @@ class DashboardScanBackend:
             } | {"captures": captures},
         }
 
-    def gopro_image_file(self, capture_id: str) -> Path:
-        """Resolve a capture image only when it belongs to the active Camera Folder."""
+    def gopro_media_root(self) -> Path | None:
+        """The folder currently holding the GoPro media, if one is reachable."""
         with self._lock:
+            reconnected = self._gopro_media_root
             project = self._flight_project
+        if reconnected is not None and reconnected.is_dir():
+            return reconnected
+        if project is None or project.camera_folder_path is None:
+            return None
+        camera_root = Path(project.camera_folder_path)
+        return camera_root if camera_root.is_dir() else None
+
+    def _gopro_source_index(self, root: Path) -> dict[str, Path]:
+        """Map each image file name below ``root`` to its location, once.
+
+        A saved project stores image identity only — never a disk path — so a
+        project opened on another machine, or after the drive was remounted
+        somewhere else, has to find the media by name. Building the index once
+        keeps that off the per-image request path.
+        """
+        resolved = root.resolve()
+        with self._lock:
+            cached = self._gopro_index_cache
+            if cached is not None and cached[0] == resolved:
+                return cached[1]
+        index: dict[str, Path] = {}
+        for path in resolved.rglob("*"):
+            if path.is_file() and path.suffix.casefold() in GOPRO_IMAGE_SUFFIXES:
+                index.setdefault(path.name.casefold(), path)
+        with self._lock:
+            self._gopro_index_cache = (resolved, index)
+        return index
+
+    def gopro_image_file(self, capture_id: str) -> Path:
+        """Resolve a capture image by identity, below the reachable media root."""
+        with self._lock:
             captures = tuple(self._instruments["gopro"].quicklook.get("captures", ()))
         capture = next(
             (
@@ -1506,20 +1559,22 @@ class DashboardScanBackend:
         )
         if capture is None:
             raise ValueError("Unknown GoPro capture")
-        camera_root = project.camera_folder_path.resolve() if project and project.camera_folder_path else None
-        relative_file = Path(str(capture.get("source_file", "")))
-        path = (
-            (camera_root / relative_file).resolve()
-            if camera_root is not None and not relative_file.is_absolute()
-            else relative_file.resolve()
-        )
+        root = self.gopro_media_root()
+        if root is None:
+            raise ValueError(GOPRO_MEDIA_UNAVAILABLE)
+        name = str(capture.get("file_name") or "")
+        if not name:
+            source = str(capture.get("source_file") or "")
+            name = Path(source).name if source else ""
+        path = self._gopro_source_index(root).get(name.casefold())
         if (
-            camera_root is None
-            or not path.is_relative_to(camera_root)
-            or path.suffix.casefold() not in {".jpg", ".jpeg", ".png"}
+            not name
+            or path is None
+            or not path.is_relative_to(root.resolve())
+            or path.suffix.casefold() not in GOPRO_IMAGE_SUFFIXES
             or not path.is_file()
         ):
-            raise ValueError("GoPro image is unavailable")
+            raise ValueError(GOPRO_MEDIA_UNAVAILABLE)
         return path
 
     def flir_view(self) -> dict[str, object]:
@@ -1605,6 +1660,117 @@ class DashboardScanBackend:
             processing_step="browser-interaction",
         )
         self._persist_project_logs()
+
+    def gopro_media_status(self) -> dict[str, object]:
+        """Whether the GoPro media is reachable, for the image viewer."""
+        with self._lock:
+            captures = tuple(self._instruments["gopro"].quicklook.get("captures", ()))
+        root = self.gopro_media_root()
+        available = root is not None and bool(
+            self._gopro_source_index(root)
+        ) if root is not None else False
+        return {
+            "media_available": bool(available),
+            "media_root": str(root) if root else None,
+            "capture_count": len(captures),
+            "prompt": None if available else GOPRO_RECONNECT_PROMPT,
+            "folder_requirement": GOPRO_FOLDER_NAME,
+            "contact_message": GOPRO_NO_DISK_MESSAGE,
+        }
+
+    def reconnect_gopro_media(
+        self, request: Mapping[str, object] | None = None
+    ) -> dict[str, object]:
+        """Re-link saved captures to GoPro media on a reattached disk.
+
+        A saved project carries image identity but no image data, so opening it
+        elsewhere leaves the map working and the pictures missing. The operator
+        is asked whether the drive is available; if it is, they point at it and
+        the captures are matched back to files by name.
+        """
+        request = request or {}
+        has_disk = request.get("has_hard_disk")
+        if has_disk is None:
+            raise ValueError("Answer whether the GoPro hard disk is available")
+        if has_disk is not True:
+            self.logger.log(
+                LogLevel.WARNING,
+                "gopro-media",
+                "Operator reported the GoPro hard disk is not available",
+                instrument="gopro",
+                processing_step="media-reconnect",
+            )
+            return {
+                "reconnected": False,
+                "media_available": False,
+                "message": GOPRO_NO_DISK_MESSAGE,
+            }
+
+        directory = request.get("directory")
+        if not directory:
+            raise ValueError(
+                "Select the folder that contains the GoPro media. "
+                + GOPRO_FOLDER_REQUIREMENT
+            )
+        root = Path(str(directory)).expanduser().resolve()
+        if not root.is_dir():
+            raise ValueError(f"Folder does not exist: {root}")
+        # Accept either the GoPro folder itself or a parent holding one, so the
+        # operator can point at the disk without hunting for the exact level.
+        if root.name.casefold() != GOPRO_FOLDER_NAME.casefold():
+            nested = [
+                path for path in root.iterdir()
+                if path.is_dir() and path.name.casefold() == GOPRO_FOLDER_NAME.casefold()
+            ]
+            if not nested:
+                raise ValueError(GOPRO_FOLDER_REQUIREMENT)
+            root = nested[0]
+
+        with self._lock:
+            self._gopro_index_cache = None
+            captures = tuple(self._instruments["gopro"].quicklook.get("captures", ()))
+        index = self._gopro_source_index(root)
+        wanted = {
+            str(item.get("file_name") or Path(str(item.get("source_file") or "")).name).casefold()
+            for item in captures
+            if isinstance(item, dict)
+        }
+        wanted.discard("")
+        matched = sorted(name for name in wanted if name in index)
+        missing = sorted(wanted - set(matched))
+        if not matched:
+            self._gopro_index_cache = None
+            raise ValueError(
+                f"No saved GoPro capture was found in {root}. Check that this is "
+                "the media folder for this flight."
+            )
+        with self._lock:
+            self._gopro_media_root = root
+        self.logger.log(
+            LogLevel.SUCCESS if not missing else LogLevel.WARNING,
+            "gopro-media",
+            (
+                f"GoPro media reconnected at {root}: {len(matched)} of "
+                f"{len(wanted)} saved capture(s) matched"
+            ),
+            instrument="gopro",
+            file_path=root,
+            processing_step="media-reconnect",
+        )
+        self._persist_project_logs()
+        return {
+            "reconnected": True,
+            "media_available": True,
+            "media_root": str(root),
+            "images_found": len(index),
+            "matched_captures": len(matched),
+            "missing_captures": len(missing),
+            "message": (
+                f"Synchronised {len(matched)} of {len(wanted)} saved capture(s) "
+                f"from {root}."
+                + (f" {len(missing)} could not be found." if missing else "")
+            ),
+        }
 
     def log_gopro_view_event(self, message: str) -> None:
         self.logger.log(
@@ -4995,7 +5161,10 @@ class DashboardScanBackend:
         quicklook_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = quicklook_path.with_suffix(".json.temporary")
         temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+            json.dumps(
+                _gopro_project_payload(payload),
+                ensure_ascii=False, indent=2, allow_nan=False,
+            ) + "\n",
             encoding="utf-8",
         )
         temporary.replace(quicklook_path)
@@ -5109,6 +5278,40 @@ def _balanced_worker_count(system) -> int:
             max(2, system.total_logical_cores // 4),
         ),
     )
+
+
+def _gopro_project_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    """Project copy of the GoPro result: identity and geometry, never pixels.
+
+    Images stay on the campaign disk. What the project needs in order to draw
+    the map and offer a download later is the capture identity plus its matched
+    navigation, so the stored copy drops the full media inventory and the
+    on-disk path of every capture. ``file_name`` is retained because that is
+    what re-links a capture to its image when the disk is reattached.
+    """
+    saved = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"inventory", "captures"}
+    }
+    saved["captures"] = [
+        {key: value for key, value in item.items() if key != "source_file"}
+        for item in payload.get("captures", ())
+        if isinstance(item, dict)
+    ]
+    if not payload.get("available"):
+        # Only useful while georeferencing has not succeeded; gopro_view()
+        # retries the match from it once Noseboom navigation exists.
+        saved["inventory"] = [
+            {
+                **{k: v for k, v in item.items() if k != "source_file"},
+                "source_file": Path(str(item.get("source_file", ""))).name,
+            }
+            for item in payload.get("inventory", ())
+            if isinstance(item, dict)
+        ]
+    saved["images_stored_in_project"] = False
+    return saved
 
 
 def _iso(value: datetime | None) -> str | None:

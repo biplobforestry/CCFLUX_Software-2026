@@ -209,6 +209,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     image_file,
                     download=parse_qs(parsed.query).get("download") == ["1"],
                 )
+        elif path == "/api/gopro/media-status":
+            self._send_json(HTTPStatus.OK, self.server.backend.gopro_media_status())
         elif path == "/api/flir":
             self._send_json(HTTPStatus.OK, self.server.backend.flir_view())
         elif path.startswith("/api/flir/asset/"):
@@ -353,6 +355,11 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 body = self._json_body()
                 self.server.backend.log_noseboom_view_event(str(body.get("message", "")))
                 self._send_json(HTTPStatus.OK, {"logged": True})
+            elif path == "/api/gopro/reconnect":
+                body = self._json_body()
+                self._send_json(
+                    HTTPStatus.OK, self.server.backend.reconnect_gopro_media(body)
+                )
             elif path == "/api/gopro/log":
                 body = self._json_body()
                 self.server.backend.log_gopro_view_event(str(body.get("message", "")))

@@ -149,7 +149,69 @@
     } catch (error) {
       byId('imageTitle').textContent = 'Image unavailable';
       byId('imagePercent').textContent = error.message;
+      // A saved project carries capture identity but never the pictures. When
+      // the camera disk is not reachable, offer to reconnect it rather than
+      // leaving the operator at a dead end.
+      await offerMediaReconnect(captureId);
     }
+  }
+
+  async function offerMediaReconnect(captureId) {
+    let status;
+    try {
+      status = await api('/api/gopro/media-status');
+    } catch (_) {
+      return;
+    }
+    if (status.media_available) return;
+    const loading = byId('imageLoading');
+    loading.style.display = '';
+    loading.innerHTML = `
+      <p><strong>${escapeHtml(status.prompt)}</strong></p>
+      <p class="muted">The images stay on the campaign hard disk; the project
+      stores only the capture identity and its matched position.</p>
+      <div class="reconnect-actions">
+        <button class="btn primary" id="gpHasDisk">Yes</button>
+        <button class="btn" id="gpNoDisk">No</button>
+      </div>
+      <div id="gpReconnectDetail"></div>`;
+    byId('gpNoDisk').onclick = () => {
+      byId('gpReconnectDetail').innerHTML =
+        `<p class="warn">${escapeHtml(status.contact_message)}</p>`;
+      api('/api/gopro/log', {
+        method: 'POST',
+        body: JSON.stringify({ message: 'GoPro hard disk reported unavailable' })
+      }).catch(() => {});
+    };
+    byId('gpHasDisk').onclick = () => {
+      byId('gpReconnectDetail').innerHTML = `
+        <p>${escapeHtml(status.folder_requirement)}</p>
+        <label class="detail-row">Folder
+          <input type="text" id="gpDirectory" placeholder="/Volumes/&lt;disk&gt;/Camera_System/GoPro">
+        </label>
+        <button class="btn primary" id="gpSync">Synchronise</button>
+        <p id="gpSyncResult" class="muted"></p>`;
+      byId('gpSync').onclick = async () => {
+        const directory = byId('gpDirectory').value.trim();
+        const result = byId('gpSyncResult');
+        result.textContent = 'Synchronising…';
+        try {
+          const response = await api('/api/gopro/reconnect', {
+            method: 'POST',
+            body: JSON.stringify({ has_hard_disk: true, directory })
+          });
+          result.textContent = response.message;
+          if (response.reconnected) {
+            result.classList.remove('warn');
+            // The disk is back; load the picture the operator asked for.
+            setTimeout(() => loadImage(captureId), 400);
+          }
+        } catch (error) {
+          result.classList.add('warn');
+          result.textContent = error.message;
+        }
+      };
+    };
   }
 
   function closeImage() {
