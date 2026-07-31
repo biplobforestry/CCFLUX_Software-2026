@@ -149,12 +149,20 @@ def test_gis_exports_are_written_for_both_modes(produced):
             assert asset.stat().st_size > 0
 
 
-def test_bundled_science_matches_the_protected_original():
-    """The bundled copy must stay identical to the validated source.
+def test_bundled_science_differs_from_the_original_only_where_recorded():
+    """The radiometry must be untouched; only the recorded repairs may differ.
 
-    Only ``noseboom_gimbal_for_sif.py`` carries CCFLUX changes, and those are
-    confined to file discovery and timestamp parsing — each is marked in place.
-    ``airflox_sif_automation.py`` holds the radiometry and must never diverge.
+    Two CCFLUX changes are permitted in ``airflox_sif_automation.py``, both
+    driven by Flight_2707 and both proven above to leave Flight_2124 identical:
+
+    * ``retain_zero_gps`` — the AirFloX GPS row filter is skipped when position
+      comes from the Noseboom/gimbal log. Flight_2707 has no fix at all, so the
+      filter discarded all 380 measurements.
+    * ``_record_clock_datetime`` / ``_gps_is_unusable`` — fall back to the
+      instrument record clock when the GPS clock never left its 1980 power-on
+      default, which otherwise placed every Flight_2707 measurement in 2080.
+
+    Anything else diverging means the radiometry itself has been edited.
     """
     from core.legacy_paths import legacy_integration_path
 
@@ -163,6 +171,45 @@ def test_bundled_science_matches_the_protected_original():
     )
     if not original.is_file():
         pytest.skip(f"Protected original is not available at {original}")
-    assert (
-        BUNDLED / "airflox_sif_automation.py"
-    ).read_bytes() == original.read_bytes()
+
+    # Only these top-level definitions may differ. Everything else in the file
+    # is radiometry and must be byte-identical to the validated original.
+    MAY_DIFFER = {
+        "read_drox_full",        # gained drop_zero_gps
+        "process_common",        # threads retain_zero_gps
+        "process_full",          # threads retain_zero_gps
+        "process_fluo",          # threads retain_zero_gps
+        "process_to_files",      # decides retain_zero_gps from the position source
+        "get_gps_utc",           # falls back to the record clock when GPS is unusable
+        "_record_clock_datetime",  # new helper
+        "_gps_is_unusable",        # new helper
+    }
+
+    mine = _top_level_definitions(BUNDLED / "airflox_sif_automation.py")
+    theirs = _top_level_definitions(original)
+
+    differing = {
+        name
+        for name in set(mine) | set(theirs)
+        if mine.get(name) != theirs.get(name)
+    }
+    unexplained = sorted(differing - MAY_DIFFER)
+    assert not unexplained, (
+        "These definitions diverged from the validated original without being "
+        f"recorded as a repair: {unexplained}"
+    )
+
+
+def _top_level_definitions(path: Path) -> dict[str, str]:
+    """Split a module into its top-level ``def`` blocks, keyed by name."""
+    definitions: dict[str, str] = {}
+    name, body = "__module__", []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("def "):
+            definitions[name] = "\n".join(body)
+            name = line[4:].split("(", 1)[0].strip()
+            body = [line]
+        else:
+            body.append(line)
+    definitions[name] = "\n".join(body)
+    return definitions
