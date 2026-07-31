@@ -119,6 +119,24 @@ GOPRO_NO_DISK_MESSAGE = (
     "Dr. Georgios I. Gkatzelis or Biplob Dey."
 )
 
+# FLIR Level 2 defaults. Apparent mode needs no environment measurements and is
+# a sensor sanity check; corrected mode is quantitative only when every value is
+# a recorded measurement, which the provenance field records.
+DEFAULT_FLIR_LEVEL2_OPTIONS: dict[str, object] = {
+    "mode": "apparent",
+    "environment_inputs_provenance": "assumed_for_testing",
+    "emissivity": None,
+    "object_distance_m": None,
+    "atmospheric_temperature_c": None,
+    "reflected_apparent_temperature_c": None,
+    "relative_humidity_percent": None,
+    "external_optics_transmission": 1.0,
+    "external_optics_temperature_c": None,
+    "valid_temperature_min_c": None,
+    "valid_temperature_max_c": None,
+    "save_temperature_npz": False,
+}
+
 DEFAULT_SIF_OPTIONS: dict[str, object] = {
     "modes": ["FULL", "FLUO"],
     "position_mode": "uav_airship",
@@ -511,6 +529,7 @@ class DashboardScanBackend:
         self._miro_rack_bridge: object | None = None
         self._hatchbox_view_lock = threading.RLock()
         self._sif_options = dict(DEFAULT_SIF_OPTIONS)
+        self._flir_level2_options = dict(DEFAULT_FLIR_LEVEL2_OPTIONS)
         self._last_checkpoint_monotonic = 0.0
         # Set when an operator reconnects the camera disk somewhere new.
         self._gopro_media_root: Path | None = None
@@ -1061,6 +1080,7 @@ class DashboardScanBackend:
                 "processing_queue": self._queue_snapshot(),
                 "level2_capabilities": level2_capability_snapshot(),
                 "sif_options": dict(self._sif_options),
+                "flir_level2_options": dict(self._flir_level2_options),
                 "scans": {
                     source: self._scan_channel_snapshot(channel)
                     for source, channel in self._scan_channels.items()
@@ -1399,6 +1419,10 @@ class DashboardScanBackend:
             self._sif_options = {
                 **DEFAULT_SIF_OPTIONS,
                 **project.instrument_options.get("sif", {}),
+            }
+            self._flir_level2_options = {
+                **DEFAULT_FLIR_LEVEL2_OPTIONS,
+                **project.instrument_options.get("flir_level2", {}),
             }
             self.processing_queue = restored_queue
             self._scheduler = None
@@ -4806,6 +4830,86 @@ class DashboardScanBackend:
             )
         return tuple(kept)
 
+    def update_flir_level2_options(
+        self, request: Mapping[str, object] | None
+    ) -> dict[str, object]:
+        """Validate the operator's radiometric correction inputs.
+
+        Apparent mode needs nothing. Corrected mode needs every environment
+        measurement, and is only quantitative when the operator states the
+        values were measured rather than assumed.
+        """
+        request = request or {}
+        options = dict(DEFAULT_FLIR_LEVEL2_OPTIONS)
+        mode = str(request.get("mode", options["mode"])).strip().lower()
+        if mode not in {"apparent", "corrected"}:
+            raise ValueError("FLIR temperature mode must be apparent or corrected")
+        options["mode"] = mode
+        provenance = str(
+            request.get("environment_inputs_provenance",
+                        options["environment_inputs_provenance"])
+        ).strip().lower()
+        if provenance not in {"measured", "assumed_for_testing"}:
+            raise ValueError(
+                "Environment input provenance must be measured or assumed_for_testing"
+            )
+        options["environment_inputs_provenance"] = provenance
+
+        numeric = {
+            "emissivity": (0.0, 1.0, False),
+            "object_distance_m": (0.0, 100_000.0, True),
+            "atmospheric_temperature_c": (-273.15, 200.0, False),
+            "reflected_apparent_temperature_c": (-273.15, 200.0, False),
+            "relative_humidity_percent": (0.0, 100.0, True),
+            "external_optics_transmission": (0.0, 1.0, False),
+            "external_optics_temperature_c": (-273.15, 200.0, False),
+            "valid_temperature_min_c": (-273.15, 2000.0, True),
+            "valid_temperature_max_c": (-273.15, 2000.0, True),
+        }
+        for name, (low, high, inclusive_low) in numeric.items():
+            if request.get(name) is None:
+                continue
+            value = _optional_float(request.get(name))
+            if value is None:
+                continue
+            within = low <= value <= high if inclusive_low else low < value <= high
+            if not within:
+                raise ValueError(
+                    f"{name} must be between {low} and {high}"
+                )
+            options[name] = value
+        options["save_temperature_npz"] = request.get("save_temperature_npz") is True
+
+        if (options["valid_temperature_min_c"] is None) != (
+            options["valid_temperature_max_c"] is None
+        ):
+            raise ValueError(
+                "Provide both valid temperature limits, or neither"
+            )
+        if mode == "corrected":
+            missing = [
+                name for name in (
+                    "emissivity", "object_distance_m", "atmospheric_temperature_c",
+                    "reflected_apparent_temperature_c", "relative_humidity_percent",
+                ) if options[name] is None
+            ]
+            if missing:
+                raise ValueError(
+                    "Environment-corrected temperature needs measured values for: "
+                    + ", ".join(missing)
+                )
+        with self._lock:
+            self._flir_level2_options = options
+            if self._flight_project is not None:
+                self._flight_project.instrument_options["flir_level2"] = dict(options)
+        self.logger.log(
+            LogLevel.INFO, "camera-level2",
+            f"FLIR Level 2 options saved: mode={mode}, provenance={provenance}",
+            instrument="flir", processing_step="level2-configuration",
+        )
+        self._checkpoint_project()
+        return dict(options)
+
     def _flir_exports_for_interval(
         self,
         report: ScanReport,
@@ -4853,246 +4957,280 @@ class DashboardScanBackend:
     def _flir_detailed_task(
         self, context: ProcessingContext, selected_routines: tuple[str, ...]
     ) -> JobOutcome | None:
-        """Invoke only the validated, batch-oriented FLIR Level 2 routine."""
+        """Radiometric temperature plus Noseboom georeferencing for every frame.
+
+        Runs Teledyne FLIR's reference counts2temp calculation over the frames
+        inside the operator's Time Filter, then matches each frame to the
+        processed Noseboom navigation so the result can be mapped and taken
+        into post-processing. The science lives unchanged in
+        legacy_integration/FLIR; this only selects, drives and georeferences it.
+        """
+        from instruments.flir.level2_bridge import (
+            APPARENT, CORRECTED, PROVENANCE_ASSUMED, PROVENANCE_MEASURED,
+            LegacyFlirLevel2Bridge,
+        )
+
         with self._lock:
             report, project, limits = (
                 self._report, self._flight_project, self._resource_limits
             )
-            noseboom_points = tuple(
-                self._instruments["noseboom"].quicklook.get("points", ())
-            )
-            # Level 1 already intersects the global filter with FLIR's own
-            # coverage. Level 2 previously read the raw global interval outside
-            # the lock, so the two levels could analyse different windows.
             selected_start, selected_end = self._instrument_processing_interval(
                 "flir"
             )
-            flir_coverage = self._time_state.instruments.get("flir")
+            noseboom_points = tuple(
+                self._instruments["noseboom"].quicklook.get("points", ())
+            )
+            options = dict(self._flir_level2_options)
         if report is None or project is None:
             raise RuntimeError("Flight scan and project state are required")
+
         context.report_progress(1, "Selecting the FLIR export covering the interval")
         paths = list(
             self._flir_exports_for_interval(
                 report, selected_start, selected_end, level="level2"
             )
         )
-        context.report_progress(2, "Loading validated FLIR Level 2 routine")
-        from core.legacy_paths import legacy_integration_path
-
-        source = legacy_integration_path("FLIR", "FLIR_Processing_pipeline.py")
-        spec = importlib.util.spec_from_file_location(
-            "ccflux_legacy_flir_level2", source
+        bridge = LegacyFlirLevel2Bridge()
+        health_module = bridge.health
+        mode = str(options.get("mode", APPARENT))
+        correction = bridge.correction_inputs(options)
+        provenance = str(
+            options.get("environment_inputs_provenance", PROVENANCE_ASSUMED)
         )
-        if spec is None or spec.loader is None:
-            raise RuntimeError("Validated FLIR Level 2 source could not be loaded")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-        context.check_cancelled()
-        chunk_bytes = max(
-            64 * 1024,
-            min(8 * 1024 * 1024, limits.memory_bytes // max(1, limits.worker_count * 8)),
-        )
-        tasks = []
-        total_bytes = 0
-        skipped_bytes = 0
-        for path in paths:
-            # One stat per file: a multi-gigabyte export produces thousands of
-            # chunks, and this was previously re-stat-ing the file for each one.
-            size = path.stat().st_size
-            # Frames are written in acquisition order, so the byte span that can
-            # contain the selection is bisected instead of indexing the whole
-            # export. On a 39 GB file a one-hour selection out of a five-hour
-            # flight reads a fraction of the bytes.
-            window_start, window_end = locate_time_window_bytes(
-                path, selected_start, selected_end
-            )
-            skipped_bytes += size - (window_end - window_start)
-            total_bytes += window_end - window_start
-            for start in range(window_start, window_end, chunk_bytes):
-                tasks.append((path, start, min(start + chunk_bytes, window_end), 4096))
-        if skipped_bytes > 0:
+        if mode == CORRECTED and provenance != PROVENANCE_MEASURED:
+            # The reference is explicit that guessed inputs are not quantitative.
             self.logger.log(
-                LogLevel.INFO,
-                "flir-discovery",
-                (
-                    f"FLIR Level 2 indexing {total_bytes / 1e9:.1f} GB of the "
-                    f"selected interval; skipped {skipped_bytes / 1e9:.1f} GB "
-                    "outside it"
-                ),
-                instrument="flir",
-                processing_step="level2-byte-window",
+                LogLevel.WARNING, "camera-level2",
+                "Environment-corrected FLIR temperature was requested with "
+                "inputs that are not recorded as measured; the result is "
+                "marked non-quantitative.",
+                instrument="flir", processing_step="level2-provenance",
             )
-        entries: list[tuple[str, Path, int]] = []
-        scanned = 0
-        # Byte-range indexing is disk-bound and each range is independent, so
-        # it runs across the allocated workers instead of one chunk at a time.
-        # A 39 GB export is thousands of ranges; serially this dominated the
-        # whole Level 2 run. The Level 1 adapter already indexes this way.
-        index_workers = max(1, min(limits.worker_count, len(tasks)))
-        with ThreadPoolExecutor(
-            max_workers=index_workers, thread_name_prefix="ccflux-flir-level2-index"
-        ) as executor:
-            futures = [
-                executor.submit(module.scan_one_byte_range, task) for task in tasks
-            ]
-            for completed, future in enumerate(as_completed(futures), 1):
-                context.check_cancelled()
-                # FLIR_Processing_pipeline.scan_one_byte_range returns
-                # (minimum, maximum, count, bytes_scanned, entries) — five
-                # values. This unpacked three, which is the shape of the *other*
-                # legacy module (FLIR_Quick_look, used by the Level 1 adapter),
-                # so Level 2 raised "too many values to unpack" on its very
-                # first chunk.
-                _, _, _, bytes_done, part = future.result()
-                scanned += bytes_done
-                entries.extend(part)
-                context.report_progress(
-                    5 + 25 * scanned / max(1, total_bytes),
-                    f"Indexing FLIR frames across {index_workers} worker(s): "
-                    f"{completed}/{len(tasks)} ranges",
-                )
-        entries.sort(key=lambda item: (item[0], str(item[1]), item[2]))
-        indexed_frame_count = len(entries)
-        if selected_start and selected_end:
-            # A naive frame timestamp used to be stamped with the filter's own
-            # zone and compared without conversion, so an export written with a
-            # real UTC offset was filtered against the wrong instant.
-            entries = [
-                item for item in entries
-                if (parsed := _flir_frame_utc(module, item[0])) is not None
-                and selected_start <= parsed <= selected_end
-            ]
-        context.report_progress(
-            30,
-            f"Selected {len(entries):,} of {indexed_frame_count:,} indexed FLIR frames",
+
+        output_root = self._run_output_root(project, "flir") / "level2"
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        context.report_progress(4, "Indexing frame timestamps")
+        entries, _ = health_module.scan_timestamps(
+            [Path(value) for value in paths],
+            max(1, limits.worker_count),
+            8,
         )
         if not entries:
+            raise RuntimeError("No valid FLIR frame timestamps were found")
+        health_module.write_timestamp_index(
+            output_root / "timestamp_index.csv", entries
+        )
+        context.check_cancelled()
+
+        context.report_progress(18, f"Reading headers for {len(entries):,} frames")
+        health, _ = health_module.inspect_all_headers(
+            entries, max(1, limits.worker_count)
+        )
+        summary, gaps = health_module.acquisition_summary(health, None, None)
+        health_module.write_csv(output_root / "frame_health.csv", health)
+        health_module.write_csv(output_root / "acquisition_gaps.csv", gaps)
+        context.check_cancelled()
+
+        indices = health_module.select_indices(
+            entries, health, selected_start, selected_end, 1, False
+        )
+        if not indices:
             raise RuntimeError(
                 _flir_selection_failure_message(
-                    indexed_frame_count, flir_coverage, selected_start, selected_end
+                    len(entries),
+                    self._time_state.instruments.get("flir"),
+                    selected_start,
+                    selected_end,
                 )
             )
-        # Every other instrument writes into a timestamped run folder. FLIR
-        # Level 2 used one fixed path and refused to start when it existed, so
-        # the routine could only ever be run once per project.
-        output_dir = self._run_output_root(project, "flir") / "level2"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_file = output_dir / "flir_radiometric_temperature_statistics.csv"
-        context.report_progress(32, "Radiometric conversion and frame statistics")
-        processed = module.calculate_selected_window(
-            entries,
-            paths,
-            batch_size=max(1, min(8, limits.memory_bytes // (128 * 1024 * 1024))),
-            workers=1,
-            output_csv=output_file,
+        spans = health_module.object_spans(entries)
+        valid_range = None
+        if options.get("valid_temperature_min_c") is not None:
+            valid_range = (
+                float(options["valid_temperature_min_c"]),
+                float(options["valid_temperature_max_c"]),
+            )
+        save_directory = (
+            output_root / "temperature_maps_npz"
+            if options.get("save_temperature_npz")
+            else None
         )
+
         context.report_progress(
-            94, "Matching FLIR temperature frames to Noseboom navigation"
+            26, f"Converting {len(indices):,} frames to temperature"
         )
-        with output_file.open(
-            "r", encoding="utf-8-sig", newline=""
-        ) as stream:
-            level2_rows = list(csv.DictReader(stream))
-        temperature_records = [
-            {
-                "frame_id": str(
-                    row.get("record_index_in_selected_scan") or index
-                ),
-                "timestamp_utc": str(row.get("timestamp.$date") or ""),
-                "temperature_min_c": _finite_or_none(
-                    row.get("pixel_temperature.min_c")
-                ),
-                "temperature_max_c": _finite_or_none(
-                    row.get("pixel_temperature.max_c")
-                ),
-                "temperature_mean_c": _finite_or_none(
-                    row.get("pixel_temperature.mean_c")
-                ),
-                "temperature_median_c": _finite_or_none(
-                    row.get("pixel_temperature.median_c")
-                ),
-                "temperature_std_c": _finite_or_none(
-                    row.get("pixel_temperature.std_c")
-                ),
-                "valid_pixel_count": _integer_or_none(
-                    row.get("pixel_temperature.valid_pixel_count")
-                ),
-                "status": str(
-                    row.get("calculated_temperature.status") or ""
-                ),
-            }
-            for index, row in enumerate(level2_rows, start=1)
-        ]
-        map_points = georeference_temperature_records(
-            level2_rows, noseboom_points
+        rows: list[dict[str, object]] = []
+        for position, index in enumerate(indices, start=1):
+            context.check_cancelled()
+            rows.append(
+                health_module.process_one_temperature(
+                    (index + 1, health[index], entries[index], spans[index]),
+                    correction,
+                    None,
+                    save_directory,
+                    valid_range,
+                )
+            )
+            if position % 10 == 0 or position == len(indices):
+                context.report_progress(
+                    26 + 60 * position / len(indices),
+                    f"Radiometric temperature {position}/{len(indices)}",
+                )
+
+        context.report_progress(88, "Matching temperature frames to Noseboom navigation")
+        georeferenced = georeference_temperature_records(
+            [
+                {
+                    "timestamp": row.get("timestamp_utc"),
+                    "record_index_in_selected_scan": row.get("frame_index"),
+                    "pixel_temperature.min_c": row.get("temperature_c_min"),
+                    "pixel_temperature.max_c": row.get("temperature_c_max"),
+                    "pixel_temperature.mean_c": row.get("temperature_c_mean"),
+                    "pixel_temperature.median_c": row.get("temperature_c_median"),
+                    "pixel_temperature.std_c": row.get("temperature_c_std"),
+                    "pixel_temperature.valid_pixel_count": row.get(
+                        "temperature_c_valid_pixel_count"
+                    ),
+                    "calculated_temperature.status": row.get("temperature_status"),
+                }
+                for row in rows
+            ],
+            noseboom_points,
         )
+        position_by_frame = {
+            str(item["frame_id"]): item for item in georeferenced
+        }
+        for row in rows:
+            match = position_by_frame.get(str(row.get("frame_index")))
+            # Every row carries the navigation columns so the CSV is directly
+            # usable downstream; unmatched frames simply carry blanks.
+            row["noseboom_time_utc"] = match["noseboom_time_utc"] if match else ""
+            row["noseboom_time_delta_s"] = match["time_delta_seconds"] if match else ""
+            row["latitude_deg"] = match["latitude"] if match else ""
+            row["longitude_deg"] = match["longitude"] if match else ""
+            row["altitude_m"] = match["altitude_m"] if match else ""
+            row["georeference_status"] = "MATCHED" if match else "NO_NAVIGATION"
+            row["georeference_method"] = (
+                "nearest Noseboom UTC navigation sample within 2.5 s"
+            )
+            row["temperature_mode"] = mode
+            row["environment_inputs_provenance"] = provenance
+            row["quantitative"] = (
+                mode == CORRECTED and provenance == PROVENANCE_MEASURED
+            )
+        health_module.write_csv(output_root / "temperature_frames.csv", rows)
+
+        matched = sum(1 for row in rows if row["georeference_status"] == "MATCHED")
+        converted = sum(1 for row in rows if row.get("temperature_status") == "PASS")
+        summary_payload = {
+            **summary,
+            "processed_frames": len(rows),
+            "temperature_frames_passed": converted,
+            "georeferenced_frames": matched,
+            "temperature_mode": mode,
+            "environment_inputs_provenance": provenance,
+            "quantitative": mode == CORRECTED and provenance == PROVENANCE_MEASURED,
+            "time_filter_start_utc": _iso(selected_start),
+            "time_filter_end_utc": _iso(selected_end),
+            "selected_routines": list(selected_routines),
+        }
+        (output_root / "summary.json").write_text(
+            json.dumps(summary_payload, indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
+
+        context.report_progress(94, "Publishing the FLIR temperature workspace")
         with self._lock:
             browser_payload = dict(self._instruments["flir"].quicklook)
-        browser_payload.update(
-            {
-                "available": True,
-                "temperature_available": bool(map_points),
-                "temperature_reason": (
-                    None
-                    if map_points
-                    else "Temperature statistics were calculated, but no frame "
-                    "could be matched to Noseboom navigation within 2.5 seconds."
-                ),
-                "temperature_interpretation": (
-                    "FLIR Planck apparent land-surface temperature; "
-                    "atmospheric, emissivity, distance, and external-optics "
-                    "corrections are not applied."
-                ),
-                "temperature_records": temperature_records,
-                "map_points": map_points,
-                "processed_temperature_frames": len(temperature_records),
-                "georeferenced_temperature_frames": len(map_points),
-                "matching_method": (
-                    "Nearest Noseboom UTC navigation sample; maximum "
-                    "difference 2.5 seconds"
-                ),
-            }
-        )
+        browser_payload.update({
+            "available": True,
+            "temperature_available": bool(matched),
+            "temperature_reason": (
+                None if matched else
+                "Temperature was calculated, but no frame matched processed "
+                "Noseboom navigation within 2.5 seconds. Process Noseboom first."
+            ),
+            "temperature_interpretation": (
+                "FLIR apparent temperature: factory calibration with emissivity "
+                "1, no atmospheric, reflected or optics correction. A sensor "
+                "sanity check, not a surface temperature."
+                if mode == APPARENT else
+                "FLIR environment-corrected surface temperature using measured "
+                "emissivity, distance, atmospheric and reflected temperature, "
+                "humidity and optics transmission."
+                if provenance == PROVENANCE_MEASURED else
+                "Environment-corrected temperature computed from assumed inputs. "
+                "NOT QUANTITATIVE — for debugging only."
+            ),
+            "temperature_mode": mode,
+            "quantitative": mode == CORRECTED and provenance == PROVENANCE_MEASURED,
+            "temperature_records": [
+                {
+                    "frame_id": str(row.get("frame_index")),
+                    "timestamp_utc": row.get("timestamp_utc"),
+                    "temperature_min_c": _finite_or_none(row.get("temperature_c_min")),
+                    "temperature_max_c": _finite_or_none(row.get("temperature_c_max")),
+                    "temperature_mean_c": _finite_or_none(row.get("temperature_c_mean")),
+                    "temperature_median_c": _finite_or_none(row.get("temperature_c_median")),
+                    "temperature_std_c": _finite_or_none(row.get("temperature_c_std")),
+                    "valid_pixel_count": _integer_or_none(
+                        row.get("temperature_c_valid_pixel_count")
+                    ),
+                    "status": row.get("temperature_status"),
+                }
+                for row in rows
+            ],
+            "map_points": georeferenced,
+            "processed_temperature_frames": len(rows),
+            "georeferenced_temperature_frames": matched,
+            "matching_method": (
+                "Nearest Noseboom UTC navigation sample; maximum difference 2.5 seconds"
+            ),
+        })
         quicklook_path = (
             project.flight_output_root / "quicklooks" / "flir_browser.json"
         )
         quicklook_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = quicklook_path.with_suffix(".json.temporary")
         temporary.write_text(
-            json.dumps(
-                browser_payload,
-                ensure_ascii=False,
-                indent=2,
-                allow_nan=False,
-            )
+            json.dumps(browser_payload, ensure_ascii=False, indent=2, allow_nan=False)
             + "\n",
             encoding="utf-8",
         )
         temporary.replace(quicklook_path)
-        context.report_progress(100, "FLIR Level 2 and temperature map complete")
+
+        produced = [
+            output_root / name for name in (
+                "temperature_frames.csv", "frame_health.csv",
+                "acquisition_gaps.csv", "summary.json", "timestamp_index.csv",
+            )
+        ]
         with self._lock:
             state = self._instruments["flir"]
-            for value in (output_file, quicklook_path):
+            for value in (*produced, quicklook_path):
                 if str(value) not in state.output_files:
                     state.output_files.append(str(value))
             state.quicklook = browser_payload
             saved = project.detected_instruments.get("flir")
             if saved is not None:
-                saved.output_locations = [
-                    Path(value) for value in state.output_files
-                ]
+                saved.output_locations = [Path(v) for v in state.output_files]
             project.output_locations["flir_browser"] = quicklook_path
         self.logger.log(
-            LogLevel.SUCCESS,
-            "camera-level2",
-            f"FLIR Level 2 completed for {processed} frame(s)",
-            instrument="flir",
-            job_id="flir_detailed",
-            file_path=output_file,
+            LogLevel.SUCCESS, "camera-level2",
+            (
+                f"FLIR Level 2 complete: {converted}/{len(rows)} frame(s) converted "
+                f"to {mode} temperature, {matched} georeferenced against Noseboom"
+            ),
+            instrument="flir", job_id="flir_detailed",
+            file_path=output_root / "temperature_frames.csv",
             processing_step=",".join(selected_routines),
         )
-        return None
+        context.report_progress(100, "FLIR Level 2 and temperature map complete")
+        return JobOutcome(
+            warning=None if matched else
+            "Temperature was calculated but no frame matched Noseboom navigation."
+        )
 
     def _gopro_quick_task(self, context: ProcessingContext) -> JobOutcome | None:
         """Inventory GoPro media and match CET/CEST captures to Noseboom UTC."""

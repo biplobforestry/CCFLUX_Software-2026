@@ -342,6 +342,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     page, str(body.get("message") or "Hatchbox browser interaction")
                 )
                 self._send_json(HTTPStatus.OK, {"logged": True})
+            elif path == "/api/flir/level2-options":
+                body = self._json_body()
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "saved": True,
+                        "options": self.server.backend.update_flir_level2_options(body),
+                    },
+                )
             elif path == "/api/sif/options":
                 body = self._json_body()
                 self._send_json(

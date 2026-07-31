@@ -1,0 +1,2 @@
+timestamp_utc,emissivity,emissivity_method,reflected_apparent_temperature_c,reflected_temperature_method,object_distance_m,distance_source,atmospheric_temperature_c,relative_humidity_percent,external_optics_transmission,external_optics_temperature_c,active_camera_range_c,reference_target_temperature_c,reference_target_id,time_sync_source,time_sync_uncertainty_ms,notes
+2026-07-15T13:30:00.000Z,,,,,,,,,1.0,,,,,,,Replace blanks with measured and traceable values
