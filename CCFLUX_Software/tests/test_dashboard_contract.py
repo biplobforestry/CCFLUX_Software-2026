@@ -257,7 +257,7 @@ def test_all_subpages_use_the_clean_main_gui_campaign_logo_treatment():
     assert "background:transparent!important" in logo
     assert ".ccflux-logo{width:100%;height:100%;padding:0" in logo
     assert (
-        ".brand-logo-shell{width:194px;height:98px;flex:0 0 194px;"
+        ".brand-logo-shell{width:137px;height:98px;flex:0 0 137px;"
         "padding:0;border:0;border-radius:0;background:transparent;"
         "box-shadow:none;overflow:visible}"
     ) in shared_css

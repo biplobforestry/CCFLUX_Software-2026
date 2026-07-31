@@ -363,7 +363,32 @@ class FolderDialog:
             title="Select CCFLUX Output Folder",
         )
 
+    @staticmethod
+    def _choose_with_osascript(script: str) -> Path | None:
+        """Run a macOS chooser out of process.
+
+        Tk must own the main thread. These choosers are invoked from an HTTP
+        request thread, so building a Tk root there means the panel never
+        appears and the request dies — the browser reports "Failed to fetch".
+        Every chooser therefore goes through osascript on macOS.
+        """
+        completed = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return None  # Non-zero is also how AppleScript reports Cancel.
+        selected = completed.stdout.strip()
+        return Path(selected) if selected else None
+
     def choose_project_file(self) -> Path | None:
+        if sys.platform == "darwin":
+            return self._choose_with_osascript(
+                'POSIX path of (choose file with prompt '
+                '"Open a saved CC-FLUX Flight Project (.ccflux)")'
+            )
         return self._choose_native(
             "askopenfilename",
             title="Open CC-FLUX Flight Project",
@@ -374,6 +399,11 @@ class FolderDialog:
         )
 
     def choose_project_folder(self) -> Path | None:
+        if sys.platform == "darwin":
+            return self._choose_with_osascript(
+                'POSIX path of (choose folder with prompt '
+                '"Select a folder containing saved CC-FLUX Flight Projects")'
+            )
         return self._choose_native(
             "askdirectory",
             title="Select a folder containing saved CC-FLUX Flight Projects",
