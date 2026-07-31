@@ -18,7 +18,9 @@ This manual describes the distributable folder, the normal processing workflow, 
 2. Keep the Terminal window open.
 3. The launcher creates **.venv-macos**, installs or verifies all required Python libraries, starts CC-FLUX on a free local port, and opens the default browser.
 
-Python 3.10 or newer is required. An internet connection is normally required during the first launch. Launcher diagnostics are written to **logs/launcher.log**.
+Python 3.10 or newer is required. If the launcher does not find a supported interpreter, it reports the version it found and offers to download the official Python 3.12.7 installer from python.org and open it. Nothing is installed without your confirmation, and any existing Python installation is left in place; you may also decline and install Python yourself. On Windows, select "Add python.exe to PATH" during installation, then run the launcher again.
+
+An internet connection is normally required during the first launch. Launcher diagnostics are written to **logs/launcher.log**.
 
 ## 2. Distribution folder structure
 

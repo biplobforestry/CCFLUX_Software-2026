@@ -39,17 +39,78 @@ printf '%s\n' '================================================================'
 printf '\n'
 log_event 'Mac_CCFLUX.command started.'
 
-PYTHON_COMMAND=''
-for candidate in python3 python; do
-  if command -v "$candidate" >/dev/null 2>&1 &&
-     "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
-    PYTHON_COMMAND="$candidate"
-    break
-  fi
-done
+REQUIRED_PYTHON='3.10'
+OFFERED_PYTHON='3.12.7'
 
-if [[ -z "$PYTHON_COMMAND" ]]; then
-  fail_and_wait 'Python 3.10 or newer was not found. Install Python from https://www.python.org/downloads/ and run this file again.'
+find_supported_python() {
+  PYTHON_COMMAND=''
+  # Look at the versioned interpreters too: a supported Python is often already
+  # installed alongside an older default.
+  for candidate in python3.13 python3.12 python3.11 python3.10 python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 &&
+       "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+      PYTHON_COMMAND="$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+installed_python_version() {
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      "$candidate" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null && return 0
+    fi
+  done
+  printf '%s' 'none'
+}
+
+offer_python_installation() {
+  local found architecture installer url
+  found="$(installed_python_version)"
+  printf '\n%s\n' '----------------------------------------------------------------'
+  if [[ "$found" == 'none' ]]; then
+    printf '%s\n' 'Python was not found on this computer.'
+  else
+    printf '%s\n' "Python $found was found. CC-FLUX requires $REQUIRED_PYTHON or newer."
+  fi
+  printf '%s\n' "CC-FLUX can download the official Python $OFFERED_PYTHON installer"
+  printf '%s\n' 'from python.org and open it for you. Nothing is installed without'
+  printf '%s\n' 'your confirmation, and your existing Python is left in place.'
+  printf '%s\n' '----------------------------------------------------------------'
+  printf '%s' 'Download and open the Python installer now? [y/N] '
+  read -r reply
+  case "$reply" in
+    [Yy]*) ;;
+    *)
+      fail_and_wait "Python $REQUIRED_PYTHON or newer is required. Install it from https://www.python.org/downloads/ and run this file again."
+      ;;
+  esac
+
+  architecture="$(uname -m)"
+  installer="$SCRIPT_DIR/python-$OFFERED_PYTHON-macos.pkg"
+  url="https://www.python.org/ftp/python/$OFFERED_PYTHON/python-$OFFERED_PYTHON-macos11.pkg"
+  printf '\n%s\n' "Downloading Python $OFFERED_PYTHON for $architecture..."
+  log_event "Downloading Python $OFFERED_PYTHON from $url"
+  if ! curl -fSL --retry 2 -o "$installer" "$url"; then
+    rm -f "$installer"
+    fail_and_wait "The Python installer could not be downloaded. Install Python $REQUIRED_PYTHON or newer from https://www.python.org/downloads/ and run this file again."
+  fi
+
+  printf '%s\n' 'Opening the installer. Complete it, then return to this window.'
+  log_event 'Opening the downloaded Python installer.'
+  open -W "$installer" || fail_and_wait 'The Python installer could not be opened.'
+  rm -f "$installer"
+
+  if ! find_supported_python; then
+    fail_and_wait "Python $REQUIRED_PYTHON or newer was still not found after installation. Open a new Terminal window and run this file again."
+  fi
+  printf '%s\n\n' "Python $("$PYTHON_COMMAND" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])') is now in use."
+  log_event "Continuing with $PYTHON_COMMAND after installation."
+}
+
+if ! find_supported_python; then
+  offer_python_installation
 fi
 
 VENV_DIRECTORY="$SCRIPT_DIR/.venv-macos"
