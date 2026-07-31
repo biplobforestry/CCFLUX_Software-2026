@@ -63,7 +63,42 @@ Select a writable location for processed files, plots, maps, logs, and the saved
 11. Click **Save .ccflux** to preserve the project state.
 
 
-## 5. Saving and loading a Flight Project
+## 5. Instrument descriptions
+
+Each instrument is discovered from the Flight Folder or the Camera Folder by
+filename, folder name, and file content, and is reported with its own UTC
+coverage. Selecting an instrument for processing requires that its coverage
+overlaps the Time Filter.
+
+* **Noseboom** — airflow, wind components, temperature, humidity and INS/GNSS
+  navigation. Its epoch-nanosecond clock is the campaign UTC reference, and its
+  processed 1 Hz navigation is what every camera product is georeferenced
+  against. Products: 1 Hz export, straight-flight legs, wind spectra, map.
+* **MIRO** — multi-species trace gas (CO, N2O, NO, NO2, CH4, SO2, NH3, O3, CO2)
+  from the MIRO Rack. Analysed at original resolution; a separate 1 Hz copy is
+  produced for the Mapview only.
+* **Picarro** — CO2, CH4 and H2O from the MIRO Rack, delivered as `.dat` files
+  with separate DATE and TIME columns interpreted as UTC.
+* **OPC HBX-4 / HBX-5** — optical particle counters with independent bin
+  schemas. The two are kept strictly separate; a file matching both schemas is
+  reported as ambiguous and must be confirmed before processing.
+* **Partector Pro** — particle number, LDSA, mass and diagnostics.
+* **INS Gimbal** — Gremsy T3V3 attitude and inertial counts. A single Influx
+  export rotation is detected and restored to chronological order.
+* **SIF / FLOX** — AirFLOX spectral fluorescence in FULL and FLUO modes with
+  configurable corrections, position mode and vegetation indices.
+* **MicaSense** — multispectral imagery, discovered from TIFF or ZIP deliveries.
+  Level 1 metadata only; Level 2 routines are declared unavailable.
+* **FLIR** — thermal frame export as a single large JSON stream. Level 1 reports
+  acquisition health, gaps and sample frames. Level 2 performs the radiometric
+  temperature conversion and matches frames to Noseboom navigation. When more
+  than one FLIR export is present, the one whose UTC coverage overlaps the
+  analysis interval is selected and the others are reported as ignored.
+* **GoPro** — capture imagery. EXIF clock values are interpreted in
+  Europe/Berlin and converted to UTC during detection, then matched to the
+  nearest processed Noseboom sample within 2.5 seconds.
+
+## 6. Saving and loading a Flight Project
 
 **Save .ccflux** stores selected folders, flight identity, time-filter state, instrument configuration, processing history, completed-job state, output references, and page-specific workflow state.
 

@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import importlib.util
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dataclasses import dataclass, field, replace
@@ -95,6 +96,11 @@ TERMINAL_PROCESSING_STATUSES = frozenset({
 
 # Minimum wall-clock gap between checkpoints triggered by progress reports.
 PROGRESS_CHECKPOINT_INTERVAL_SECONDS = 5.0
+
+# Upper bound on a project file considered during Load discovery. Compressed
+# projects carry their generated products, so the former 10 MB plain-JSON limit
+# would have skipped most real ones.
+PROJECT_DISCOVERY_BYTE_LIMIT = 2 * 1024 * 1024 * 1024
 
 DEFAULT_SIF_OPTIONS: dict[str, object] = {
     "modes": ["FULL", "FLUO"],
@@ -1077,9 +1083,12 @@ class DashboardScanBackend:
         invalid = 0
         for project_file in project_files:
             try:
-                if project_file.stat().st_size > 10 * 1024 * 1024:
-                    raise ValueError("project file exceeds 10 MB")
-                payload = json.loads(project_file.read_text(encoding="utf-8"))
+                if project_file.stat().st_size > PROJECT_DISCOVERY_BYTE_LIMIT:
+                    raise ValueError("project file is larger than the discovery limit")
+                # Compressed projects are archives, not text. Reading the
+                # manifest through the store keeps discovery working for both
+                # the compressed form and older plain-JSON projects.
+                payload = self._project_store.read_manifest(project_file)
                 flight_id = str(payload.get("flight_id") or "").strip()
                 if not flight_id:
                     raise ValueError("flight_id is missing")
@@ -1094,7 +1103,14 @@ class DashboardScanBackend:
                         "output_folder_path": payload.get("output_folder_path"),
                     }
                 )
-            except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+            except (
+                OSError,
+                UnicodeError,
+                ValueError,
+                KeyError,
+                zipfile.BadZipFile,
+                json.JSONDecodeError,
+            ) as exc:
                 invalid += 1
                 self.logger.log(
                     LogLevel.WARNING,

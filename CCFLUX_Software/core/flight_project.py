@@ -435,7 +435,7 @@ class FlightProjectStore:
     def load_project(self, project_file: Path) -> FlightProject:
         path = Path(project_file).resolve(strict=False)
         try:
-            payload = self._read_manifest(path)
+            payload = self.read_manifest(path)
         except (OSError, json.JSONDecodeError, KeyError, zipfile.BadZipFile) as exc:
             raise ProjectFileError(f"Invalid or unreadable project file: {path}") from exc
         try:
@@ -447,7 +447,7 @@ class FlightProjectStore:
         return project
 
     @staticmethod
-    def _read_manifest(path: Path) -> Any:
+    def read_manifest(path: Path) -> Any:
         """Read the manifest from a compressed project, or a legacy plain file."""
         if zipfile.is_zipfile(path):
             with zipfile.ZipFile(path) as archive:

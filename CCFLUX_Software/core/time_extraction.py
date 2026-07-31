@@ -329,13 +329,19 @@ class TimestampExtractor:
     def _extract_file(
         self, instrument_id: str, path: Path, accumulator: _Accumulator
     ) -> None:
+        # Campaign convention: every instrument records UTC. GoPro alone writes a
+        # local Europe/Berlin camera clock and is converted explicitly below.
+        # A timestamp that already carries an offset always keeps it — assuming
+        # UTC only rescues naive values, which would otherwise be classed as
+        # "timezone unknown" and dropped from every UTC range calculation,
+        # silently making the instrument unprocessable.
         if instrument_id == "noseboom":
             self._delimited(
                 path,
                 accumulator,
                 primary_columns=(
                     ("Airflow_UTCcorr_Nanoseconds_ns", "unix_epoch_nanoseconds", True),
-                    ("TIMESTAMP", None, False),
+                    ("TIMESTAMP", None, True),
                 ),
             )
         elif instrument_id == "miro":
@@ -355,7 +361,7 @@ class TimestampExtractor:
             self._delimited(
                 path,
                 accumulator,
-                primary_columns=(("_time", None, False),),
+                primary_columns=(("_time", None, True),),
             )
         elif instrument_id == "ins_gimbal":
             self._ins_gimbal(path, accumulator)
@@ -375,10 +381,10 @@ class TimestampExtractor:
                 path,
                 accumulator,
                 primary_columns=(
-                    ("timestamp", None, False),
-                    ("datetime", None, False),
-                    ("_time", None, False),
-                    ("TIMESTAMP", None, False),
+                    ("timestamp", None, True),
+                    ("datetime", None, True),
+                    ("_time", None, True),
+                    ("TIMESTAMP", None, True),
                     ("date_time_utc", None, True),
                     ("datetime [UTC]", None, True),
                 ),
@@ -478,6 +484,7 @@ class TimestampExtractor:
                     row[index] if index < len(row) else "",
                     row_number,
                     path,
+                    assume_utc=True,
                 )
                 for row_number, row in enumerate(reader, start=2)
             ]
@@ -486,7 +493,7 @@ class TimestampExtractor:
             try:
                 parsed.append(
                     _parse_timestamp(
-                        raw.original, format_hint=None, assume_utc=False
+                        raw.original, format_hint=None, assume_utc=True
                     ).value
                 )
             except (ValueError, OverflowError, OSError):
