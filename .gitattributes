@@ -1,2 +1,14 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Batch launchers must reach Windows with CRLF. cmd.exe locates a GOTO target
+# by byte offset, and an LF-only file can leave it reading from the middle of a
+# line — the launcher then jumps into the wrong place instead of installing
+# Python or starting the dashboard.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Shell launchers must reach macOS with LF: bash reads a trailing CR as part of
+# the command name.
+*.sh text eol=lf
+*.command text eol=lf

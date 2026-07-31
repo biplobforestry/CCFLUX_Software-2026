@@ -23,7 +23,11 @@ OFFERED_PYTHON = "3.12.7"
 
 
 def read(name):
-    return (ROOT / name).read_text(encoding="utf-8")
+    """Content with newlines normalised, so assertions are line-ending blind.
+
+    Line endings themselves are asserted separately, on the raw bytes.
+    """
+    return (ROOT / name).read_text(encoding="utf-8").replace("\r\n", "\n")
 
 
 @pytest.mark.parametrize("name", ALL_LAUNCHERS)
@@ -146,3 +150,24 @@ def test_the_manual_describes_the_offer():
 
     assert f"Python {REQUIRED_PYTHON} or newer is required" in manual
     assert "offers to download" in manual or "offers to install" in manual
+
+
+@pytest.mark.parametrize("name", BATCH_LAUNCHERS)
+def test_batch_launchers_ship_with_windows_line_endings(name):
+    """cmd.exe finds a GOTO target by byte offset. In an LF-only file it can
+    resume from the middle of a line, so the launcher jumps somewhere other
+    than the label it was sent to."""
+    raw = (ROOT / name).read_bytes()
+
+    assert b"\r\n" in raw, f"{name} has no CRLF line endings"
+    assert raw.replace(b"\r\n", b"").count(b"\n") == 0, (
+        f"{name} mixes LF and CRLF line endings"
+    )
+
+
+@pytest.mark.parametrize("name", SHELL_LAUNCHERS)
+def test_shell_launchers_ship_with_unix_line_endings(name):
+    """bash reads a trailing CR as part of the command name."""
+    raw = (ROOT / name).read_bytes()
+
+    assert b"\r" not in raw, f"{name} contains carriage returns"
