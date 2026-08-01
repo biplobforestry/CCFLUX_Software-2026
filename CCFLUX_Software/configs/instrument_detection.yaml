@@ -63,7 +63,7 @@
       "pattern_set": "micasense",
       "requires_confirmation": true,
       "todo": [
-        "ZIP discovery is confirmed, but Level 1 processing currently requires TIFF files to be extracted without modifying the archive."
+        "Discovery from ZIP deliveries is confirmed. Reading the acquisition metadata needs the TIFF files extracted from each archive, which is not implemented, so MicaSense is discovered and reported but not processed."
       ]
     },
     {

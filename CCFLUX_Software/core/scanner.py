@@ -15,6 +15,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from threading import Event
 from typing import Callable
@@ -230,6 +231,8 @@ class FlightFolderScanner:
         root = root.expanduser().resolve()
         if not root.is_dir():
             raise DetectionError(f"Flight folder does not exist or is not a directory: {root}")
+        # Per scan, so a second scan of a changed folder re-samples it.
+        self._exif_samples: dict[Path, tuple[int, frozenset[str]]] = {}
 
         token = cancellation or ScanCancellationToken()
         files_scanned = 0
@@ -467,6 +470,14 @@ class FlightFolderScanner:
         needs_exif = exif_capable and any(
             patterns.camera_exif_tags for _, patterns, _ in applicable
         )
+        sampled_exif: frozenset[str] | None = None
+        if needs_exif:
+            seen, established = self._exif_samples.get(path.parent, (0, frozenset()))
+            if seen >= EXIF_SAMPLES_PER_FOLDER:
+                # The folder's tag names are known; reuse them rather than
+                # paying another file open for an answer already held.
+                needs_exif = False
+                sampled_exif = established
         if needs_text or needs_exif:
             inspection = _inspect_file(
                 path,
@@ -482,6 +493,13 @@ class FlightFolderScanner:
             global_errors.extend(inspection.errors)
         else:
             inspection = _FileInspection()
+        if sampled_exif is not None:
+            inspection.exif_tags = sampled_exif
+        elif needs_exif:
+            seen, established = self._exif_samples.get(path.parent, (0, frozenset()))
+            self._exif_samples[path.parent] = (
+                seen + 1, established | inspection.exif_tags
+            )
 
         for rule, patterns, evidence in applicable:
             match = _evaluate_rule(path, rule, patterns, evidence, inspection)
@@ -577,6 +595,29 @@ class _MatchOutcome:
     global_errors: tuple[str, ...]
 
 
+@lru_cache(maxsize=8192)
+def _folder_matches(
+    folder: Path, root: Path, likely_folder_names: tuple[str, ...]
+) -> tuple[tuple[Path, str], ...]:
+    """Which configured folder names this file's parent chain matches.
+
+    Every file in a folder gives the same answer, and a GoPro delivery holds
+    thousands per folder, so walking the chain per file was the scan's second
+    cost after disk reads - 1.1 million fnmatch calls for 4,188 files. Folder
+    names do not change while a scan runs, so the answer is cached.
+    """
+    matches: list[tuple[Path, str]] = []
+    current = folder
+    while True:
+        for value in likely_folder_names:
+            if fnmatch.fnmatch(current.name.casefold(), value.casefold()):
+                matches.append((current, value))
+        if current == root or root not in current.parents:
+            break
+        current = current.parent
+    return tuple(matches)
+
+
 def _name_evidence(
     path: Path, root: Path, patterns: FilePatternSet
 ) -> _NameEvidence:
@@ -599,15 +640,7 @@ def _name_evidence(
         for value in patterns.exclusion_patterns
     )
 
-    folder_matches: list[tuple[Path, str]] = []
-    current = path.parent
-    while True:
-        for value in patterns.likely_folder_names:
-            if fnmatch.fnmatch(current.name.casefold(), value.casefold()):
-                folder_matches.append((current, value))
-        if current == root or root not in current.parents:
-            break
-        current = current.parent
+    folder_matches = _folder_matches(path.parent, root, patterns.likely_folder_names)
     candidate_path = folder_matches[0][0] if folder_matches else path.parent
     return _NameEvidence(
         folder=tuple(value for _, value in folder_matches),
@@ -690,19 +723,58 @@ def _delimiter(header: str) -> str | None:
     return delimiter if count else None
 
 
+# Enough for the JPEG APP1 segment. Measured against the campaign's GoPro
+# frames: 64 KB reproduces the full-file tag set on every one of them, 32 KB on
+# none, because the camera embeds a thumbnail alongside the metadata.
+EXIF_HEADER_BYTES = 64 * 1024
+# How many images per folder are opened for EXIF before the folder's tag names
+# are taken as established. Detection only uses the tag *names*, and every frame
+# a camera writes into one folder carries the same ones - verified across the
+# campaign's four GoPro folders, 36 frames probed in each, one distinct tag set
+# per folder. Opening all 3,651 cost 11 of the camera scan's 18 seconds, and the
+# disk tops out near 400 files/s however many threads ask.
+EXIF_SAMPLES_PER_FOLDER = 24
+
+
 def _configured_exif_tags(path: Path) -> tuple[set[str], str | None]:
-    """Read EXIF metadata only; Pillow does not decode the pixel array here."""
+    """Read EXIF metadata only; Pillow does not decode the pixel array here.
+
+    Handing Pillow the path makes it read the file in many small chunks - about
+    29 reads per image - and over 3,651 GoPro frames on an external disk that
+    was 13 of the camera scan's 18 seconds. One bounded sequential read into
+    memory covers the JPEG APP1 segment and is roughly ten times faster for the
+    same tags.
+
+    A TIFF may place its image file directory anywhere, including past the end
+    of that window, so anything the buffered attempt cannot answer falls back to
+    reading the file itself.
+    """
     try:
         from PIL import ExifTags, Image
     except ImportError:
         return set(), f"EXIF inspection unavailable for {path}: Pillow is not installed"
-    try:
-        with Image.open(path) as image:
-            raw = image.getexif()
+
+    def _tags(source) -> set[str]:
+        with Image.open(source) as image:
             return {
                 str(ExifTags.TAGS.get(tag_id, tag_id))
-                for tag_id in raw.keys()
-            }, None
+                for tag_id in image.getexif().keys()
+            }
+
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(EXIF_HEADER_BYTES)
+    except OSError as exc:
+        return set(), f"Cannot inspect EXIF metadata for {path}: {exc}"
+    if head:
+        try:
+            tags = _tags(io.BytesIO(head))
+            if tags:
+                return tags, None
+        except (OSError, ValueError, SyntaxError):
+            pass        # truncated window or a format that needs the whole file
+    try:
+        return _tags(path), None
     except (OSError, ValueError) as exc:
         return set(), f"Cannot inspect EXIF metadata for {path}: {exc}"
 

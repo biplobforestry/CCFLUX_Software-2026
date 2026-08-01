@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import csv
+from concurrent.futures import ThreadPoolExecutor
 import io
 import re
 import zipfile
@@ -220,13 +223,39 @@ class _Accumulator:
         )
 
 
+def _snapshot(accumulator) -> dict:
+    """Copy an accumulator's fields. It uses slots, so there is no __dict__."""
+    return {
+        item.name: copy.deepcopy(getattr(accumulator, item.name))
+        for item in dataclasses.fields(accumulator)
+    }
+
+
+def _restore(accumulator, snapshot: dict) -> None:
+    for name, value in snapshot.items():
+        setattr(accumulator, name, value)
+
+
 class TimestampExtractor:
     """Extract timestamps without modifying source files or timestamp values."""
+
+    # Reading one GoPro frame's EXIF costs a file open on the camera disk, and a
+    # flight holds thousands. The reads are independent, so they overlap: the
+    # campaign's 3,651 frames go from 12.2 s to 9.2 s. The disk plateaus at four
+    # concurrent readers, so asking for more only adds threads.
+    GOPRO_EXIF_READERS = 4
+    GOPRO_PARALLEL_THRESHOLD = 64
 
     def extract_instrument(
         self, instrument_id: str, source_files: Iterable[Path]
     ) -> TimeRangeResult:
         accumulator = _Accumulator(instrument_id=instrument_id)
+        source_files = list(source_files)
+        if (
+            instrument_id == "gopro"
+            and len(source_files) >= self.GOPRO_PARALLEL_THRESHOLD
+        ):
+            self._gopro_exif = self._read_gopro_exif(source_files)
         for source_file in source_files:
             path = Path(source_file)
             accumulator.begin_file(path)
@@ -388,10 +417,9 @@ class TimestampExtractor:
                 ),
             )
 
-    def _gopro(self, path: Path, accumulator: _Accumulator) -> None:
-        """Correct GoPro's Europe/Berlin camera clock as soon as it is detected."""
-        if path.suffix.casefold() not in {".jpg", ".jpeg", ".png"}:
-            return
+    @staticmethod
+    def _gopro_capture_value(path: Path) -> tuple[str | None, str | None]:
+        """One frame's capture time, or the reason it could not be read."""
         try:
             with Image.open(path) as image:
                 exif = {
@@ -399,11 +427,33 @@ class TimestampExtractor:
                     for tag, value in image.getexif().items()
                 }
         except (OSError, ValueError, UnidentifiedImageError) as exc:
-            accumulator.warnings.append(
-                f"{path}: GoPro EXIF metadata could not be read: {exc}"
-            )
-            return
+            return None, f"{path}: GoPro EXIF metadata could not be read: {exc}"
         value = exif.get("DateTimeOriginal") or exif.get("DateTime")
+        return (str(value) if value else None), None
+
+    def _read_gopro_exif(
+        self, paths: list[Path]
+    ) -> dict[Path, tuple[str | None, str | None]]:
+        images = [
+            path for path in paths
+            if path.suffix.casefold() in {".jpg", ".jpeg", ".png"}
+        ]
+        if not images:
+            return {}
+        with ThreadPoolExecutor(max_workers=self.GOPRO_EXIF_READERS) as pool:
+            return dict(zip(images, pool.map(self._gopro_capture_value, images)))
+
+    def _gopro(self, path: Path, accumulator: _Accumulator) -> None:
+        """Correct GoPro's Europe/Berlin camera clock as soon as it is detected."""
+        if path.suffix.casefold() not in {".jpg", ".jpeg", ".png"}:
+            return
+        cached = getattr(self, "_gopro_exif", {}).get(path)
+        value, failure = (
+            cached if cached is not None else self._gopro_capture_value(path)
+        )
+        if failure:
+            accumulator.warnings.append(failure)
+            return
         if not value:
             accumulator.missing += 1
             accumulator.warnings.append(
@@ -613,6 +663,39 @@ class TimestampExtractor:
                 return
             index, column, hint, assume_utc = selected
             accumulator.timestamp_columns.add(column)
+            # csv.reader parses every field of every row to reach one column.
+            # The Noseboom delivery is 143 columns and 888,000 rows, so finding
+            # its first and last timestamp took 19 seconds of the Initial Check.
+            # Splitting only as far as the wanted column does the same job in
+            # 3.2 seconds. It is only equivalent while no field is quoted, so a
+            # quote anywhere abandons the fast path and re-reads the file with
+            # the real parser.
+            if '"' not in first_line:
+                # Snapshot before the fast pass: if a quoted field turns up the
+                # partial results have to be discarded, and the accumulator
+                # carries too much state to unwind by hand. It is small here -
+                # the quality samples are capped - so copying is cheap.
+                snapshot = _snapshot(accumulator)
+                stream.seek(0)
+                stream.readline()
+                quoted = False
+                for row_number, line in enumerate(stream, start=2):
+                    if '"' in line:
+                        quoted = True
+                        break
+                    parts = line.rstrip("\r\n").split(selected_delimiter, index + 1)
+                    value = parts[index] if index < len(parts) else ""
+                    accumulator.observe(
+                        _RawTimestamp(value, row_number, path, hint, assume_utc)
+                    )
+                if not quoted:
+                    return
+                _restore(accumulator, snapshot)
+                stream.seek(0)
+                reader = csv.reader(
+                    stream, delimiter=selected_delimiter, strict=True
+                )
+                next(reader, None)
             for row_number, row in enumerate(reader, start=2):
                 value = row[index] if index < len(row) else ""
                 accumulator.observe(

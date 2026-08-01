@@ -16,8 +16,13 @@ PATTERNS_PATH = CONFIG_ROOT / "file_patterns.yaml"
 
 class DetectionConfigurationTests(unittest.TestCase):
     def test_loads_valid_project_detection_configuration(self) -> None:
+        # A rule marked as needing confirmation is a standing property of the
+        # configuration, not a fault in this load, so it is recorded at INFO.
+        # It used to be logged at WARNING on every load - twice per scan - and
+        # read like something had gone wrong each time. The note still reaches
+        # the operator: the rule attaches it to every matching file.
         with self.assertLogs(
-            "core.detection_configuration", level="WARNING"
+            "core.detection_configuration", level="INFO"
         ) as captured:
             config = load_detection_configuration(RULES_PATH, PATTERNS_PATH)
 
@@ -62,7 +67,11 @@ class DetectionConfigurationTests(unittest.TestCase):
         self.assertFalse(config.rule_for("sif").requires_confirmation)
         self.assertGreaterEqual(len(captured.output), 1)
         self.assertTrue(
-            any("Incomplete detection rule" in line for line in captured.output)
+            any("requiring confirmation" in line for line in captured.output)
+        )
+        self.assertFalse(
+            [line for line in captured.output if line.startswith("WARNING")],
+            "an unchanged configuration must not warn on every load",
         )
 
     def test_missing_required_configuration_field_is_clear(self) -> None:

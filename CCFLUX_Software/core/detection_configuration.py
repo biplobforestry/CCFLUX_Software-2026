@@ -109,11 +109,15 @@ def load_detection_configuration(
 
     for rule in rules:
         if rule.requires_confirmation:
-            todo_text = "; ".join(rule.todo)
-            LOGGER.warning(
-                "Incomplete detection rule for %s requires confirmation. TODO: %s",
+            # A standing property of the configuration, not something that went
+            # wrong during this scan. It was logged at WARNING on every load -
+            # twice per scan, once per root - which read like a fault each time.
+            # The operator still sees it where it matters: the rule attaches the
+            # same note to every matching file, so the instrument card carries it.
+            LOGGER.info(
+                "Detection rule for %s is marked as requiring confirmation: %s",
                 rule.instrument_id,
-                todo_text,
+                "; ".join(rule.todo),
             )
 
     return DetectionConfiguration(
