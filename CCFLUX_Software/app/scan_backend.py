@@ -1410,15 +1410,52 @@ class DashboardScanBackend:
             project_file = self._project_store.save_project(
                 self._flight_project, overwrite=True
             )
+        # Say what the file carries. The Output Folder holds a working tree
+        # beside it, and an operator archiving only the .ccflux needs to know
+        # whether anything was left behind rather than assuming either way.
+        carried, left = self._project_contents_report(project_file)
         self.logger.log(
             LogLevel.SUCCESS,
             "project",
-            "Flight Project saved",
+            f"Flight Project saved with {carried} product(s) inside it"
+            + (
+                f"; {len(left)} file(s) stayed in the Output Folder: "
+                + ", ".join(left[:5])
+                + (" ..." if len(left) > 5 else "")
+                if left
+                else ". Everything in the Output Folder is inside this file."
+            ),
             file_path=project_file,
             processing_step="manual-save",
         )
         self._persist_project_logs()
         return project_file
+
+    def _project_contents_report(self, project_file: Path) -> tuple[int, list[str]]:
+        """How many products the file carries, and what it does not."""
+        import zipfile
+
+        project = self._flight_project
+        if project is None or not zipfile.is_zipfile(project_file):
+            return 0, []
+        try:
+            with zipfile.ZipFile(project_file) as archive:
+                bundled = {
+                    name[len("products/"):]
+                    for name in archive.namelist()
+                    if name.startswith("products/")
+                }
+        except (OSError, zipfile.BadZipFile):
+            return 0, []
+        root = project.flight_output_root
+        if not root.is_dir():
+            return len(bundled), []
+        left = sorted(
+            str(path.relative_to(root))
+            for path in root.rglob("*")
+            if path.is_file() and str(path.relative_to(root)) not in bundled
+        )
+        return len(bundled), left
 
     def select_project_folder(self) -> dict[str, object]:
         chooser = getattr(self.folder_dialog, "choose_project_folder", None)

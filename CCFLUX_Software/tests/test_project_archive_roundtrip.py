@@ -99,10 +99,9 @@ def test_moved_project_reanchors_its_stored_output_paths(tmp_path: Path):
     moved_root = tmp_path / "elsewhere"
     moved_root.mkdir()
     shutil.copytree(project.flight_output_root, moved_root / "Flight_2707")
+    shutil.copy2(saved, moved_root / saved.name)
 
-    reopened = store.load_project(
-        moved_root / "Flight_2707" / "project" / "Flight_2707.ccflux"
-    )
+    reopened = store.load_project(moved_root / "Flight_2707.ccflux")
 
     assert reopened.flight_output_root == moved_root / "Flight_2707"
     quicklook = reopened.output_locations["noseboom_quicklook"]

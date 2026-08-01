@@ -133,7 +133,7 @@ overlaps the Time Filter.
 
 **Save .ccflux** stores selected folders, flight identity, time-filter state, instrument configuration, processing history, completed-job state, output references, and page-specific workflow state.
 
-The project is named after its flight and written to `<Output Folder>/<Flight ID>/project/<Flight ID>.ccflux` — for example `Flight_2707.ccflux` — so that several campaign projects can sit in one folder and be told apart without being opened. A project saved by an earlier version under the fixed name `flight_project.ccflux` is renamed on the next save; only one project file per flight is kept.
+The project is named after its flight and written to the top of the Output Folder as `<Flight ID>.ccflux` — for example `Flight_2707.ccflux` — so that several campaign projects can sit in one folder and be told apart without being opened. It carries every file the run produced; the working folder beside it is what those files were written to, and can be deleted once the project is saved. Each save reports how many products the file holds and names anything that could not travel. A project saved by an earlier version under the fixed name, or inside a `project` folder, is moved on the next save; only one project file per flight is kept.
 
 **Load .ccflux** searches the selected location for saved projects and restores the chosen Flight Project. Raw data are not copied into the .ccflux file; the referenced input folders must remain accessible.
 

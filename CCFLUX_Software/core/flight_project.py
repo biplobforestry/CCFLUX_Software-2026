@@ -67,7 +67,11 @@ def _is_camera_image_product(relative: Path) -> bool:
         return False
     parts = {part.casefold() for part in relative.parts}
     return bool(parts & CAMERA_INSTRUMENT_IDS)
-BUNDLED_FILE_BYTE_LIMIT = 8 * 1024 * 1024
+# Per-file ceiling for bundling. It was 8 MB, which left the instruments'
+# evaluated CSVs - the actual scientific products, 10-12 MB each - sitting
+# outside the project file. They compress well, and the total below is the real
+# backstop.
+BUNDLED_FILE_BYTE_LIMIT = 64 * 1024 * 1024
 BUNDLED_TOTAL_BYTE_LIMIT = 512 * 1024 * 1024
 INSTRUMENT_IDS = (
     "noseboom",
@@ -82,11 +86,11 @@ INSTRUMENT_IDS = (
     "flir",
     "gopro",
 )
+# Only what is actually written to. "metadata" and "thumbnails" were created
+# empty on every run, and "project" is gone because the .ccflux now sits at the
+# top of the Output Folder rather than three levels inside it.
 OUTPUT_DIRECTORIES = (
-    "project",
-    "metadata",
     "quicklooks",
-    "thumbnails",
     "reports",
     "logs",
 )
@@ -204,9 +208,13 @@ class FlightProject:
 
     @property
     def project_file(self) -> Path:
-        return self.flight_output_root / "project" / project_filename_for(
-            self.flight_id
-        )
+        """The one file to keep, at the top of the Output Folder.
+
+        It used to sit at <output>/<flight>/project/, so the Output Folder
+        showed a flight folder holding seven folders of intermediates with the
+        thing you actually want buried three levels inside one of them.
+        """
+        return self.output_folder_path / project_filename_for(self.flight_id)
 
     @property
     def superseded_project_files(self) -> tuple[Path, ...]:
@@ -216,11 +224,16 @@ class FlightProject:
         would put two projects for one flight in the folder, and only one of
         them would be current.
         """
-        folder = self.flight_output_root / "project"
         current = self.project_file
+        legacy_folder = self.flight_output_root / "project"
+        candidates = (
+            legacy_folder / project_filename_for(self.flight_id),
+            legacy_folder / PROJECT_FILENAME,
+            legacy_folder / LEGACY_PROJECT_FILENAME,
+            self.output_folder_path / PROJECT_FILENAME,
+        )
         return tuple(
-            candidate
-            for candidate in (folder / PROJECT_FILENAME, folder / LEGACY_PROJECT_FILENAME)
+            candidate for candidate in candidates
             if candidate != current and candidate.exists()
         )
 
@@ -442,13 +455,13 @@ class FlightProjectStore:
         ]
         for state in project.detected_instruments.values():
             candidates.extend(Path(value) for value in state.output_locations)
-        # The browser pages read these directly, so they must travel with the
-        # project even when nothing references them yet.
-        quicklooks = root / "quicklooks"
-        if quicklooks.is_dir():
-            candidates.extend(
-                path for path in quicklooks.rglob("*") if path.is_file()
-            )
+        # Everything the run produced, not only what an adapter remembered to
+        # register. Bundling just the registered outputs left nine files behind
+        # on Flight_2707 - evaluated CSVs, the FLIR frame index and health
+        # table, the SIF position log - so an operator keeping only the .ccflux
+        # lost them. The Output Folder is ours; anything in it is a product.
+        if root.is_dir():
+            candidates.extend(path for path in root.rglob("*") if path.is_file())
 
         bundled: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []

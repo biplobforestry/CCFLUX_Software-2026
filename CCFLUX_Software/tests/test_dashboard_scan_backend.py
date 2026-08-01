@@ -917,10 +917,14 @@ def test_manual_project_save_uses_independent_output_folder(tmp_path: Path):
     assert project_file.exists()
     assert output in project_file.parents
     assert flight not in project_file.parents
+    # The save says what the file carries, so an operator archiving only the
+    # .ccflux knows whether anything stayed behind in the Output Folder.
     assert any(
-        record["message"] == "Flight Project saved"
+        record["message"].startswith("Flight Project saved with")
         for record in backend.visible_logs()
     )
+    # It sits at the top of the Output Folder, not inside the flight tree.
+    assert project_file.parent == output
 
 
 def test_dashboard_contains_complete_live_status_surfaces():

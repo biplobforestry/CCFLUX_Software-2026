@@ -164,16 +164,14 @@ def test_missing_source_file_is_reported_without_load_failure(tmp_path: Path):
 def test_output_folder_structure_is_created(tmp_path: Path):
     project, _ = _project(tmp_path)
 
-    expected = {
-        "project",
-        "metadata",
-        "processed",
-        "quicklooks",
-        "thumbnails",
-        "reports",
-        "logs",
-    }
-    assert expected <= {path.name for path in project.flight_output_root.iterdir()}
+    # Only what is written to. "metadata" and "thumbnails" were created empty on
+    # every run, and the .ccflux is no longer buried in a "project" folder - it
+    # sits at the top of the Output Folder where an operator will find it.
+    expected = {"processed", "quicklooks", "reports", "logs"}
+    created = {path.name for path in project.flight_output_root.iterdir()}
+    assert expected <= created
+    assert not {"metadata", "thumbnails", "project"} & created
+    assert project.project_file.parent == project.output_folder_path
     assert {
         path.name for path in (project.flight_output_root / "processed").iterdir()
     } == set(INSTRUMENT_IDS)
