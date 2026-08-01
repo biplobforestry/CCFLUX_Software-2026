@@ -88,7 +88,13 @@ def airflox():
 
 @pytest.fixture(scope="module")
 def produced(airflox, tmp_path_factory):
-    """Run our pipeline on exactly what the R GUI was given."""
+    """Run our pipeline on exactly what the R GUI was given.
+
+    The skip mark is evaluated at collection time; re-checked here so a volume
+    that disappears mid-run skips instead of erroring.
+    """
+    if not (RAW.is_dir() and R_OUTPUT.is_dir() and TELEMETRY.is_file()):
+        pytest.skip(f"The AirFloX test delivery under {DATA} is not available.")
     output = tmp_path_factory.mktemp("sif_r_validation")
     for mode, folder, stem, calibration, _rdir, _rstem in MODES:
         airflox.process_to_files(

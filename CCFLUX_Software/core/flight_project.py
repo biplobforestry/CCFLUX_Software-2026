@@ -47,6 +47,26 @@ BUNDLE_PREFIX = "products/"
 # Browser payloads and diagnostics are always bundled; other products are
 # bundled while they stay small, so a project never silently grows to gigabytes.
 ALWAYS_BUNDLED_SUFFIXES = frozenset({".json", ".jsonl", ".md", ".txt"})
+# Captured imagery is kept out of the project file: a .ccflux carries the
+# processed results a colleague needs to see the plots and maps, and for GoPro
+# the image identifiers only. Science plots are images too, so the rule is
+# scoped to the instruments whose output is a copy of a photograph.
+#
+# FLIR is deliberately not in this set. Its sample frames are false-colour
+# renderings of the thermal array, not copies of a picture, the FLIR page shows
+# them by URL, and they are under a megabyte. The 39 GB thermal export itself is
+# raw input and was never a candidate for bundling.
+CAMERA_IMAGE_SUFFIXES = frozenset({
+    ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".dng", ".raw", ".mp4", ".mov",
+})
+CAMERA_INSTRUMENT_IDS = frozenset({"gopro", "micasense"})
+
+
+def _is_camera_image_product(relative: Path) -> bool:
+    if relative.suffix.casefold() not in CAMERA_IMAGE_SUFFIXES:
+        return False
+    parts = {part.casefold() for part in relative.parts}
+    return bool(parts & CAMERA_INSTRUMENT_IDS)
 BUNDLED_FILE_BYTE_LIMIT = 8 * 1024 * 1024
 BUNDLED_TOTAL_BYTE_LIMIT = 512 * 1024 * 1024
 INSTRUMENT_IDS = (
@@ -445,6 +465,18 @@ class FlightProjectStore:
                 # Products written outside the flight output root are left as
                 # references; copying them would break the read-only contract.
                 skipped.append({"path": str(path), "reason": "outside output root"})
+                continue
+            if _is_camera_image_product(relative):
+                # Camera imagery never travels in the project: the rule for the
+                # campaign is that a .ccflux carries the processed results a
+                # colleague needs to see the plots and maps, and for GoPro the
+                # image identifiers only. The pictures stay in the Output Folder
+                # beside the project, and the GoPro page reconnects to the media
+                # disk when one is available.
+                skipped.append(
+                    {"path": str(relative), "reason": "camera imagery is not bundled",
+                     "size_bytes": path.stat().st_size}
+                )
                 continue
             size = path.stat().st_size
             allowed = (

@@ -2754,8 +2754,23 @@ class DashboardScanBackend:
         if self._processing_configuration_is_busy():
             raise ValueError("Please wait! System is busy now!")
 
+    TIME_FILTER_REQUEST_KEYS = frozenset({
+        "action", "start", "end", "display_timezone",
+    })
+
     def update_time_filter(self, request: dict[str, object]) -> None:
         action = str(request.get("action", "set"))
+        # An unrecognised key used to be ignored, and because a half-empty
+        # interval is deliberately repaired to the available range, a misspelled
+        # "start" silently widened the selection to the whole flight instead of
+        # reporting anything. Name the mistake instead.
+        unknown = sorted(set(request) - self.TIME_FILTER_REQUEST_KEYS)
+        if unknown:
+            raise ValueError(
+                "Unsupported time-filter field(s): "
+                + ", ".join(unknown)
+                + ". The interval is set with 'start' and 'end'."
+            )
         interval_warnings: tuple[str, ...] = ()
         with self._lock:
             self._require_processing_configuration_idle()

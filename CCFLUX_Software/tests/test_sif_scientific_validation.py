@@ -78,7 +78,14 @@ COMBINED_RAW = (
 
 @pytest.fixture(scope="module")
 def produced(tmp_path_factory):
-    """Run the bundled pipeline once over the reference flight."""
+    """Run the bundled pipeline once over the reference flight.
+
+    The skip marks are evaluated at collection time. A campaign disk unmounted
+    while the suite is running would otherwise fail this fixture with an error
+    instead of skipping, so the check is repeated here.
+    """
+    if not (RAW.is_dir() and REFERENCE.is_dir()):
+        pytest.skip(f"The campaign disks holding {RAW} are no longer mounted.")
     sys.path.insert(0, str(BUNDLED))
     spec = importlib.util.spec_from_file_location(
         "ccflux_sif_validation", BUNDLED / "airflox_sif_automation.py"
