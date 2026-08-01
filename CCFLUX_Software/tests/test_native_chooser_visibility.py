@@ -65,13 +65,50 @@ def test_the_helper_converts_the_selection_itself():
 @pytest.mark.skipif(sys.platform != "darwin", reason="AppleScript is macOS only")
 def test_the_helper_returns_a_posix_path():
     """Proved with a clause that resolves without a person clicking anything."""
-    assert FolderDialog._choose_with_osascript("path to home folder") == Path.home()
+    assert FolderDialog()._choose_with_osascript("path to home folder") == Path.home()
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="AppleScript is macOS only")
-def test_a_failing_clause_is_reported_as_a_cancel():
-    """Cancel and error must both leave the request answerable, never hanging."""
-    assert FolderDialog._choose_with_osascript("this is not applescript") is None
+def test_a_cancel_is_a_cancel_and_a_failure_is_reported():
+    """These used to be the same thing.
+
+    Every non-zero exit became "cancelled", so a machine that refused the
+    Automation permission looked exactly like an operator changing their mind:
+    folder selection did nothing, with no way to find out why.
+    """
+    dialog = FolderDialog()
+
+    # AppleScript reports a cancel as error -128. Nothing is raised.
+    assert dialog._run_chooser_script("error number -128") == (None, None)
+
+    # Anything else is a failure with a reason attached.
+    selection, failure = dialog._run_chooser_script("this is not applescript")
+    assert selection is None
+    assert failure, "a real error must not be reported as a cancel"
+
+    # And a clause that cannot work anywhere is raised, not swallowed.
+    with pytest.raises(RuntimeError, match="could not be opened"):
+        dialog._choose_with_osascript("this is not applescript")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="AppleScript is macOS only")
+def test_the_finder_route_falls_back_when_it_cannot_be_used():
+    """Hosting in Finder costs an Automation permission a machine can refuse.
+    A window behind the browser beats no window at all."""
+    dialog = FolderDialog()
+    attempts = []
+    real = dialog._run_chooser_script
+
+    def recording(script):
+        attempts.append(script)
+        if 'tell application "Finder"' in script:
+            return None, "Not authorised to send Apple events to Finder."
+        return real(script)
+
+    dialog._run_chooser_script = recording
+    assert dialog._choose_with_osascript("path to home folder") == Path.home()
+    assert len(attempts) == 2, "the plain chooser was never tried"
+    assert 'tell application "Finder"' not in attempts[1]
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="AppleScript is macOS only")

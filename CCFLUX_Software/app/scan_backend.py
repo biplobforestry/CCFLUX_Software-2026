@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -145,6 +146,8 @@ DEFAULT_FLIR_LEVEL2_OPTIONS: dict[str, object] = {
     "valid_temperature_max_c": None,
     "save_temperature_npz": False,
 }
+
+LOGGER = logging.getLogger(__name__)
 
 DEFAULT_SIF_OPTIONS: dict[str, object] = {
     "modes": ["FULL", "FLUO"],
@@ -396,42 +399,94 @@ class FolderDialog:
             title="Select CCFLUX Output Folder",
         )
 
+    # A generous backstop, not a time limit on browsing. Its purpose is to stop
+    # a dialog nobody can see from wedging folder selection for the session.
+    CHOOSER_TIMEOUT_SECONDS = 600
+
     @staticmethod
-    def _choose_with_osascript(chooser_clause: str) -> Path | None:
+    def _run_chooser_script(script: str) -> tuple[Path | None, str | None]:
+        """Run one AppleScript chooser. Returns (selection, failure reason).
+
+        A cancel and a failure used to be indistinguishable: every non-zero exit
+        became "cancelled", so a machine that refused the Automation permission
+        looked exactly like an operator changing their mind, and folder
+        selection simply did nothing with no way to find out why. AppleScript
+        reports a cancel as error -128, which is what separates the two here.
+        """
+        try:
+            completed = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=FolderDialog.CHOOSER_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            return None, (
+                "The folder window was open for longer than "
+                f"{FolderDialog.CHOOSER_TIMEOUT_SECONDS // 60} minutes and was "
+                "closed. If you never saw it, it may have opened behind another "
+                "window."
+            )
+        except OSError as exc:
+            return None, f"The folder window could not be opened: {exc}"
+        if completed.returncode == 0:
+            selected = completed.stdout.strip()
+            return (Path(selected) if selected else None), None
+        error = completed.stderr.strip()
+        if "-128" in error or "cancel" in error.casefold():
+            return None, None          # the operator pressed Cancel
+        return None, error or "The folder window closed without a selection."
+
+    def _choose_with_osascript(self, chooser_clause: str) -> Path | None:
         """Run a macOS chooser out of process, in front of the browser.
 
         Tk must own the main thread. These choosers are invoked from an HTTP
         request thread, so building a Tk root there means the panel never
-        appears and the request dies — the browser reports "Failed to fetch".
+        appears and the request dies - the browser reports "Failed to fetch".
         Every chooser therefore goes through osascript on macOS.
 
         osascript alone is not enough. It is a background-only process, so a
         panel it owns opens *behind* the browser: the operator sees the "select
-        a folder" prompt, no window, and an action that appears to hang until
-        the pending request is abandoned. Hosting the chooser inside a Finder
-        tell block gives the panel a foreground owner that can be activated,
-        which is what actually brings it to the front.
+        a folder" prompt, no window, and an action that appears to hang. Hosting
+        the chooser inside a Finder tell block gives the panel a foreground
+        owner that can be activated.
+
+        That costs an Automation permission, which a machine can refuse. If the
+        Finder route fails for any reason other than a cancel, the plain
+        osascript chooser is tried instead - it needs no permission, and a panel
+        behind the browser is far better than no panel at all.
 
         ``chooser_clause`` is the AppleScript expression that returns the
         selection, for example ``choose folder with prompt "..."``.
         """
-        script = (
+        hosted = (
             'tell application "Finder"\n'
             "\tactivate\n"
             f"\tset ccfluxSelection to {chooser_clause}\n"
             "end tell\n"
             "POSIX path of ccfluxSelection"
         )
-        completed = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True,
-            text=True,
-            check=False,
+        selection, failure = self._run_chooser_script(hosted)
+        if selection is not None or failure is None:
+            return selection
+        # Finder could not be used. Say so, then ask without it.
+        LOGGER.warning(
+            "The folder window could not be opened through Finder (%s). "
+            "Trying again without it; the window may open behind the browser.",
+            failure,
         )
-        if completed.returncode != 0:
-            return None  # Non-zero is also how AppleScript reports Cancel.
-        selected = completed.stdout.strip()
-        return Path(selected) if selected else None
+        selection, fallback_failure = self._run_chooser_script(
+            f"POSIX path of ({chooser_clause})"
+        )
+        if selection is None and fallback_failure is not None:
+            raise RuntimeError(
+                "The folder window could not be opened. "
+                f"{fallback_failure} On macOS, allow this application to "
+                "control Finder under System Settings > Privacy & Security > "
+                "Automation, or start the launcher again."
+            )
+        return selection
 
     def choose_project_file(self) -> Path | None:
         if sys.platform == "darwin":
@@ -580,6 +635,7 @@ class DashboardScanBackend:
         # The remote-sensing interval is chosen against camera coverage and is
         # kept apart from the flight Time Filter, which the cameras no longer
         # take part in.
+        self._dialog_holder: tuple[str | None, float | None] = (None, None)
         self._camera_selected_start: datetime | None = None
         self._camera_selected_end: datetime | None = None
         self._flir_level2_options = dict(DEFAULT_FLIR_LEVEL2_OPTIONS)
@@ -746,13 +802,30 @@ class DashboardScanBackend:
     def _choose_folder_once(
         self, component: str, chooser: Callable[[], Path | None]
     ) -> Path | None:
-        """Prevent delayed duplicate native pickers from stacking behind the GUI."""
+        """Prevent delayed duplicate native pickers from stacking behind the GUI.
+
+        The refusal names which window is already open and when it was opened.
+        It used to say only that one was, which is no help when the window is
+        behind the browser and the operator cannot find it - every later attempt
+        then failed with the same unexplained message.
+        """
         if not self._dialog_lock.acquire(blocking=False):
-            raise RuntimeError("A folder selection window is already open")
+            holder, since = self._dialog_holder
+            waited = (
+                f" for {int(time.monotonic() - since)} second(s)"
+                if since is not None else ""
+            )
+            raise RuntimeError(
+                f"A {holder or 'folder'} selection window is already open"
+                f"{waited}. It may be behind the browser - look for it in the "
+                "Dock, or answer it, and try again."
+            )
+        self._dialog_holder = (component, time.monotonic())
         try:
             self.logger.log(LogLevel.INFO, component, "Opening folder chooser")
             return chooser()
         finally:
+            self._dialog_holder = (None, None)
             self._dialog_lock.release()
 
     def select_folders(self) -> dict[str, object]:
