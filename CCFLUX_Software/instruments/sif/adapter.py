@@ -88,6 +88,20 @@ class SifAdapter(InstrumentBase):
     def process_quicklook(self, loaded, options: Mapping[str, Any]):
         started = time.monotonic()
         self._products = {}
+        # An operator may supply their own calibration or vegetation-index file;
+        # anything not supplied stays on the bundled CAL_FROG/Indices_ICOS set.
+        essentials_overrides = {
+            key: options.get(key)
+            for key in ("calibration_full", "calibration_fluo", "indices_file")
+            if options.get(key)
+        }
+        for mode in ("FULL", "FLUO"):
+            calibration, indices = self.bridge.essentials(mode, essentials_overrides)
+            self._emit(
+                4,
+                f"{mode} calibration {Path(calibration).name}, "
+                f"indices {Path(indices).name}",
+            )
         selected_modes = tuple(
             mode for mode in options.get("modes", ("FULL", "FLUO"))
             if mode in {"FULL", "FLUO"}
@@ -158,7 +172,7 @@ class SifAdapter(InstrumentBase):
             self._emit(mode_start, f"Combining {mode} spectral files")
             try:
                 raw_path = self._combined_input(mode, files)
-                calibration, indices = self.bridge.essentials(mode)
+                calibration, indices = self.bridge.essentials(mode, essentials_overrides)
                 self._emit(
                     mode_start + 6,
                     f"Calibrating {mode} radiance and reflectance",
@@ -237,7 +251,7 @@ class SifAdapter(InstrumentBase):
         all_times = pd.concat([pd.to_datetime(p["metadata"]["datetime [UTC]"], utc=True) for p in self._products.values()]).dropna()
         self._emit(100, "SIF quicklook complete")
         if self.logger: self.logger.log(LogLevel.SUCCESS, "sif-adapter", "SIF quicklook completed", instrument="sif")
-        return InstrumentResult("sif", "Solar-Induced Fluorescence / FLOX", "HATCHBOX", DetectionStatus.READY, ProcessingStatus.COMPLETE, _sources(retained_paths), len(retained_paths), all_times.min().to_pydatetime(), all_times.max().to_pydatetime(), all_times.min().to_pydatetime(), all_times.max().to_pydatetime(), progress=100.0, metadata={"processed_modes": sorted(self._products), "rows_by_mode": {mode: len(p["metadata"]) for mode, p in self._products.items()}, "raw_file_filter_kb": raw_min_kb, "retained_raw_files": [str(path) for path in retained_paths], "skipped_raw_files": [{"path": str(path), "size_kb": round(path.stat().st_size / 1024, 1)} for path in skipped_paths], "scientific_source": str(self.bridge.source_path), "essentials_directory": str(self.bridge.essentials("FULL")[0].parent), "position_mode": position_mode, "telemetry_log": str(telemetry_log) if telemetry_log else None, "options": _json_safe(dict(options))}, elapsed_time=timedelta(seconds=time.monotonic() - started))
+        return InstrumentResult("sif", "Solar-Induced Fluorescence / FLOX", "HATCHBOX", DetectionStatus.READY, ProcessingStatus.COMPLETE, _sources(retained_paths), len(retained_paths), all_times.min().to_pydatetime(), all_times.max().to_pydatetime(), all_times.min().to_pydatetime(), all_times.max().to_pydatetime(), progress=100.0, metadata={"processed_modes": sorted(self._products), "rows_by_mode": {mode: len(p["metadata"]) for mode, p in self._products.items()}, "raw_file_filter_kb": raw_min_kb, "retained_raw_files": [str(path) for path in retained_paths], "skipped_raw_files": [{"path": str(path), "size_kb": round(path.stat().st_size / 1024, 1)} for path in skipped_paths], "scientific_source": str(self.bridge.source_path), "essentials_directory": str(self.bridge.essentials("FULL", essentials_overrides)[0].parent), "calibration_files": {m: str(self.bridge.essentials(m, essentials_overrides)[0]) for m in sorted(self._products)}, "index_file": str(self.bridge.essentials("FULL", essentials_overrides)[1]), "position_mode": position_mode, "telemetry_log": str(telemetry_log) if telemetry_log else None, "options": _json_safe(dict(options))}, elapsed_time=timedelta(seconds=time.monotonic() - started))
 
     def process_detailed(self, loaded, options): return self.process_quicklook(loaded, options)
 

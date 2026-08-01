@@ -153,7 +153,26 @@ DEFAULT_SIF_OPTIONS: dict[str, object] = {
     "static_lat": None,
     "static_lon": None,
     "static_alt": None,
+    # None means the bundled CAL_FROG / Indices_ICOS files. An operator with a
+    # recalibrated instrument, or a different index definition list, points
+    # these at their own files instead.
+    "calibration_full": None,
+    "calibration_fluo": None,
+    "indices_file": None,
 }
+
+# The order the SIF pipeline reports, with the progress value each stage has
+# reached by the time it completes. The adapter already emits a percentage and a
+# phase; mapping that onto a fixed list is what lets the GUI show a checklist
+# rather than a single moving bar.
+SIF_PROGRESS_STAGES: tuple[dict[str, object], ...] = (
+    {"key": "validate", "label": "Validating AirFloX files and calibration", "percent": 10.0},
+    {"key": "position", "label": "Preparing Gimbal attitude and Noseboom position", "percent": 22.0},
+    {"key": "full", "label": "FULL / FLOX radiance, reflectance and indices", "percent": 59.0},
+    {"key": "fluo", "label": "FLUO fluorescence, SIF A/B iFLD and indices", "percent": 90.0},
+    {"key": "export", "label": "Writing exports, maps and GIS", "percent": 99.0},
+    {"key": "complete", "label": "SIF processing complete", "percent": 100.0},
+)
 
 
 @dataclass(slots=True)
@@ -420,6 +439,24 @@ class FolderDialog:
             filetypes=(
                 ("CC-FLUX project", "*.ccflux"),
                 ("Legacy CC-FLUX JSON project", "flight_project.json"),
+            ),
+        )
+
+    def choose_sif_essential_file(self, kind: str) -> Path | None:
+        prompts = {
+            "calibration_full": "Select the FULL / FLOX calibration file (CAL_...csv)",
+            "calibration_fluo": "Select the FLUO calibration file (CAL_...csv)",
+            "indices_file": "Select the vegetation-index definition file (.txt)",
+        }
+        prompt = prompts.get(kind, "Select a SIF calibration file")
+        if sys.platform == "darwin":
+            return self._choose_with_osascript(f'choose file with prompt "{prompt}"')
+        return self._choose_native(
+            "askopenfilename",
+            title=prompt,
+            filetypes=(
+                ("Calibration or index file", "*.csv *.txt"),
+                ("All files", "*.*"),
             ),
         )
 
@@ -1971,6 +2008,108 @@ class DashboardScanBackend:
         )
         return target
 
+    SIF_ESSENTIAL_KEYS = ("calibration_full", "calibration_fluo", "indices_file")
+
+    def _validated_sif_essentials(
+        self, request: dict[str, object]
+    ) -> dict[str, object]:
+        """Resolve operator-supplied calibration and index files.
+
+        A missing key keeps whatever is configured; an empty string clears the
+        override back to the bundled file. The file is checked here rather than
+        at processing time, so a wrong pick is reported while the dialog is open
+        instead of failing an hour into a run.
+        """
+        resolved: dict[str, object] = {}
+        labels = {
+            "calibration_full": "FULL calibration",
+            "calibration_fluo": "FLUO calibration",
+            "indices_file": "vegetation-index",
+        }
+        for key in self.SIF_ESSENTIAL_KEYS:
+            if key not in request:
+                resolved[key] = self._sif_options.get(key)
+                continue
+            value = request.get(key)
+            if value in (None, ""):
+                resolved[key] = None
+                continue
+            path = Path(str(value)).expanduser()
+            if not path.is_file():
+                raise ValueError(f"The {labels[key]} file does not exist: {path}")
+            try:
+                with path.open("rb") as handle:
+                    handle.read(1)
+            except OSError as exc:
+                raise ValueError(
+                    f"The {labels[key]} file cannot be read: {path}"
+                ) from exc
+            resolved[key] = str(path.resolve(strict=False))
+        return resolved
+
+    def select_sif_essential_file(self, kind: str) -> dict[str, object]:
+        """Open the native chooser for one calibration or index file."""
+        if kind not in self.SIF_ESSENTIAL_KEYS:
+            raise ValueError(f"Unsupported SIF file selection: {kind}")
+        chooser = getattr(self.folder_dialog, "choose_sif_essential_file", None)
+        if not callable(chooser):
+            raise RuntimeError("SIF file selection is not available")
+        selected = self._choose_folder_once(
+            "sif-options", lambda: chooser(kind)
+        )
+        if selected is None:
+            self.logger.log(
+                LogLevel.INFO, "sif-options", f"{kind} selection cancelled",
+                instrument="sif",
+            )
+            return {"cancelled": True}
+        options = self.update_sif_options({kind: str(selected)})
+        return {"cancelled": False, "path": str(selected), "options": options}
+
+    def sif_progress(self) -> dict[str, object]:
+        """The SIF stage checklist, derived from the reported percentage."""
+        with self._lock:
+            state = self._instruments.get("sif")
+            percent = float(getattr(state, "processing_progress", 0.0) or 0.0)
+            step = str(getattr(state, "processing_step", "") or "")
+            status = getattr(state, "processing_status", None)
+            elapsed = float(getattr(state, "processing_elapsed_seconds", 0.0) or 0.0)
+            options = dict(self._sif_options)
+        status_value = getattr(status, "value", status)
+        running = str(status_value or "").lower() == "processing"
+        finished = str(status_value or "").lower() in {"complete", "warning"}
+        stages = []
+        for stage in SIF_PROGRESS_STAGES:
+            threshold = float(stage["percent"])
+            if finished or percent >= threshold:
+                stage_status = "done"
+            elif running and percent > 0:
+                stage_status = "active"
+            else:
+                stage_status = "pending"
+            # Only the first not-yet-reached stage is the active one.
+            if stage_status == "active" and any(
+                item["status"] == "active" for item in stages
+            ):
+                stage_status = "pending"
+            stages.append({
+                "key": stage["key"],
+                "label": stage["label"],
+                "percent": threshold,
+                "status": stage_status,
+            })
+        return {
+            "percent": round(percent, 1),
+            "step": step,
+            "status": status_value,
+            "running": running,
+            "elapsed_seconds": round(elapsed, 1),
+            "stages": stages,
+            "calibration": {
+                key: options.get(key) for key in self.SIF_ESSENTIAL_KEYS
+            },
+        }
+
     def update_sif_options(
         self, request: Mapping[str, object] | None
     ) -> dict[str, object]:
@@ -2030,6 +2169,7 @@ class DashboardScanBackend:
             "static_lat": _optional_float(request.get("static_lat")),
             "static_lon": _optional_float(request.get("static_lon")),
             "static_alt": _optional_float(request.get("static_alt")),
+            **self._validated_sif_essentials(request),
         }
         if position_mode == "tower":
             lat, lon = options["static_lat"], options["static_lon"]
@@ -5051,6 +5191,61 @@ class DashboardScanBackend:
         )
         return tuple(item.path for item in accepted)
 
+    def _cached_flir_timestamp_index(
+        self, index_path: Path, source_paths: list[Path], health_module
+    ) -> list | None:
+        """Reuse a previous frame index instead of rescanning the export.
+
+        Indexing is a full read of the FLIR JSON stream - about 105 seconds over
+        36 GB - and it was repeated on every Level 2 run even when nothing had
+        changed. ``write_timestamp_index`` already records each source file's
+        size and mtime and ``load_timestamp_index`` refuses an index whose
+        sources have moved on, so staleness is handled by the science module.
+        What is checked here is that the index covers exactly the export files
+        selected now: a different FLIR delivery has its own frames, and reusing
+        another one's byte offsets would read from the wrong place.
+
+        Returns the cached entries, or None if the export must be scanned.
+        """
+        if not index_path.is_file():
+            return None
+        loader = getattr(health_module, "load_timestamp_index", None)
+        if not callable(loader):
+            return None
+        try:
+            entries = loader(index_path)
+        except Exception as exc:
+            self.logger.log(
+                LogLevel.INFO, "camera-level2",
+                f"The FLIR timestamp index was not reusable ({exc}); "
+                "the export is being indexed again.",
+                instrument="flir", processing_step="level2-index",
+            )
+            return None
+        if not entries:
+            return None
+        wanted = {path.resolve(strict=False) for path in source_paths}
+        covered = {Path(entry[2]).resolve(strict=False) for entry in entries}
+        if covered != wanted:
+            self.logger.log(
+                LogLevel.INFO, "camera-level2",
+                "The FLIR timestamp index covers a different export than the "
+                "one selected; the export is being indexed again.",
+                instrument="flir", processing_step="level2-index",
+            )
+            return None
+        try:
+            total_bytes = sum(path.stat().st_size for path in source_paths)
+        except OSError:
+            total_bytes = 0
+        self.logger.log(
+            LogLevel.INFO, "camera-level2",
+            f"Reusing the FLIR timestamp index for {len(entries):,} frames; "
+            f"{total_bytes / 1e9:.1f} GB did not have to be read again.",
+            instrument="flir", processing_step="level2-index",
+        )
+        return entries
+
     def _flir_detailed_task(
         self, context: ProcessingContext, selected_routines: tuple[str, ...]
     ) -> JobOutcome | None:
@@ -5107,17 +5302,25 @@ class DashboardScanBackend:
         output_root = self._run_output_root(project, "flir") / "level2"
         output_root.mkdir(parents=True, exist_ok=True)
 
-        context.report_progress(4, "Indexing frame timestamps")
-        entries, _ = health_module.scan_timestamps(
-            [Path(value) for value in paths],
-            max(1, limits.worker_count),
-            8,
+        index_path = output_root / "timestamp_index.csv"
+        source_paths = [Path(value) for value in paths]
+        entries = self._cached_flir_timestamp_index(
+            index_path, source_paths, health_module
         )
-        if not entries:
-            raise RuntimeError("No valid FLIR frame timestamps were found")
-        health_module.write_timestamp_index(
-            output_root / "timestamp_index.csv", entries
-        )
+        if entries is None:
+            context.report_progress(4, "Indexing frame timestamps")
+            entries, _ = health_module.scan_timestamps(
+                source_paths,
+                max(1, limits.worker_count),
+                8,
+            )
+            if not entries:
+                raise RuntimeError("No valid FLIR frame timestamps were found")
+            health_module.write_timestamp_index(index_path, entries)
+        else:
+            context.report_progress(
+                4, f"Reusing the timestamp index for {len(entries):,} frames"
+            )
         context.check_cancelled()
 
         context.report_progress(18, f"Reading headers for {len(entries):,} frames")

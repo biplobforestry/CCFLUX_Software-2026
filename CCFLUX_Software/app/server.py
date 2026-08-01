@@ -271,6 +271,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._send_bytes(status, body, content_type, headers)
         elif path == "/api/scan":
             self._send_json(HTTPStatus.OK, self.server.backend.snapshot())
+        elif path == "/api/sif/progress":
+            self._send_json(HTTPStatus.OK, self.server.backend.sif_progress())
         elif path == "/api/update/status":
             self._send_json(
                 HTTPStatus.OK,
@@ -359,6 +361,14 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                         "saved": True,
                         "options": self.server.backend.update_flir_level2_options(body),
                     },
+                )
+            elif path == "/api/sif/select-file":
+                body = self._json_body()
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.backend.select_sif_essential_file(
+                        str(body.get("kind", ""))
+                    ),
                 )
             elif path == "/api/sif/options":
                 body = self._json_body()

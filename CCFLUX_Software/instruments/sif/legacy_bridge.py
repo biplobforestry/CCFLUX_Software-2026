@@ -45,5 +45,35 @@ class LegacySifBridge:
                     sys.path.pop(0)
         return self._module
 
-    def essentials(self, mode: str):
-        return self.module.detect_essential_file(DEFAULT_ESSENTIALS, mode)
+    def essentials(self, mode: str, overrides: dict | None = None):
+        """Calibration and index files for one mode.
+
+        The bundled CAL_FROG/Indices_ICOS files are the default, but an operator
+        may supply their own: a recalibrated instrument, or a different index
+        definition list. ``overrides`` carries ``calibration_full``,
+        ``calibration_fluo`` and ``indices_file``; anything absent falls back to
+        the bundled file, so a partial override is allowed.
+        """
+        calibration, indices = self.module.detect_essential_file(
+            DEFAULT_ESSENTIALS, mode
+        )
+        if not overrides:
+            return calibration, indices
+        key = "calibration_full" if str(mode).upper() == "FULL" else "calibration_fluo"
+        chosen = overrides.get(key)
+        if chosen:
+            candidate = Path(chosen)
+            if not candidate.is_file():
+                raise FileNotFoundError(
+                    f"The selected {mode} calibration file no longer exists: {candidate}"
+                )
+            calibration = candidate
+        chosen_indices = overrides.get("indices_file")
+        if chosen_indices:
+            candidate = Path(chosen_indices)
+            if not candidate.is_file():
+                raise FileNotFoundError(
+                    f"The selected vegetation-index file no longer exists: {candidate}"
+                )
+            indices = candidate
+        return calibration, indices

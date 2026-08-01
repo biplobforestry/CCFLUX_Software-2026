@@ -89,6 +89,13 @@ overlaps the Time Filter.
   export rotation is detected and restored to chronological order.
 * **SIF / FLOX** — AirFLOX spectral fluorescence in FULL and FLUO modes with
   configurable corrections, position mode and vegetation indices.
+  **Configure SIF** sets the modes to process, the position source, the
+  corrections, and the calibration files. The validated CAL_FROG calibration
+  and Indices_ICOS definitions shipped with CC-FLUX are used by default; a
+  recalibrated instrument or a different index list can be selected instead,
+  separately for FULL and FLUO, and **Use default** reverts. The chosen file is
+  checked when you select it, and the files actually used are recorded with the
+  result. **SIF Progress** shows the pipeline stage by stage while it runs.
 * **MicaSense** — multispectral imagery, discovered from TIFF or ZIP deliveries.
   Level 1 metadata only; Level 2 routines are declared unavailable.
 * **FLIR** — thermal frame export as a single large JSON stream. Level 1 reports
@@ -96,6 +103,11 @@ overlaps the Time Filter.
   temperature conversion and matches frames to Noseboom navigation. When more
   than one FLIR export is present, the one whose UTC coverage overlaps the
   analysis interval is selected and the others are reported as ignored.
+  Level 2 writes a frame index (**timestamp_index.csv**) beside its output and
+  reuses it on later runs, so the export is read once instead of on every run —
+  96 seconds saved per run on the 36 GB Flight_2707 export. The index is
+  rebuilt automatically if the export changes on disk or a different export is
+  selected.
 * **GoPro** — capture imagery. EXIF clock values are interpreted in
   Europe/Berlin and converted to UTC during detection, then matched to the
   nearest processed Noseboom sample within 2.5 seconds.

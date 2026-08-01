@@ -328,6 +328,10 @@
       openSifConfiguration();
       return;
     }
+    if (button.dataset.queueAction === 'sif_progress') {
+      openSifProgressWindow();
+      return;
+    }
     if (button.dataset.queueAction === 'reprocess') {
       const row = button.closest('.priority-job');
       confirmReprocess(
@@ -1044,6 +1048,7 @@
         actions.push(`<button class="btn" data-queue-action="reprocess" ${busy ? 'disabled' : ''}>Reprocess</button>`);
       } else if (job.instrument_id === 'sif' && !job.detailed) {
         actions.push(`<button class="btn" data-queue-action="configure_sif" ${busy ? 'disabled' : ''}>Configure SIF</button>`);
+        actions.push(`<button class="btn" data-queue-action="sif_progress">SIF Progress</button>`);
       } else if (job.detailed && !job.enabled) {
         actions.push(`<button class="btn primary" data-queue-action="configure_detailed" ${detailedAvailable && !busy ? '' : 'disabled'}>${detailedAvailable ? 'Configure Level 2' : 'Not yet available'}</button>`);
       }
@@ -1177,6 +1182,117 @@
     };
   }
 
+  function fileName(path) {
+    if (!path) return null;
+    const parts = String(path).split(/[\\/]/);
+    return parts[parts.length - 1] || String(path);
+  }
+
+  function sifEssentialRow(kind, label, current) {
+    const chosen = fileName(current);
+    return `<div class="form-row">
+      <span>${escapeHtml(label)}</span>
+      <div class="file-choice">
+        <span class="file-choice-name" data-sif-file-name="${kind}" title="${escapeAttribute(current || '')}">${
+          chosen ? escapeHtml(chosen) : 'Bundled default'
+        }</span>
+        <button class="btn" type="button" data-sif-file="${kind}">Choose file</button>
+        <button class="btn" type="button" data-sif-file-clear="${kind}" ${chosen ? '' : 'disabled'}>Use default</button>
+      </div>
+    </div>`;
+  }
+
+  function wireSifEssentialButtons() {
+    modalBody.querySelectorAll('[data-sif-file]').forEach(button => {
+      button.addEventListener('click', async () => {
+        const kind = button.dataset.sifFile;
+        button.disabled = true;
+        showToast('Select the file. The window opens in front of the browser.');
+        try {
+          const result = await api('/api/sif/select-file', {
+            method: 'POST', body: JSON.stringify({ kind })
+          });
+          if (result.cancelled) { showToast('File selection cancelled.'); return; }
+          latestScanState.sif_options = result.options;
+          openSifConfiguration();
+          showToast(`Using ${fileName(result.path)}.`);
+        } catch (error) {
+          showToast(error.message);
+        } finally {
+          button.disabled = false;
+        }
+      });
+    });
+    modalBody.querySelectorAll('[data-sif-file-clear]').forEach(button => {
+      button.addEventListener('click', async () => {
+        const kind = button.dataset.sifFileClear;
+        try {
+          const response = await api('/api/sif/options', {
+            method: 'POST', body: JSON.stringify({ [kind]: '' })
+          });
+          latestScanState.sif_options = response.options;
+          openSifConfiguration();
+          showToast('Reverted to the bundled file.');
+        } catch (error) {
+          showToast(error.message);
+        }
+      });
+    });
+  }
+
+  let sifProgressTimer = null;
+
+  function renderSifProgress(progress) {
+    const body = document.getElementById('sifProgressBody');
+    if (!body) return;
+    const icon = { done: '&#10003;', active: '&#9679;', pending: '&#9675;' };
+    const rows = (progress.stages || []).map(stage => `
+      <li class="stage stage-${stage.status}">
+        <span class="stage-mark">${icon[stage.status] || icon.pending}</span>
+        <span class="stage-label">${escapeHtml(stage.label)}</span>
+      </li>`).join('');
+    const calibration = progress.calibration || {};
+    const custom = Object.entries(calibration).filter(([, value]) => value);
+    const minutes = Math.floor((progress.elapsed_seconds || 0) / 60);
+    const seconds = Math.round((progress.elapsed_seconds || 0) % 60);
+    body.innerHTML = `
+      <div class="progress-bar"><div class="progress-fill" style="width:${Math.max(0, Math.min(100, progress.percent || 0))}%"></div></div>
+      <p><strong>${(progress.percent || 0).toFixed(1)}%</strong> — ${escapeHtml(progress.step || 'Not started')}</p>
+      <p class="muted">Elapsed ${minutes}m ${String(seconds).padStart(2, '0')}s · status ${escapeHtml(String(progress.status || 'idle'))}</p>
+      <ul class="stage-list">${rows}</ul>
+      <p class="muted">${custom.length
+        ? `Custom files: ${custom.map(([, value]) => escapeHtml(fileName(value))).join(', ')}`
+        : 'Using the bundled CAL_FROG and Indices_ICOS files.'}</p>
+      <p class="muted">Warnings and errors are written to Processing Log &amp; Diagnostics and saved with the project.</p>`;
+  }
+
+  async function refreshSifProgress() {
+    try {
+      renderSifProgress(await api('/api/sif/progress'));
+    } catch (_) {
+      // A failed poll must not close the window or disturb processing.
+    }
+  }
+
+  function openSifProgressWindow() {
+    modalTitle.textContent = 'SIF / FLOX processing progress';
+    modalBody.innerHTML = `<div id="sifProgressBody"><p class="muted">Loading…</p></div>
+      <div class="modal-actions"><button class="btn" id="closeSifProgress">Close</button></div>`;
+    modal.classList.add('show');
+    document.getElementById('closeSifProgress').onclick = () => {
+      modal.classList.remove('show');
+      if (sifProgressTimer) { clearInterval(sifProgressTimer); sifProgressTimer = null; }
+    };
+    refreshSifProgress();
+    if (sifProgressTimer) clearInterval(sifProgressTimer);
+    sifProgressTimer = setInterval(() => {
+      if (!modal.classList.contains('show')) {
+        clearInterval(sifProgressTimer); sifProgressTimer = null; return;
+      }
+      refreshSifProgress();
+    }, 1500);
+  }
+
   function openSifConfiguration() {
     const options = latestScanState.sif_options || {};
     const modes = options.modes || ['FULL', 'FLUO'];
@@ -1201,9 +1317,17 @@
         <label class="form-row"><span>Static longitude</span><input id="sifStaticLon" type="number" step="any" value="${escapeAttribute(options.static_lon ?? '')}"></label>
         <label class="form-row"><span>Static altitude [m]</span><input id="sifStaticAlt" type="number" step="any" value="${escapeAttribute(options.static_alt ?? '')}"></label>
       </div>
+      <h4 class="section-heading">Calibration and vegetation indices</h4>
+      <p class="muted">The validated CAL_FROG and Indices_ICOS files shipped with CC-FLUX are used unless you choose your own. A recalibrated instrument or a different index list goes here.</p>
+      <div class="detail-grid">
+        ${sifEssentialRow('calibration_full', 'FULL / FLOX calibration', options.calibration_full)}
+        ${sifEssentialRow('calibration_fluo', 'FLUO calibration', options.calibration_fluo)}
+        ${sifEssentialRow('indices_file', 'Vegetation-index definitions', options.indices_file)}
+      </div>
       <div class="modal-actions"><button class="btn" id="cancelSifOptions">Cancel</button><button class="btn primary" id="saveSifOptions">Save SIF options</button></div>`;
     modal.classList.add('show');
     document.getElementById('sifPositionMode').value = options.position_mode || 'uav_airship';
+    wireSifEssentialButtons();
     document.getElementById('cancelSifOptions').onclick = () => modal.classList.remove('show');
     document.getElementById('saveSifOptions').onclick = async () => {
       const value = id => document.getElementById(id).value.trim();

@@ -1085,6 +1085,26 @@
     .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
     @media (max-width: 700px) { .detail-grid { grid-template-columns: 1fr; } }
 
+    /* SIF calibration pickers and the processing progress window. */
+    .section-heading { margin: 18px 0 6px; font-size: 1rem; color: var(--text); }
+    .file-choice { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .file-choice-name {
+      max-width: min(280px, 45vw); overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap; padding: 6px 10px; border-radius: 7px;
+      background: #10283a; border: 1px solid #28465e; font-size: .85rem;
+    }
+    .progress-bar { height: 10px; border-radius: 6px; background: #10283a; border: 1px solid #28465e; overflow: hidden; margin: 4px 0 10px; }
+    .progress-fill { height: 100%; background: linear-gradient(90deg, #1f7a4c, #35c07c); transition: width .4s ease; }
+    .stage-list { list-style: none; margin: 12px 0; padding: 0; display: grid; gap: 6px; }
+    .stage { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: #0a1724; }
+    .stage-mark { width: 1.2em; text-align: center; }
+    .stage-done .stage-mark { color: #35c07c; }
+    .stage-active { border-color: #35c07c; }
+    .stage-active .stage-mark { color: #35c07c; animation: stage-pulse 1.2s ease-in-out infinite; }
+    .stage-pending { opacity: .6; }
+    @keyframes stage-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+    @media (prefers-reduced-motion: reduce) { .stage-active .stage-mark { animation: none; } }
+
     .info-document { color: #c8d9e8; }
     .info-document h1, .info-document h2, .info-document h3 {
       margin: 1.15rem 0 .55rem;
