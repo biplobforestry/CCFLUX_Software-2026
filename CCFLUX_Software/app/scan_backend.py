@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from collections import defaultdict
 import threading
 import time
 import importlib.util
@@ -625,6 +626,8 @@ class DashboardScanBackend:
             "current_file": None,
             "current_instrument": None,
             "files_scanned": 0,
+            "folder_counts": defaultdict(int),
+            "last_group": None,
             "progress": None,
             "detected_instruments": (),
             "message": (
@@ -648,7 +651,25 @@ class DashboardScanBackend:
                 str(channel["current_file"]) if channel["current_file"] else None
             ),
             "detected_instruments": list(channel["detected_instruments"]),
+            "folder_counts": [
+                {"name": name, "files": count}
+                for name, count in sorted(
+                    channel["folder_counts"].items(),
+                    key=lambda item: (-item[1], item[0]),
+                )
+            ],
         }
+
+    @staticmethod
+    def _scan_group_name(root, current_file) -> str | None:
+        """Which top-level entry under the scan root a file belongs to."""
+        if current_file is None:
+            return None
+        try:
+            relative = Path(current_file).relative_to(Path(root))
+        except (TypeError, ValueError):
+            return Path(current_file).name
+        return relative.parts[0] if relative.parts else Path(current_file).name
 
     def select_output_folder(self) -> dict[str, object]:
         self.logger.log(
@@ -3557,6 +3578,22 @@ class DashboardScanBackend:
                 update.current_folder or channel["current_folder"]
             )
             channel["current_file"] = update.current_file or channel["current_file"]
+            # Tally per top-level folder. A camera delivery is 3,651 GoPro
+            # frames, 536 MicaSense files and one 36 GB FLIR export, so the
+            # single "current file" line sits inside GoPro for almost the whole
+            # scan and it looks as though nothing else is being read. The delta
+            # is attributed rather than counted per file, which stays correct if
+            # the scanner reports in batches.
+            delta = max(0, int(update.files_scanned) - int(channel["files_scanned"]))
+            if delta:
+                group = self._scan_group_name(channel["root"], update.current_file)
+                if group is None:
+                    # An update without a current file still counts files; they
+                    # belong to whatever folder the walk was last in, not to a
+                    # bucket of their own.
+                    group = channel["last_group"] or "(counting)"
+                channel["last_group"] = group
+                channel["folder_counts"][group] += delta
             channel["files_scanned"] = update.files_scanned
             channel["progress"] = (
                 None if update.phase in {"inventory", "complete"} else update.progress

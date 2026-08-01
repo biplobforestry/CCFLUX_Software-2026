@@ -854,6 +854,17 @@
       (channel.running ? 'Identifying instrument' : 'None detected');
     document.getElementById(`${prefix}Count`).textContent =
       Number(channel.files_scanned || 0).toLocaleString();
+    // A camera delivery is thousands of GoPro frames, a few hundred MicaSense
+    // files and one FLIR export, so the single "current file" line sits in
+    // GoPro for almost the whole scan. This shows the others are being read.
+    const breakdown = document.getElementById(`${prefix}Breakdown`);
+    if (breakdown) {
+      const counts = (channel.folder_counts || []).filter(entry => entry.files > 0);
+      breakdown.textContent = counts.length
+        ? counts.map(entry =>
+            `${entry.name} ${Number(entry.files).toLocaleString()}`).join(' · ')
+        : '—';
+    }
     const isComplete = channel.phase === 'complete';
     const completionText = 'Processing is done! close the window!';
     document.getElementById(`${prefix}Messages`).textContent = isComplete
