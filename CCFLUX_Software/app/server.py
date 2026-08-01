@@ -272,6 +272,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._send_bytes(status, body, content_type, headers)
         elif path == "/api/scan":
             self._send_json(HTTPStatus.OK, self.server.backend.snapshot())
+        elif path == "/api/remote-sensing/coverage":
+            self._send_json(HTTPStatus.OK, self.server.backend.camera_coverage())
         elif path == "/api/sif/progress":
             self._send_json(HTTPStatus.OK, self.server.backend.sif_progress())
         elif path == "/api/update/status":
@@ -571,6 +573,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 body = self._json_body()
                 self.server.backend.log_remote_sensing_workflow(body)
                 self._send_json(HTTPStatus.OK, {"logged": True})
+            elif path == "/api/remote-sensing/preview":
+                body = self._json_body()
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.backend.preview_remote_sensing(body),
+                )
             elif path == "/api/remote-sensing/start":
                 body = self._json_body()
                 jobs = self.server.backend.start_remote_sensing(body)

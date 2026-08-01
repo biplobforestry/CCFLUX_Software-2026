@@ -13,6 +13,11 @@ END_TRIM = timedelta(minutes=1)
 # Applying the continuous-sensor edge trim can erase their entire valid range.
 UNTRIMMED_INSTRUMENTS = frozenset({"sif", "flir", "gopro", "micasense"})
 
+# The remote-sensing instruments are scanned and selected on their own, against
+# their own coverage, so they take no part in the flight-instrument global
+# minimum and maximum shown on the dashboard.
+CAMERA_INSTRUMENTS = frozenset({"flir", "gopro", "micasense"})
+
 
 @dataclass(slots=True)
 class InstrumentTimeSelection:
@@ -86,27 +91,34 @@ class DashboardTimeState:
         valid = [
             item
             for item in instruments.values()
-            if item.available_start is not None and item.available_end is not None
+            if item.available_start is not None
+            and item.available_end is not None
+            and item.instrument_id not in CAMERA_INSTRUMENTS
         ]
+        # The detected global minimum and maximum are the envelope of every
+        # flight instrument that reported coverage - the earliest start any of
+        # them saw and the latest end. It used to be taken from the Noseboom
+        # alone whenever an anchor was named, which reported the anchor's own
+        # window as though it were the campaign's: on Flight_2707 that showed
+        # 05:21 - 10:20 while MIRO actually covered 26 Jul 00:00 - 27 Jul 17:03.
+        global_start = min((item.available_start for item in valid), default=None)
+        global_end = max((item.available_end for item in valid), default=None)
+        # The anchor still decides which instruments count towards the common
+        # overlap, because an instrument that does not meet the navigation
+        # reference cannot be analysed against it.
         anchor = instruments.get(analysis_anchor_id) if analysis_anchor_id else None
         if (
             anchor is not None
             and anchor.available_start is not None
             and anchor.available_end is not None
         ):
-            global_start = anchor.available_start
-            global_end = anchor.available_end
             overlap_candidates = [
                 item
                 for item in valid
-                if item.available_end > global_start
-                and item.available_start < global_end
+                if item.available_end > anchor.available_start
+                and item.available_start < anchor.available_end
             ]
         else:
-            global_start = min(
-                (item.available_start for item in valid), default=None
-            )
-            global_end = max((item.available_end for item in valid), default=None)
             overlap_candidates = valid
         overlap_start = max(
             (item.available_start for item in overlap_candidates), default=None

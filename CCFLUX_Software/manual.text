@@ -44,7 +44,7 @@ Select the flight-specific folder containing Noseboom, MIRO Rack, Hatchbox, and 
 
 ### Camera Folder
 
-Select the flight-specific "Camera_System" folder containing GoPro, FLIR, MicaSense. Camera scanning is independent from the Flight Folder scan.
+Select the flight-specific "Camera_System" folder containing GoPro, FLIR, MicaSense. Camera scanning is independent from the Flight Folder scan and runs alongside it, reading GoPro first, then FLIR, then MicaSense.
 
 ### Output Folder
 
@@ -56,11 +56,21 @@ Select a writable location for processed files, plots, maps, logs, and the saved
 2. Selecting a folder does not start scanning. Click **Initial Check** when the folder selections are ready.
 3. If a Camera Folder is defined, choose **Scan Flight Only** or **Scan Flight + Camera**. Flight-only scanning keeps the Camera Folder selected for later.
 4. Review detected instruments, warnings, file counts, and UTC availability.
-5. Set the **Time Filter** using the full interval, common overlap, or a custom start and end.
+5. Set the **Time Filter** using the full interval, common overlap, or a custom
+   start and end. The detected global minimum and maximum are the earliest start
+   and latest end across the flight instruments. The camera products are not
+   included: they are scanned separately and selected in Remote Sensing against
+   their own coverage.
 6. Select only the instruments that should run in **Processing Priority**.
 7. Configure instrument-specific options where a Configure button is available.
 8. Click **Start Processing**, review the health dialog, and confirm.
-9. Use **Remote Sensing** for selected camera instruments.
+9. Use **Remote Sensing** for the camera products. The button becomes available
+   only after camera scanning has finished, because until then the products'
+   coverage is not known. When the scan completes, a window reports what was
+   found and over what period. The dialog then asks which products to process
+   and over which period — the detected global minimum and maximum, the common
+   overlapping timeframe, or a custom period — and shows the request back for
+   verification before anything starts.
 10. Open an instrument card to inspect its dedicated plots, diagnostics, maps, and exports.
 11. Click **Save .ccflux** to preserve the project state.
 
@@ -97,13 +107,14 @@ overlaps the Time Filter.
   checked when you select it, and the files actually used are recorded with the
   result. **SIF Progress** shows the pipeline stage by stage while it runs.
 * **MicaSense** — multispectral imagery, discovered from TIFF or ZIP deliveries.
-  Level 1 metadata only; Level 2 routines are declared unavailable.
-* **FLIR** — thermal frame export as a single large JSON stream. Level 1 reports
-  acquisition health, gaps and sample frames. Level 2 performs the radiometric
-  temperature conversion and matches frames to Noseboom navigation. When more
+  Acquisition metadata only; the detailed routines are declared unavailable.
+* **FLIR** — thermal frame export as a single large JSON stream. The standard
+  pass reports acquisition health, gaps and sample frames. Detailed processing
+  performs the radiometric temperature conversion and matches frames to Noseboom
+  navigation. When more
   than one FLIR export is present, the one whose UTC coverage overlaps the
   analysis interval is selected and the others are reported as ignored.
-  Level 2 writes a frame index (**timestamp_index.csv**) beside its output and
+  Detailed processing writes a frame index (**timestamp_index.csv**) beside its output and
   reuses it on later runs, so the export is read once instead of on every run —
   96 seconds saved per run on the 36 GB Flight_2707 export. The index is
   rebuilt automatically if the export changes on disk or a different export is

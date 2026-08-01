@@ -601,7 +601,7 @@ def test_background_scan_cancellation_is_safe(tmp_path: Path):
     flight.mkdir()
 
     class _SlowScanner:
-        def scan(self, root, *, cancellation, progress_callback):
+        def scan(self, root, *, cancellation, progress_callback, top_level_order=()):
             count = 0
             while not cancellation.is_cancelled:
                 count += 1
@@ -955,7 +955,7 @@ def test_dual_scans_have_independent_cancellation_tokens(tmp_path: Path):
     flight.mkdir(); camera.mkdir()
 
     class _IndependentScanner:
-        def scan(self, root, *, cancellation, progress_callback):
+        def scan(self, root, *, cancellation, progress_callback, top_level_order=()):
             count = 0
             limit = 30 if root.name == "flight" else 10_000
             while count < limit and not cancellation.is_cancelled:
@@ -1040,9 +1040,13 @@ def test_remote_sensing_dispatches_only_camera_pool_with_custom_time(
     assert registered == ["gopro_quick"]
     assert backend.processing_queue.get("gopro_quick").worker_group.value == "camera_metadata"
     assert backend.processing_queue.get("noseboom").task is None
-    assert backend.snapshot()["time_filter"]["selected_analysis_start"].startswith(
-        "2026-07-26T10:03:00"
-    )
+    # The remote-sensing interval is the camera selection, and it must leave the
+    # flight Time Filter alone: the cameras cover a different span and are run
+    # on their own.
+    coverage = backend.camera_coverage()
+    assert coverage["selected_start"].startswith("2026-07-26T10:03:00")
+    assert coverage["selected_end"].startswith("2026-07-26T10:08:00")
+    assert backend.snapshot()["time_filter"]["selected_analysis_start"] is None
     backend.shutdown()
 
 def test_tk_folder_dialog_fallback_is_foreground_and_owned(monkeypatch, tmp_path: Path):

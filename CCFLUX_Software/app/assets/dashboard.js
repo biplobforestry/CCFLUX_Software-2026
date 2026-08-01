@@ -50,7 +50,8 @@
   let queueRefreshPending = false;
   let customTimeEditing = false;
   let latestScanState = { scans: {} };
-  let pendingRemoteWorkflow = null;
+  // Reset on each new scan so the coverage window appears once per scan.
+  let cameraCoverageAnnounced = false;
   let sifWorkspaceWindow = null;
 
   document.querySelectorAll('.instrument-card').forEach(card => {
@@ -784,6 +785,7 @@
     modal.classList.add('show');
   }
   function startPolling() {
+    cameraCoverageAnnounced = false;
     if (scanPoll) clearInterval(scanPoll);
     pollScan();
     scanPoll = setInterval(pollScan, 250);
@@ -793,7 +795,7 @@
     try {
       const state = await api('/api/scan');
       renderScanState(state);
-      await completePendingRemoteWorkflow(state);
+      await announceCameraCoverage(state);
       if (!state.running && ['complete', 'cancelled', 'failed'].includes(state.phase)) {
         clearInterval(scanPoll);
         scanPoll = null;
@@ -956,7 +958,9 @@
   function renderRemoteSensingState(state) {
     const button = document.getElementById('remoteSensingBtn');
     const cameraReady = Boolean(state.camera_scan_ready);
-    const available = Boolean(state.selected_folder) && !state.running;
+    // Products cannot be selected until the camera scan has finished: their
+    // coverage is not known before that, so there is nothing to select against.
+    const available = Boolean(state.selected_folder) && !state.running && cameraReady;
     button.disabled = !available;
     button.setAttribute('aria-disabled', String(!available));
     button.classList.toggle('remote-ready', cameraReady);
@@ -966,8 +970,8 @@
       : state.running
         ? 'Wait for the active scan to finish'
         : cameraReady
-          ? 'Camera data is available; review the remote-sensing workflow'
-          : 'Select or reuse a Camera Folder and begin remote-sensing scanning';
+          ? 'Select the remote-sensing products and the period to process'
+          : 'Run Initial Check with a Camera Folder; selection opens when scanning finishes';
   }
   function updateCard(card, instrument) {
     const activeProcessing = instrument.processing_status &&
@@ -1061,11 +1065,11 @@
         actions.push(`<button class="btn" data-queue-action="configure_sif" ${busy ? 'disabled' : ''}>Configure SIF</button>`);
         actions.push(`<button class="btn" data-queue-action="sif_progress">SIF Progress</button>`);
       } else if (job.detailed && !job.enabled) {
-        actions.push(`<button class="btn primary" data-queue-action="configure_detailed" ${detailedAvailable && !busy ? '' : 'disabled'}>${detailedAvailable ? 'Configure Level 2' : 'Not yet available'}</button>`);
+        actions.push(`<button class="btn primary" data-queue-action="configure_detailed" ${detailedAvailable && !busy ? '' : 'disabled'}>${detailedAvailable ? 'Configure detailed processing' : 'Not yet available'}</button>`);
       }
       const selectable = Boolean(job.available_for_selection);
       const selectionNote = selectable ? '' : ` · ${escapeHtml(job.selection_reason || 'Not available for selection')}`;
-      return `<div class="priority-job ${rowClass}" draggable="${busy ? 'false' : 'true'}" data-job-id="${escapeAttribute(job.job_id)}"><span class="priority-handle" aria-label="Drag to reorder">☷</span><label class="queue-select" title="${escapeAttribute(job.selection_reason || '')}"><input type="checkbox" data-queue-select ${job.enabled ? 'checked' : ''} ${job.detailed || busy || !selectable ? 'disabled' : ''}><span>${job.previously_completed ? 'Skipped' : job.detailed ? 'Level 2 only' : 'Include'}</span></label><div class="priority-copy"><div class="priority-name">${escapeHtml(job.display_name)}</div><div class="priority-meta"><strong>${escapeHtml(job.current_step || 'Waiting')}</strong> · ${Number(job.progress).toFixed(0)}% complete · ${formatElapsed(job.elapsed_seconds)}${selectionNote}</div><div class="priority-progress" aria-label="${Number(job.progress).toFixed(0)} percent complete"><span style="width:${Math.max(0, Math.min(100, Number(job.progress) || 0))}%"></span></div></div><span>Priority ${job.priority}</span><span class="status-pill ${statusClass}"><span class="dot"></span>${escapeHtml(capitalize(job.status))}</span><div class="priority-actions">${actions.join('')}</div></div>`;
+      return `<div class="priority-job ${rowClass}" draggable="${busy ? 'false' : 'true'}" data-job-id="${escapeAttribute(job.job_id)}"><span class="priority-handle" aria-label="Drag to reorder">☷</span><label class="queue-select" title="${escapeAttribute(job.selection_reason || '')}"><input type="checkbox" data-queue-select ${job.enabled ? 'checked' : ''} ${job.detailed || busy || !selectable ? 'disabled' : ''}><span>${job.previously_completed ? 'Skipped' : job.detailed ? 'Detailed only' : 'Include'}</span></label><div class="priority-copy"><div class="priority-name">${escapeHtml(job.display_name)}</div><div class="priority-meta"><strong>${escapeHtml(job.current_step || 'Waiting')}</strong> · ${Number(job.progress).toFixed(0)}% complete · ${formatElapsed(job.elapsed_seconds)}${selectionNote}</div><div class="priority-progress" aria-label="${Number(job.progress).toFixed(0)} percent complete"><span style="width:${Math.max(0, Math.min(100, Number(job.progress) || 0))}%"></span></div></div><span>Priority ${job.priority}</span><span class="status-pill ${statusClass}"><span class="dot"></span>${escapeHtml(capitalize(job.status))}</span><div class="priority-actions">${actions.join('')}</div></div>`;
     }).join('');
   }
 
@@ -1133,7 +1137,7 @@
   function openLevel2Dialog(jobId) {
     const instrumentId = jobId.replace('_detailed', '');
     const routines = level2Capabilities[instrumentId] || [];
-    modalTitle.textContent = `${capitalize(instrumentId)} Level 2 processing`;
+    modalTitle.textContent = `${capitalize(instrumentId)} detailed processing`;
     modalBody.innerHTML = `
       <p class="muted">Detailed processing is optional and will not start without your explicit selection and confirmation.</p>
       <div class="detail-grid">${routines.map(item => `
@@ -1143,9 +1147,9 @@
         </label>`).join('')}</div>
       <label class="detail-row">
         <input type="checkbox" id="confirmLevel2">
-        <span>I explicitly confirm that the selected Level 2 processing may start now.</span>
+        <span>I explicitly confirm that the selected detailed processing may start now.</span>
       </label>
-      <div class="modal-actions"><button class="btn" id="cancelLevel2">Cancel</button><button class="btn primary" id="startLevel2">Start selected Level 2 job</button></div>`;
+      <div class="modal-actions"><button class="btn" id="cancelLevel2">Cancel</button><button class="btn primary" id="startLevel2">Start selected job</button></div>`;
     modal.classList.add('show');
     document.getElementById('cancelLevel2').addEventListener('click', () => modal.classList.remove('show'));
     document.getElementById('startLevel2').addEventListener('click', async () => {
@@ -1158,7 +1162,7 @@
         });
         modal.classList.remove('show');
         renderScanState(response.state);
-        showToast('Confirmed Level 2 job started in the dedicated camera worker pool.');
+        showToast('Confirmed job started in the dedicated camera worker pool.');
       } catch (error) {
         showToast(error.message);
       }
@@ -1388,253 +1392,252 @@
     }).catch(() => {});
   }
 
-  function openRemoteSensingDialog() {
-    if (!latestScanState.selected_folder) {
-      showToast('Select and scan a Flight Folder first.');
-      return;
-    }
-    logRemoteWorkflow('Remote-sensing workflow opened', 'confirmation');
-    modalTitle.textContent = 'Remote Sensing Products';
-    modalBody.innerHTML = `
-      <p><strong>Do you want to proceed with remote sensing products?</strong></p>
-      <p class="muted">You will review the Camera Folder and timeframe before any scanning starts.</p>
-      <div class="scan-actions">
-        <button class="btn" id="declineRemoteProducts">No</button>
-        <button class="btn primary" id="confirmRemoteProducts">Yes</button>
-      </div>`;
-    document.getElementById('declineRemoteProducts').onclick = () => {
-      logRemoteWorkflow('Remote-sensing products declined by user', 'confirmation');
-      modal.classList.remove('show');
-    };
-    document.getElementById('confirmRemoteProducts').onclick = prepareRemoteSensingInputs;
-    modal.classList.add('show');
-  }
-
-  async function prepareRemoteSensingInputs() {
-    modal.classList.remove('show');
-    logRemoteWorkflow('Remote-sensing products confirmed by user', 'confirmation');
-    try {
-      const state = await api('/api/scan');
-      let cameraFolder = state.selected_camera_folder || null;
-      if (!cameraFolder) {
-        showToast('Opening Camera Folder window...');
-        await nextPaint();
-        const cameraSelection = await api('/api/select-camera-folder', { method: 'POST' });
-        if (cameraSelection.cancelled) {
-          logRemoteWorkflow('Camera Folder selection cancelled', 'camera-folder');
-          showToast('Camera Folder selection cancelled. Remote sensing was not started.');
-          return;
-        }
-        cameraFolder = cameraSelection.folder;
-        logRemoteWorkflow(`Camera Folder selected: ${cameraFolder}`, 'camera-folder');
-      } else {
-        logRemoteWorkflow(`Existing Camera Folder reused: ${cameraFolder}`, 'camera-folder');
-      }
-
-      let outputFolder = state.selected_output_folder || null;
-      if (!outputFolder) {
-        showToast('Opening Output Folder window...');
-        await nextPaint();
-        const outputSelection = await api('/api/select-output-folder', { method: 'POST' });
-        if (outputSelection.cancelled) {
-          logRemoteWorkflow('Output Folder selection cancelled', 'output-folder');
-          showToast('Output Folder selection cancelled. Remote sensing was not started.');
-          return;
-        }
-        outputFolder = outputSelection.folder;
-        logRemoteWorkflow(`Output Folder selected: ${outputFolder}`, 'output-folder');
-      }
-
-      showRemoteTimeFrameDialog({
-        flightFolder: state.selected_folder,
-        cameraFolder,
-        outputFolder,
-        timeState: state.time_filter || {},
-        instruments: state.instruments || {}
-      });
-    } catch (error) {
-      showToast(`Remote-sensing setup failed: ${error.message}`);
-      logRemoteWorkflow(`Remote-sensing setup failed: ${error.message}`, 'error');
-    }
-  }
-
   const REMOTE_SENSING_INSTRUMENTS = [
     ['gopro', 'GoPro'],
     ['flir', 'FLIR'],
     ['micasense', 'MicaSense']
   ];
 
-  function remoteSensingChoices(instruments) {
-    // Only offer what discovery actually found, so the operator is never asked
-    // about a camera that is not on this flight.
-    return REMOTE_SENSING_INSTRUMENTS
-      .map(([id, label]) => ({ id, label, state: instruments[id] }))
-      .filter(item => item.state && item.state.detection_status !== 'not_detected');
+  function remoteTimeOption(value, label, start, end, note) {
+    const usable = Boolean(start && end);
+    return `<label class="detail-row${usable ? '' : ' stage-pending'}">
+      <input type="radio" name="remoteTimeMode" value="${value}" ${usable ? '' : 'disabled'}>
+      <span><strong>${escapeHtml(label)}</strong><br><small>${
+        usable
+          ? `${escapeHtml(displayDateTime(start, 'UTC'))} – ${escapeHtml(displayDateTime(end, 'UTC'))}`
+          : 'Not available for the scanned products'
+      }${note ? `<br>${escapeHtml(note)}` : ''}</small></span>
+    </label>`;
   }
 
-  function showRemoteTimeFrameDialog(workflow) {
-    const timeState = workflow.timeState;
-    const displayTimezone = timeState.display_timezone || 'UTC';
-    const choices = remoteSensingChoices(workflow.instruments || {});
-    modalTitle.textContent = 'Remote Sensing Timeframe';
+  async function openRemoteSensingDialog() {
+    let coverage;
+    try {
+      coverage = await api('/api/remote-sensing/coverage');
+    } catch (error) {
+      showToast(error.message);
+      return;
+    }
+    if (!coverage.ready) {
+      showToast(coverage.scanning
+        ? 'Camera scanning is still running. The products can be selected when it finishes.'
+        : 'Run Initial Check first. Remote-sensing products can be selected once camera scanning has finished.');
+      return;
+    }
+    logRemoteWorkflow('Remote-sensing selection opened', 'confirmation');
+    const selectable = (coverage.products || []).filter(item => item.selectable);
+    const unusable = (coverage.products || []).filter(
+      item => item.detected && !item.selectable
+    );
+    if (!selectable.length) {
+      modalTitle.textContent = 'Remote Sensing Products';
+      modalBody.innerHTML = `<p>No scanned camera product has usable UTC coverage.</p>
+        ${unusable.length ? `<p class="muted">Found but not selectable: ${
+          unusable.map(item => escapeHtml(item.display_name)).join(', ')
+        }. A product needs a readable clock before it can be matched to the flight.</p>` : ''}
+        <div class="modal-actions"><button class="btn" id="closeRemote">Close</button></div>`;
+      document.getElementById('closeRemote').onclick = () => modal.classList.remove('show');
+      modal.classList.add('show');
+      return;
+    }
+    modalTitle.textContent = 'Remote Sensing Products';
     modalBody.innerHTML = `
-      <p>Choose the camera products and the time and date filter for
-      remote-sensing processing.</p>
-      ${choices.length ? `
-      <fieldset class="detail-row" id="remoteInstruments">
-        <legend><strong>Camera products</strong></legend>
-        ${choices.map(item => `
+      <p>Select the products to process and the period to process them over.</p>
+      <h4 class="section-heading">Products</h4>
+      <div class="detail-grid" id="remoteInstruments">
+        ${selectable.map(item => `
           <label class="detail-row">
-            <input type="checkbox" name="remoteInstrument" value="${escapeAttribute(item.id)}" checked>
-            <span>${escapeHtml(item.label)}<br><small>${escapeHtml(
-              item.state.detection_status.replace('_', ' ')
-            )} · ${Number(item.state.file_count || 0).toLocaleString()} file(s)</small></span>
+            <input type="checkbox" name="remoteInstrument" value="${escapeAttribute(item.instrument_id)}" checked>
+            <span><strong>${escapeHtml(item.display_name)}</strong><br><small>${
+              Number(item.file_count || 0).toLocaleString()} file(s) · ${
+              escapeHtml(displayDateTime(item.utc_start, 'UTC'))} – ${
+              escapeHtml(displayDateTime(item.utc_end, 'UTC'))}</small></span>
           </label>`).join('')}
-      </fieldset>` : ''}
-      <label class="detail-row">
-        <input type="radio" name="remoteTimeMode" value="current" checked>
-        <span><strong>Use the currently selected timeframe</strong><br><small>${escapeHtml(displayDateTime(timeState.selected_analysis_start, displayTimezone))} – ${escapeHtml(displayDateTime(timeState.selected_analysis_end, displayTimezone))}</small></span>
-      </label>
+      </div>
+      ${unusable.length ? `<p class="muted">Not selectable: ${
+        unusable.map(item => escapeHtml(item.display_name)).join(', ')
+      } — no usable UTC coverage.</p>` : ''}
+      <h4 class="section-heading">Period</h4>
+      ${remoteTimeOption('global', 'Detected global minimum and maximum',
+        coverage.detected_global_start, coverage.detected_global_end,
+        'Everything the selected products cover.')}
+      ${remoteTimeOption('overlap', 'Common overlapping timeframe',
+        coverage.common_overlap_start, coverage.common_overlap_end,
+        'The period every scanned product covers.')}
       <label class="detail-row">
         <input type="radio" name="remoteTimeMode" value="custom">
-        <span><strong>Select time and date again</strong></span>
+        <span><strong>Custom period</strong></span>
       </label>
       <div class="time-edit-grid" id="remoteCustomTime" hidden>
-        <label>Custom start<input type="datetime-local" id="remoteStart" value="${escapeAttribute(inputDateTime(timeState.selected_analysis_start, displayTimezone))}"></label>
-        <label>Custom end<input type="datetime-local" id="remoteEnd" value="${escapeAttribute(inputDateTime(timeState.selected_analysis_end, displayTimezone))}"></label>
+        <label>Start (UTC)<input type="datetime-local" id="remoteStart" value="${
+          escapeAttribute(inputDateTime(coverage.detected_global_start, 'UTC'))}"></label>
+        <label>End (UTC)<input type="datetime-local" id="remoteEnd" value="${
+          escapeAttribute(inputDateTime(coverage.detected_global_end, 'UTC'))}"></label>
       </div>
-      <div class="scan-actions">
-        <button class="btn" id="cancelRemoteTimeframe">Cancel</button>
-        <button class="btn primary" id="continueRemoteTimeframe">Continue</button>
+      <div class="modal-actions">
+        <button class="btn" id="cancelRemote">Cancel</button>
+        <button class="btn primary" id="verifyRemote">Verify request</button>
       </div>`;
+    const firstUsable = modalBody.querySelector('input[name="remoteTimeMode"]:not([disabled])');
+    if (firstUsable) firstUsable.checked = true;
     modalBody.querySelectorAll('input[name="remoteTimeMode"]').forEach(input => {
       input.addEventListener('change', () => {
         document.getElementById('remoteCustomTime').hidden =
-          input.value !== 'custom' || !input.checked;
+          !(input.value === 'custom' && input.checked);
       });
     });
-    document.getElementById('cancelRemoteTimeframe').onclick = () => {
-      logRemoteWorkflow('Remote-sensing timeframe selection cancelled', 'timeframe');
+    document.getElementById('cancelRemote').onclick = () => {
+      logRemoteWorkflow('Remote-sensing selection cancelled', 'confirmation');
       modal.classList.remove('show');
     };
-    document.getElementById('continueRemoteTimeframe').onclick = () => {
-      const mode = modalBody.querySelector('input[name="remoteTimeMode"]:checked').value;
-      const payload = { time_mode: mode };
-      const selectedInstruments = [
-        ...modalBody.querySelectorAll('input[name="remoteInstrument"]:checked')
-      ].map(input => input.value);
-      if (choices.length) {
-        if (!selectedInstruments.length) {
-          showToast('Select at least one camera product to process.');
-          return;
-        }
-        // Only send a selection when it is a real subset; omitting the field
-        // keeps the backend's "process whatever is ready" behaviour.
-        if (selectedInstruments.length !== choices.length) {
-          payload.instruments = selectedInstruments;
-        }
-      }
-      if (
-        mode === 'current' &&
-        (!timeState.selected_analysis_start || !timeState.selected_analysis_end)
-      ) {
-        showToast('No valid selected timeframe is available. Select time and date again.');
-        return;
-      }
-      if (mode === 'current') {
-        // A new scan rebuilds dashboard time state. Preserve the operator's exact
-        // current selection by replaying it as an explicit range afterwards.
-        payload.time_mode = 'custom';
-        payload.start = timeState.selected_analysis_start;
-        payload.end = timeState.selected_analysis_end;
-        payload.requested_time_mode = 'current';
-      }
-      if (mode === 'custom') {
-        const start = document.getElementById('remoteStart').value;
-        const end = document.getElementById('remoteEnd').value;
-        if (!start || !end) {
-          showToast('Both custom date-and-time values are required.');
-          return;
-        }
-        payload.start = inputToIso(start, displayTimezone);
-        payload.end = inputToIso(end, displayTimezone);
-        if (new Date(payload.start) >= new Date(payload.end)) {
-          showToast('Remote-sensing start time must be before end time.');
-          return;
-        }
-      }
-      logRemoteWorkflow(
-        `Remote-sensing timeframe selected: ${mode}; camera products: `
-        + (selectedInstruments.length ? selectedInstruments.join(', ') : 'all ready'),
-        'timeframe'
-      );
-      confirmRemoteScanning({ ...workflow, payload });
-    };
+    document.getElementById('verifyRemote').onclick = () => verifyRemoteSensing(coverage);
     modal.classList.add('show');
   }
 
-  function confirmRemoteScanning(workflow) {
-    modalTitle.textContent = 'Confirm Remote Sensing Scan';
-    modalBody.innerHTML = `
-      <p><strong>Do you want to proceed scanning?</strong></p>
-      <p><strong>Camera Folder:</strong> ${escapeHtml(workflow.cameraFolder)}</p>
-      <p class="muted">After the camera scan finishes successfully, available remote-sensing products will start using the selected timeframe.</p>
-      <div class="scan-actions">
-        <button class="btn" id="declineRemoteScanning">No</button>
-        <button class="btn primary" id="confirmRemoteScanning">Yes, Proceed Scanning</button>
-      </div>`;
-    document.getElementById('declineRemoteScanning').onclick = () => {
-      logRemoteWorkflow('Remote-sensing scan declined by user', 'scan-confirmation');
-      modal.classList.remove('show');
-    };
-    document.getElementById('confirmRemoteScanning').onclick = async () => {
-      modal.classList.remove('show');
-      logRemoteWorkflow('Remote-sensing scan confirmed by user', 'scan-confirmation');
-      pendingRemoteWorkflow = { payload: workflow.payload };
-      try {
-        const result = await api('/api/scan', {
-          method: 'POST',
-          body: JSON.stringify({
-            folder: workflow.flightFolder,
-            camera_folder: workflow.cameraFolder
-          })
-        });
-        openScanWindows(result);
-        startPolling();
-        showToast('Camera scanning started. Remote-sensing processing will follow after a successful scan.');
-      } catch (error) {
-        pendingRemoteWorkflow = null;
-        showToast(`Remote-sensing scanning could not start: ${error.message}`);
-        logRemoteWorkflow(`Remote-sensing scanning failed to start: ${error.message}`, 'error');
-      }
-    };
-    modal.classList.add('show');
-  }
-
-  async function completePendingRemoteWorkflow(state) {
-    if (!pendingRemoteWorkflow) return;
-    const camera = state.scans?.camera || {};
-    if (camera.running || state.running) return;
-    if (camera.phase !== 'complete' || camera.cancelled || camera.error) {
-      pendingRemoteWorkflow = null;
-      showToast('Camera scanning did not finish successfully. Remote-sensing processing was not started.');
-      logRemoteWorkflow('Remote-sensing processing stopped because camera scanning did not complete', 'scan-result');
+  async function verifyRemoteSensing(coverage) {
+    const instruments = [
+      ...modalBody.querySelectorAll('input[name="remoteInstrument"]:checked')
+    ].map(input => input.value);
+    if (!instruments.length) {
+      showToast('Select at least one product to process.');
       return;
     }
-    const workflow = pendingRemoteWorkflow;
-    pendingRemoteWorkflow = null;
-    try {
-      const response = await api('/api/remote-sensing/start', {
-        method: 'POST',
-        body: JSON.stringify(workflow.payload)
-      });
-      renderScanState(response.state);
-      showToast('Remote-sensing processing started in the independent camera worker pool.');
-      logRemoteWorkflow('Remote-sensing processing started after successful camera scan', 'processing');
-    } catch (error) {
-      showToast(`Camera scan finished, but remote-sensing processing could not start: ${error.message}`);
-      logRemoteWorkflow(`Remote-sensing processing failed after scan: ${error.message}`, 'error');
+    const chosen = modalBody.querySelector('input[name="remoteTimeMode"]:checked');
+    if (!chosen) {
+      showToast('Select a period to process.');
+      return;
     }
+    const payload = { instruments, time_mode: chosen.value };
+    if (chosen.value === 'custom') {
+      const start = document.getElementById('remoteStart').value;
+      const end = document.getElementById('remoteEnd').value;
+      if (!start || !end) {
+        showToast('Both custom start and end are required.');
+        return;
+      }
+      payload.start = inputToIso(start, 'UTC');
+      payload.end = inputToIso(end, 'UTC');
+      if (new Date(payload.start) >= new Date(payload.end)) {
+        showToast('The start must be before the end.');
+        return;
+      }
+    }
+    let preview;
+    try {
+      preview = await api('/api/remote-sensing/preview', {
+        method: 'POST', body: JSON.stringify(payload)
+      });
+    } catch (error) {
+      showToast(error.message);
+      return;
+    }
+    logRemoteWorkflow(
+      `Remote-sensing request verified: ${instruments.join(', ')} over ${preview.start} to ${preview.end}`,
+      'timeframe'
+    );
+    showRemoteSensingConfirmation(preview, payload, coverage);
+  }
+
+  function showRemoteSensingConfirmation(preview, payload, coverage) {
+    const hours = Math.floor(preview.duration_seconds / 3600);
+    const minutes = Math.round((preview.duration_seconds % 3600) / 60);
+    const covered = preview.products.filter(item => item.covers_interval);
+    const missed = preview.products.filter(item => !item.covers_interval);
+    modalTitle.textContent = 'Verifying your request';
+    modalBody.innerHTML = `
+      <p><strong>Period</strong><br>${escapeHtml(displayDateTime(preview.start, 'UTC'))} – ${
+        escapeHtml(displayDateTime(preview.end, 'UTC'))} UTC<br>
+      <span class="muted">${hours}h ${String(minutes).padStart(2, '0')}m</span></p>
+      <p><strong>Products to process</strong></p>
+      <ul class="stage-list">
+        ${covered.map(item => `<li class="stage stage-done"><span class="stage-mark">&#10003;</span>
+          <span class="stage-label">${escapeHtml(item.display_name)} — ${
+            Number(item.file_count || 0).toLocaleString()} file(s)</span></li>`).join('')}
+        ${missed.map(item => `<li class="stage stage-pending"><span class="stage-mark">&#9675;</span>
+          <span class="stage-label">${escapeHtml(item.display_name)} — no data in this period</span></li>`).join('')}
+      </ul>
+      ${preview.ignored?.length ? `<p class="muted">Ignored, no usable coverage: ${
+        preview.ignored.map(escapeHtml).join(', ')}</p>` : ''}
+      ${preview.warnings?.length ? preview.warnings.map(
+        warning => `<p class="muted">${escapeHtml(warning)}</p>`).join('') : ''}
+      ${preview.ready_to_start
+        ? '<p class="muted">Processing runs in its own worker pool and does not affect the flight instruments.</p>'
+        : '<p><strong>Nothing would be processed in this period.</strong> Go back and widen it.</p>'}
+      <div class="modal-actions">
+        <button class="btn" id="backRemote">Back</button>
+        ${preview.ready_to_start
+          ? '<button class="btn primary" id="startRemote">Start processing</button>'
+          : ''}
+      </div>`;
+    document.getElementById('backRemote').onclick = () => openRemoteSensingDialog();
+    const startButton = document.getElementById('startRemote');
+    if (startButton) {
+      startButton.onclick = async () => {
+        startButton.disabled = true;
+        try {
+          const response = await api('/api/remote-sensing/start', {
+            method: 'POST', body: JSON.stringify(payload)
+          });
+          renderScanState(response.state);
+          modal.classList.remove('show');
+          showToast('Remote-sensing processing started in the independent camera worker pool.');
+          logRemoteWorkflow('Remote-sensing processing started', 'processing');
+        } catch (error) {
+          showToast(error.message);
+          logRemoteWorkflow(`Remote-sensing processing failed to start: ${error.message}`, 'error');
+          startButton.disabled = false;
+        }
+      };
+    }
+    modal.classList.add('show');
+  }
+
+
+  async function announceCameraCoverage(state) {
+    // The camera scan runs on its own. When it finishes, show what it found and
+    // over what period, so the operator can select products without hunting for
+    // the coverage first.
+    const camera = state.scans?.camera || {};
+    if (camera.running || state.running) return;
+    const finished = camera.phase === 'complete' && !camera.cancelled && !camera.error;
+    if (!finished || cameraCoverageAnnounced) return;
+    cameraCoverageAnnounced = true;
+    let coverage;
+    try {
+      coverage = await api('/api/remote-sensing/coverage');
+    } catch (_) {
+      return;
+    }
+    const found = (coverage.products || []).filter(item => item.detected);
+    if (!found.length) return;
+    modalTitle.textContent = 'Remote sensing — camera scan finished';
+    modalBody.innerHTML = `
+      <p>Scanning found ${found.length} camera product${found.length === 1 ? '' : 's'}
+      and their available time.</p>
+      <ul class="stage-list">
+        ${found.map(item => `<li class="stage ${item.selectable ? 'stage-done' : 'stage-pending'}">
+          <span class="stage-mark">${item.selectable ? '&#10003;' : '&#9675;'}</span>
+          <span class="stage-label"><strong>${escapeHtml(item.display_name)}</strong> — ${
+            Number(item.file_count || 0).toLocaleString()} file(s)<br><small>${
+            item.selectable
+              ? `${escapeHtml(displayDateTime(item.utc_start, 'UTC'))} – ${escapeHtml(displayDateTime(item.utc_end, 'UTC'))} UTC`
+              : 'No usable UTC coverage; this product cannot be selected.'
+          }</small></span></li>`).join('')}
+      </ul>
+      ${coverage.detected_global_start ? `<p><strong>Available overall</strong><br>${
+        escapeHtml(displayDateTime(coverage.detected_global_start, 'UTC'))} – ${
+        escapeHtml(displayDateTime(coverage.detected_global_end, 'UTC'))} UTC</p>` : ''}
+      ${coverage.common_overlap_start ? `<p><strong>Common to all</strong><br>${
+        escapeHtml(displayDateTime(coverage.common_overlap_start, 'UTC'))} – ${
+        escapeHtml(displayDateTime(coverage.common_overlap_end, 'UTC'))} UTC</p>` : ''}
+      <div class="modal-actions">
+        <button class="btn" id="closeCameraCoverage">Close</button>
+        <button class="btn primary" id="openRemoteFromCoverage">Select products</button>
+      </div>`;
+    document.getElementById('closeCameraCoverage').onclick = () => modal.classList.remove('show');
+    document.getElementById('openRemoteFromCoverage').onclick = () => openRemoteSensingDialog();
+    modal.classList.add('show');
+    logRemoteWorkflow('Camera coverage presented after scanning', 'scan-result');
   }
   async function startRegisteredProcessing() {
     if (isSystemBusy()) { showBusyWarning(); return; }

@@ -36,6 +36,20 @@ DEFAULT_PROGRESS_INTERVAL_SECONDS = 0.10
 DEFAULT_EAGER_PROGRESS_FILES = 5
 
 
+def _top_level_rank(name: str, priority: tuple[str, ...]) -> int:
+    """Where a top-level entry sits in the requested order.
+
+    Matched by substring so a delivery folder named MicaSense_Zeppelin still
+    ranks as micasense. Anything unnamed sorts after everything named.
+    """
+    folded = name.casefold()
+    for index, wanted in enumerate(priority):
+        if wanted in folded:
+            return index
+    return len(priority)
+
+
+
 @dataclass(frozen=True, slots=True)
 class ScanEntry:
     path: Path
@@ -204,7 +218,15 @@ class FlightFolderScanner:
         *,
         cancellation: ScanCancellationToken | None = None,
         progress_callback: ProgressCallback | None = None,
+        top_level_order: tuple[str, ...] = (),
     ) -> ScanReport:
+        """Discover instruments below ``root``.
+
+        ``top_level_order`` names the top-level entries to visit first, in that
+        order. Traversal is otherwise driven by the filesystem, which for the
+        camera folder meant MicaSense was read before GoPro and the scan window
+        reported them in an order nobody chose. Deeper folders are unaffected.
+        """
         root = root.expanduser().resolve()
         if not root.is_dir():
             raise DetectionError(f"Flight folder does not exist or is not a directory: {root}")
@@ -223,6 +245,8 @@ class FlightFolderScanner:
         )
         stack = [root]
         last_file_progress_emit = 0.0
+        # The stack is LIFO, so the requested order is pushed reversed.
+        priority = tuple(name.casefold() for name in top_level_order)
 
         self._emit(
             progress_callback,
@@ -248,6 +272,7 @@ class FlightFolderScanner:
                     "scanning_folder",
                 ),
             )
+            pushed_from_here = len(stack)
             try:
                 with os.scandir(folder) as iterator:
                     for entry in iterator:
@@ -319,6 +344,17 @@ class FlightFolderScanner:
             except OSError as exc:
                 inaccessible += 1
                 global_errors.append(f"Cannot scan folder {folder}: {exc}")
+            if priority and folder == root and len(stack) > pushed_from_here:
+                # Reorder only the root's own children. The stack is LIFO, so
+                # the entry to be visited first has to end up last.
+                children = stack[pushed_from_here:]
+                children.sort(
+                    key=lambda item: (
+                        _top_level_rank(item.name, priority), item.name.casefold()
+                    ),
+                    reverse=True,
+                )
+                stack[pushed_from_here:] = children
 
         candidates = self._finalize_candidates(accumulators)
         phase = "cancelled" if token.is_cancelled else "complete"

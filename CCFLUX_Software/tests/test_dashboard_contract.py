@@ -117,12 +117,21 @@ def test_cards_render_live_processing_contract_and_camera_queue_is_wired():
 def test_independent_scan_windows_and_remote_sensing_contract():
     html = (ASSETS / "dashboard.html").read_text(encoding="utf-8")
     javascript = (ASSETS / "dashboard.js").read_text(encoding="utf-8")
-    assert "Do you want to proceed with remote sensing products?" in javascript
-    assert "Do you want to proceed scanning?" in javascript
-    assert "Use the currently selected timeframe" in javascript
-    assert "Select time and date again" in javascript
-    assert "pendingRemoteWorkflow" in javascript
-    assert "completePendingRemoteWorkflow" in javascript
+    # Remote sensing is selected after the camera scan, against camera coverage:
+    # products first, then the period, then a verification step before anything
+    # starts. It no longer triggers a scan of its own or borrows the flight
+    # Time Filter.
+    assert "Select the products to process and the period to process them over." in javascript
+    assert "Detected global minimum and maximum" in javascript
+    assert "Common overlapping timeframe" in javascript
+    assert "Custom period" in javascript
+    assert "Verifying your request" in javascript
+    assert "/api/remote-sensing/coverage" in javascript
+    assert "/api/remote-sensing/preview" in javascript
+    assert "announceCameraCoverage" in javascript
+    # The old scan-then-process chain is gone.
+    assert "pendingRemoteWorkflow" not in javascript
+    assert "Do you want to proceed scanning?" not in javascript
     assert "Do you want to stop scanning?" in javascript
     assert 'data-scan-source="flight"' in html
     assert 'data-scan-source="camera"' in html
@@ -147,7 +156,9 @@ def test_independent_scan_windows_and_remote_sensing_contract():
     assert "positionScanWindows" in javascript
     assert "/api/remote-sensing/log" in javascript
     assert "/api/remote-sensing/start" in javascript
-    assert "payload.requested_time_mode = 'current'" in javascript
+    # The interval now comes from an explicit mode chosen against camera
+    # coverage, so there is no "replay the current flight selection" fallback.
+    assert "requested_time_mode" not in javascript
 
 
 def test_gopro_capture_map_contract():

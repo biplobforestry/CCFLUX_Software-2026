@@ -24,7 +24,11 @@ from uuid import uuid4
 
 from core.configuration import load_detection_configuration
 from core.detector import InputCandidate
-from core.dashboard_time import DashboardTimeState, parse_dashboard_datetime
+from core.dashboard_time import (
+    CAMERA_INSTRUMENTS,
+    DashboardTimeState,
+    parse_dashboard_datetime,
+)
 from core.enums import DetectionStatus, ProcessingStatus
 from core.flight_project import (
     LEGACY_PROJECT_FILENAME,
@@ -572,6 +576,11 @@ class DashboardScanBackend:
         self._miro_rack_bridge: object | None = None
         self._hatchbox_view_lock = threading.RLock()
         self._sif_options = dict(DEFAULT_SIF_OPTIONS)
+        # The remote-sensing interval is chosen against camera coverage and is
+        # kept apart from the flight Time Filter, which the cameras no longer
+        # take part in.
+        self._camera_selected_start: datetime | None = None
+        self._camera_selected_end: datetime | None = None
         self._flir_level2_options = dict(DEFAULT_FLIR_LEVEL2_OPTIONS)
         self._update_status: UpdateStatus | None = None
         self._last_checkpoint_monotonic = 0.0
@@ -1155,7 +1164,226 @@ class DashboardScanBackend:
                     and not self._scan_channels["camera"]["cancelled"]
                     and self._scan_channels["camera"]["error"] is None
                 ),
+                "camera_coverage": self._camera_coverage_locked(),
             }
+
+    # The order the remote-sensing products are scanned and presented in.
+    CAMERA_SCAN_ORDER = ("gopro", "flir", "micasense")
+
+    def _camera_coverage_locked(self) -> dict[str, object]:
+        """UTC coverage of the remote-sensing products, on their own terms.
+
+        The cameras are scanned separately from the flight instruments and are
+        selected against their own coverage, so they have their own detected
+        minimum and maximum and their own common overlap. Routing them through
+        the flight Time Filter meant a camera-only project had no interval to
+        offer at all once the cameras were taken out of the flight global.
+
+        Assumes ``self._lock`` is held.
+        """
+        channel = self._scan_channels["camera"]
+        ready = (
+            channel["phase"] == "complete"
+            and not channel["cancelled"]
+            and channel["error"] is None
+        )
+        products: list[dict[str, object]] = []
+        starts: list[datetime] = []
+        ends: list[datetime] = []
+        for instrument_id in self.CAMERA_SCAN_ORDER:
+            state = self._instruments.get(instrument_id)
+            if state is None:
+                continue
+            detected = state.detection_status is not DetectionStatus.NOT_DETECTED
+            start, end = state.utc_start_time, state.utc_end_time
+            if detected and start is not None and end is not None:
+                starts.append(start)
+                ends.append(end)
+            products.append({
+                "instrument_id": instrument_id,
+                "display_name": state.display_name,
+                "detected": detected,
+                "detection_status": getattr(
+                    state.detection_status, "value", state.detection_status
+                ),
+                "file_count": state.file_count,
+                "utc_start": _iso_or_none(start),
+                "utc_end": _iso_or_none(end),
+                # Without a clock there is nothing to select against, so the
+                # dialog must not offer it as though there were.
+                "selectable": bool(detected and start is not None and end is not None),
+                "warnings": list(state.warnings),
+            })
+        overlap_start = max(starts) if starts else None
+        overlap_end = min(ends) if ends else None
+        if overlap_start is not None and overlap_end is not None:
+            if overlap_start >= overlap_end:
+                overlap_start = overlap_end = None
+        return {
+            "ready": ready,
+            "scanning": bool(channel["running"]),
+            "products": products,
+            "detected_global_start": _iso_or_none(min(starts) if starts else None),
+            "detected_global_end": _iso_or_none(max(ends) if ends else None),
+            "common_overlap_start": _iso_or_none(overlap_start),
+            "common_overlap_end": _iso_or_none(overlap_end),
+            "selected_start": _iso_or_none(self._camera_selected_start),
+            "selected_end": _iso_or_none(self._camera_selected_end),
+        }
+
+    def camera_coverage(self) -> dict[str, object]:
+        with self._lock:
+            return self._camera_coverage_locked()
+
+    REMOTE_SENSING_TIME_MODES = ("global", "overlap", "custom", "current")
+
+    def _select_remote_sensing_interval(
+        self, time_mode: str, request: dict[str, object]
+    ) -> None:
+        """Set the camera analysis interval from the requested mode."""
+        if time_mode not in self.REMOTE_SENSING_TIME_MODES:
+            raise ValueError(
+                "Remote-sensing time mode must be one of: "
+                + ", ".join(self.REMOTE_SENSING_TIME_MODES)
+            )
+        with self._lock:
+            coverage = self._camera_coverage_locked()
+            if time_mode == "current":
+                if self._camera_selected_start is not None:
+                    return
+                time_mode = "global"      # nothing chosen yet; use everything
+            if time_mode == "global":
+                start = coverage["detected_global_start"]
+                end = coverage["detected_global_end"]
+                label = "detected global minimum and maximum"
+            elif time_mode == "overlap":
+                start = coverage["common_overlap_start"]
+                end = coverage["common_overlap_end"]
+                label = "common overlap"
+            else:
+                start, end = request.get("start"), request.get("end")
+                label = "custom interval"
+            if start is None or end is None:
+                raise ValueError(
+                    f"No {label} is available for the selected remote-sensing "
+                    "products. Choose a different interval."
+                )
+            repair = repair_interval(
+                parse_dashboard_datetime(start),
+                parse_dashboard_datetime(end),
+                available_start=_optional_dashboard_datetime(
+                    coverage["detected_global_start"]
+                ),
+                available_end=_optional_dashboard_datetime(
+                    coverage["detected_global_end"]
+                ),
+            )
+            if not repair.usable:
+                raise ValueError(
+                    "A valid remote-sensing interval could not be derived. "
+                    + " ".join(repair.warnings)
+                )
+            self._camera_selected_start = repair.start
+            self._camera_selected_end = repair.end
+        for warning in repair.warnings:
+            self.logger.log(
+                LogLevel.WARNING, "remote-sensing", warning,
+                processing_step="time-selection",
+            )
+        self.logger.log(
+            LogLevel.INFO, "remote-sensing",
+            f"Remote-sensing interval set from the {label}: "
+            f"{repair.start.isoformat()} to {repair.end.isoformat()}",
+            processing_step="time-selection",
+        )
+
+    def preview_remote_sensing(
+        self, request: dict[str, object] | None = None
+    ) -> dict[str, object]:
+        """What a request would do, without starting anything.
+
+        The dialog shows this back to the operator for confirmation, so the
+        interval and the product list are settled before any work begins.
+        """
+        request = request or {}
+        with self._lock:
+            coverage = self._camera_coverage_locked()
+        if not coverage["ready"]:
+            raise ValueError(
+                "Camera scanning must finish before remote-sensing products "
+                "can be selected."
+            )
+        requested = request.get("instruments")
+        selectable = {
+            item["instrument_id"] for item in coverage["products"] if item["selectable"]
+        }
+        if requested is None:
+            wanted = set(selectable)
+        else:
+            if not isinstance(requested, list):
+                raise ValueError("instruments must be a list of instrument IDs")
+            wanted = {str(value).strip() for value in requested if str(value).strip()}
+        if not wanted:
+            raise ValueError("Select at least one remote-sensing product")
+        unusable = sorted(wanted - selectable)
+        wanted &= selectable
+        if not wanted:
+            raise ValueError(
+                "None of the selected products has usable UTC coverage: "
+                + ", ".join(unusable)
+            )
+        mode = str(request.get("time_mode", "global"))
+        if mode == "custom":
+            start, end = request.get("start"), request.get("end")
+        elif mode == "overlap":
+            start = coverage["common_overlap_start"]
+            end = coverage["common_overlap_end"]
+        else:
+            start = coverage["detected_global_start"]
+            end = coverage["detected_global_end"]
+        if start is None or end is None:
+            raise ValueError(
+                "No interval is available for that choice. Pick another option."
+            )
+        parsed_start = parse_dashboard_datetime(start)
+        parsed_end = parse_dashboard_datetime(end)
+        repair = repair_interval(
+            parsed_start, parsed_end,
+            available_start=_optional_dashboard_datetime(
+                coverage["detected_global_start"]
+            ),
+            available_end=_optional_dashboard_datetime(
+                coverage["detected_global_end"]
+            ),
+        )
+        if not repair.usable:
+            raise ValueError(
+                "A valid interval could not be derived. " + " ".join(repair.warnings)
+            )
+        products = []
+        for item in coverage["products"]:
+            if item["instrument_id"] not in wanted:
+                continue
+            covered = (
+                parse_dashboard_datetime(item["utc_start"]) < repair.end
+                and parse_dashboard_datetime(item["utc_end"]) > repair.start
+            )
+            products.append({
+                **item,
+                "covers_interval": covered,
+            })
+        return {
+            "time_mode": mode,
+            "start": repair.start.isoformat(),
+            "end": repair.end.isoformat(),
+            "duration_seconds": (repair.end - repair.start).total_seconds(),
+            "warnings": list(repair.warnings),
+            "products": products,
+            "ignored": unusable,
+            "ready_to_start": bool(
+                products and any(item["covers_interval"] for item in products)
+            ),
+        }
 
     def visible_logs(self) -> list[dict[str, object]]:
         return [record.to_dict() for record in self.logger.records()]
@@ -3067,17 +3295,33 @@ class DashboardScanBackend:
     ) -> list[str]:
         """Dispatch only camera-product jobs in their isolated worker pool."""
         request = request or {}
+        # The whole selection is validated before any interval work, so a bad
+        # product list is reported as a bad product list rather than surfacing
+        # later as an unrelated complaint about the time frame.
+        requested_check = request.get("instruments")
+        if requested_check is not None:
+            if not isinstance(requested_check, list) or not all(
+                isinstance(value, str) for value in requested_check
+            ):
+                raise ValueError("instruments must be a list of instrument IDs")
+            named = {str(value).strip() for value in requested_check if str(value).strip()}
+            if not named:
+                raise ValueError(
+                    "Select at least one camera instrument for remote sensing"
+                )
+            known = {
+                self.processing_queue.get(job_id).instrument_id
+                for job_id in ("micasense_quick", "flir_quick", "gopro_quick")
+            }
+            unknown = named - known
+            if unknown:
+                raise ValueError(
+                    "Unknown remote-sensing instrument(s): " + ", ".join(sorted(unknown))
+                )
+        # Chosen against camera coverage. The cameras take no part in the flight
+        # Time Filter, so a camera-only project still has an interval to offer.
         time_mode = str(request.get("time_mode", "current"))
-        if time_mode == "custom":
-            self.update_time_filter(
-                {
-                    "action": "set",
-                    "start": request.get("start"),
-                    "end": request.get("end"),
-                }
-            )
-        elif time_mode != "current":
-            raise ValueError("Remote-sensing time mode must be 'current' or 'custom'")
+        self._select_remote_sensing_interval(time_mode, request)
 
         camera_tasks = {
             "micasense_quick": self._micasense_quick_task,
@@ -3136,8 +3380,10 @@ class DashboardScanBackend:
                     "Raise the CPU allocation to at least 2 workers in Resources, "
                     "then start Remote Sensing again."
                 )
-            start = self._time_state.selected_analysis_start
-            end = self._time_state.selected_analysis_end
+            # The camera interval, not the flight Time Filter: the products are
+            # selected against their own coverage.
+            start = self._camera_selected_start
+            end = self._camera_selected_end
             if start is None or end is None or start >= end:
                 raise ValueError(
                     "Select a valid current or custom time frame before remote-sensing processing"
@@ -3429,6 +3675,12 @@ class DashboardScanBackend:
                         progress_callback=(
                             lambda update, scan_source=source:
                             self._on_progress(update, scan_source)
+                        ),
+                        # The camera folder is read GoPro, then FLIR, then
+                        # MicaSense, rather than in whatever order the
+                        # filesystem happens to hand back.
+                        top_level_order=(
+                            self.CAMERA_SCAN_ORDER if source == "camera" else ()
                         ),
                     ): source
                     for source, scan_root in roots.items()
@@ -4161,9 +4413,19 @@ class DashboardScanBackend:
     def _instrument_processing_interval(
         self, instrument_id: str
     ) -> tuple[datetime | None, datetime | None]:
-        """Intersect the one dashboard interval with an instrument's availability."""
-        selected_start = self._time_state.selected_analysis_start
-        selected_end = self._time_state.selected_analysis_end
+        """Intersect the governing interval with an instrument's availability.
+
+        Flight instruments follow the dashboard Time Filter. The remote-sensing
+        products follow the interval chosen in the Remote Sensing dialog against
+        camera coverage, which is a separate selection: the cameras cover a
+        different span from the flight instruments and are run on their own.
+        """
+        if instrument_id in CAMERA_INSTRUMENTS and self._camera_selected_start:
+            selected_start = self._camera_selected_start
+            selected_end = self._camera_selected_end
+        else:
+            selected_start = self._time_state.selected_analysis_start
+            selected_end = self._time_state.selected_analysis_end
         selection = self._time_state.instruments.get(instrument_id)
         if selection is not None:
             if selection.available_start is not None:
@@ -5708,6 +5970,15 @@ def _flir_frame_utc(module, timestamp: str) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _optional_dashboard_datetime(value):
+    """parse_dashboard_datetime, but None stays None rather than raising."""
+    return parse_dashboard_datetime(value) if value else None
+
+
+def _iso_or_none(value):
+    return value.isoformat() if value is not None else None
 
 
 def _flir_selection_failure_message(
