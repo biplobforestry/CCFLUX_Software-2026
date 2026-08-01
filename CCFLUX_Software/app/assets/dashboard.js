@@ -320,10 +320,6 @@
   priorityList.addEventListener('click', event => {
     const button = event.target.closest('button[data-queue-action]');
     if (!button) return;
-    if (button.dataset.queueAction === 'configure_detailed') {
-      openLevel2Dialog(button.closest('.priority-job').dataset.jobId);
-      return;
-    }
     if (button.dataset.queueAction === 'configure_sif') {
       openSifConfiguration();
       return;
@@ -1056,15 +1052,12 @@
     priorityList.innerHTML = `<div class="queue-guide"><strong>1. Complete scan and Time Filter</strong><span>2. Select instruments</span><span>3. Check health and start</span><small>${escapeHtml(workflow.next_step || 'Select instruments after the flight scan is complete.')}</small></div>` + jobs.map(job => {
       const rowClass = job.status === 'processing' ? 'is-processing' : job.status === 'complete' ? 'is-complete' : job.status === 'failed' ? 'is-failed' : job.status === 'warning' ? 'is-warning' : '';
       const statusClass = job.status === 'complete' ? 'complete' : job.status === 'processing' ? 'running' : ['warning', 'failed'].includes(job.status) ? 'warning' : 'queued';
-      const detailedAvailable = job.detailed && (level2Capabilities[job.instrument_id] || []).some(item => item.available);
       const actions = [];
       if (job.previously_completed && !job.detailed) {
         actions.push(`<button class="btn" data-queue-action="reprocess" ${busy ? 'disabled' : ''}>Reprocess</button>`);
       } else if (job.instrument_id === 'sif' && !job.detailed) {
         actions.push(`<button class="btn" data-queue-action="configure_sif" ${busy ? 'disabled' : ''}>Configure SIF</button>`);
         actions.push(`<button class="btn" data-queue-action="sif_progress">SIF Progress</button>`);
-      } else if (job.detailed && !job.enabled) {
-        actions.push(`<button class="btn primary" data-queue-action="configure_detailed" ${detailedAvailable && !busy ? '' : 'disabled'}>${detailedAvailable ? 'Configure detailed processing' : 'Not yet available'}</button>`);
       }
       const selectable = Boolean(job.available_for_selection);
       const selectionNote = selectable ? '' : ` · ${escapeHtml(job.selection_reason || 'Not available for selection')}`;
@@ -1131,41 +1124,6 @@
       renderQueue(scan.processing_queue || {});
       return false;
     }
-  }
-
-  function openLevel2Dialog(jobId) {
-    const instrumentId = jobId.replace('_detailed', '');
-    const routines = level2Capabilities[instrumentId] || [];
-    modalTitle.textContent = `${capitalize(instrumentId)} detailed processing`;
-    modalBody.innerHTML = `
-      <p class="muted">Detailed processing is optional and will not start without your explicit selection and confirmation.</p>
-      <div class="detail-grid">${routines.map(item => `
-        <label class="detail-row" title="${escapeAttribute(item.reason)}">
-          <input type="checkbox" name="level2Routine" value="${escapeAttribute(item.routine_id)}" ${item.available ? '' : 'disabled'}>
-          <span><strong>${escapeHtml(item.label)}</strong><br><small>${escapeHtml(item.available ? item.reason : `Not yet available — ${item.reason}`)}</small></span>
-        </label>`).join('')}</div>
-      <label class="detail-row">
-        <input type="checkbox" id="confirmLevel2">
-        <span>I explicitly confirm that the selected detailed processing may start now.</span>
-      </label>
-      <div class="modal-actions"><button class="btn" id="cancelLevel2">Cancel</button><button class="btn primary" id="startLevel2">Start selected job</button></div>`;
-    modal.classList.add('show');
-    document.getElementById('cancelLevel2').addEventListener('click', () => modal.classList.remove('show'));
-    document.getElementById('startLevel2').addEventListener('click', async () => {
-      const selected = Array.from(modalBody.querySelectorAll('input[name="level2Routine"]:checked')).map(input => input.value);
-      const confirmed = document.getElementById('confirmLevel2').checked;
-      try {
-        const response = await api('/api/processing/detailed/start', {
-          method: 'POST',
-          body: JSON.stringify({ job_id: jobId, selected_routines: selected, confirmed })
-        });
-        modal.classList.remove('show');
-        renderScanState(response.state);
-        showToast('Confirmed job started in the dedicated camera worker pool.');
-      } catch (error) {
-        showToast(error.message);
-      }
-    });
   }
 
   function confirmReprocess(jobId, displayName) {
@@ -1717,6 +1675,14 @@
       });
       const unavailable = rows.filter(row => !row.valid);
       const limited = rows.filter(row => row.limited);
+      // Camera products used to be refused outright below four workers. They
+      // run either way; a small allocation just makes everything slower, so it
+      // is said here with the means to change it.
+      const workerCount = Number(scan.resources?.selected_worker_count) || 0;
+      const cameraSelected = selected.some(job =>
+        ['gopro', 'flir', 'micasense'].includes(job.instrument_id)
+      );
+      const lowWorkers = cameraSelected && workerCount > 0 && workerCount < 4;
       const selectedPeriod = timeState.selected_analysis_start && timeState.selected_analysis_end
         ? `${displayDateTime(timeState.selected_analysis_start, displayTimezone)} – ${displayDateTime(timeState.selected_analysis_end, displayTimezone)}`
         : 'No valid global interval';
@@ -1730,8 +1696,42 @@
             <span class="status-pill ${row.valid ? (row.limited ? 'warning' : 'complete') : 'warning'}"><span class="dot"></span>${row.valid ? (row.limited ? 'Partial' : 'Healthy') : 'Unavailable'}</span>
           </div>`).join('')}</div>
         ${limited.length ? '<p class="time-warning">Shorter records will be processed only over their available overlap. Timestamps and scientific calculations are unchanged.</p>' : ''}
+        ${lowWorkers ? `<div class="detail-row">
+          <span><strong>${workerCount} worker${workerCount === 1 ? '' : 's'} allocated</strong><br>
+          <small>Camera products share the machine with the flight instruments,
+          so everything will take longer. Processing still runs — this is a
+          speed matter, not a limit.</small></span>
+          <span class="file-choice">
+            <select id="healthWorkerCount">${(scan.resources?.worker_options || [])
+              .map(value => `<option value="${value}" ${
+                Number(value) === workerCount ? 'selected' : ''
+              }>${value} worker${Number(value) === 1 ? '' : 's'}</option>`).join('')}</select>
+            <button class="btn" type="button" id="healthApplyWorkers">Apply</button>
+          </span>
+        </div>` : ''}
         ${unavailable.length ? '<p class="danger-warning">Processing cannot start because one or more selected instruments have no data in this Time Filter. Change the filter or deselect them.</p>' : '<p><strong>Do you want to proceed?</strong></p>'}
         <div class="modal-actions"><button class="btn" id="cancelHealthCheck">Cancel</button><button class="btn primary" id="confirmHealthCheck" ${unavailable.length ? 'disabled' : ''}>Proceed with processing</button></div>`;
+      const applyWorkers = document.getElementById('healthApplyWorkers');
+      if (applyWorkers) {
+        applyWorkers.addEventListener('click', async () => {
+          applyWorkers.disabled = true;
+          try {
+            const response = await api('/api/resources', {
+              method: 'POST',
+              body: JSON.stringify({
+                worker_count: Number(document.getElementById('healthWorkerCount').value),
+                memory_bytes: Number(scan.resources?.selected_ram_bytes)
+              })
+            });
+            renderResources(response.resources);
+            showToast('Worker allocation updated.');
+            startRegisteredProcessing();       // re-check with the new figure
+          } catch (error) {
+            showToast(error.message);
+            applyWorkers.disabled = false;
+          }
+        });
+      }
       document.getElementById('cancelHealthCheck').addEventListener('click', () => modal.classList.remove('show'));
       document.getElementById('confirmHealthCheck').addEventListener('click', () => {
         modal.classList.remove('show');

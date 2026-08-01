@@ -40,23 +40,58 @@ def test_level2_requires_nonempty_unique_selection():
         )
 
 
-def test_legacy_queue_action_cannot_bypass_confirmation(tmp_path: Path):
+def test_there_is_no_separate_detailed_start_path(tmp_path: Path):
+    """The conversion runs inside the FLIR job. A second way in would be a way
+    to start it without the operator asking."""
     backend = DashboardScanBackend(tmp_path)
-    with pytest.raises(ValueError, match="explicit confirmation"):
-        backend.update_queue(
-            {"action": "start_detailed", "job_id": "flir_detailed"}
-        )
-    assert backend.processing_queue.get("flir_detailed").enabled is False
+
+    assert not hasattr(backend, "start_detailed_processing")
+    with pytest.raises(ValueError, match="Unknown queue action"):
+        backend.update_queue({"action": "start_detailed", "job_id": "flir_quick"})
+    server = (Path(__file__).parents[1] / "app" / "server.py").read_text(
+        encoding="utf-8"
+    )
+    assert "/api/processing/detailed/start" not in server
 
 
-def test_detailed_endpoint_requires_explicit_confirmation(tmp_path: Path):
-    backend = DashboardScanBackend(tmp_path)
-    with pytest.raises(ValueError, match="Explicit"):
-        backend.start_detailed_processing(
-            {
-                "job_id": "flir_detailed",
-                "selected_routines": ["frame_temperature_statistics"],
-                "confirmed": False,
-            }
-        )
-    assert backend.processing_queue.get("flir_detailed").enabled is False
+def test_the_flir_job_runs_the_conversion_and_the_georeferencing():
+    """Metadata alone left the map view waiting on work nobody had started."""
+    source = (Path(__file__).parents[1] / "app" / "scan_backend.py").read_text(
+        encoding="utf-8"
+    )
+    start = source.index("def _flir_quick_task(")
+    body = source[start : source.index("def _flir_level2_routines", start)]
+
+    assert "_flir_detailed_task(context, self._flir_level2_routines())" in body
+    assert "Converting temperature and matching Noseboom navigation" in body
+
+
+def test_a_failed_conversion_keeps_the_metadata():
+    """One run: a late failure must not throw away what already succeeded."""
+    source = (Path(__file__).parents[1] / "app" / "scan_backend.py").read_text(
+        encoding="utf-8"
+    )
+    start = source.index("def _flir_quick_task(")
+    body = source[start : source.index("def _flir_level2_routines", start)]
+
+    assert "except ProcessingCancelledError:" in body, "cancellation must propagate"
+    assert "the acquisition metadata was still written" in body
+    assert "return JobOutcome(warning=warning)" in body
+
+
+def test_a_small_allocation_warns_rather_than_refusing():
+    """A 2-core laptop could not process camera products at all before."""
+    source = (Path(__file__).parents[1] / "app" / "scan_backend.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "requires at least 4 workers" not in source
+    # No capacity at all is still refused: the jobs would queue for ever in
+    # silence. A small allocation is only slower, and is warned about instead.
+    assert "have no worker capacity with" in source
+    assert "will take longer" in source
+    script = (Path(__file__).parents[1] / "app" / "assets" / "dashboard.js").read_text(
+        encoding="utf-8"
+    )
+    assert "worker${workerCount === 1 ? '' : 's'} allocated" in script
+    assert "healthApplyWorkers" in script, "the operator needs a way to change it"

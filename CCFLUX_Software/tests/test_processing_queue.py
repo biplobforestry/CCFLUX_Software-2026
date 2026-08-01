@@ -53,8 +53,15 @@ def test_default_ordering_matches_priority_groups():
     ]
     assert jobs[6].display_name == "INS Gimbal"
     assert jobs[7].display_name == "SIF"
-    assert jobs[-2].display_name == "Detailed MicaSense processing"
-    assert jobs[-1].display_name == "Detailed FLIR processing"
+    # Camera products are one job each. FLIR's temperature conversion and
+    # Noseboom match used to be a separate "detailed" job the operator had to
+    # find and start; they now run as part of the FLIR job.
+    assert [job.display_name for job in jobs[-3:]] == [
+        "MicaSense metadata quick check",
+        "FLIR metadata quick check",
+        "GoPro metadata quick check",
+    ]
+    assert not any(job.detailed for job in jobs)
 
 
 def test_running_job_snapshot_reports_live_elapsed_time():

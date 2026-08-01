@@ -113,13 +113,14 @@ overlaps the Time Filter.
   result. **SIF Progress** shows the pipeline stage by stage while it runs.
 * **MicaSense** — multispectral imagery, discovered from TIFF or ZIP deliveries.
   Acquisition metadata only; the detailed routines are declared unavailable.
-* **FLIR** — thermal frame export as a single large JSON stream. The standard
-  pass reports acquisition health, gaps and sample frames. Detailed processing
-  performs the radiometric temperature conversion and matches frames to Noseboom
-  navigation. When more
+* **FLIR** — thermal frame export as a single large JSON stream. Selecting FLIR
+  and starting processing does the whole job: acquisition health, gaps and
+  sample frames, then the radiometric temperature conversion, then the match to
+  Noseboom navigation. There is no separate step to find and start, and the
+  temperature map is ready when the job reports complete. When more
   than one FLIR export is present, the one whose UTC coverage overlaps the
   analysis interval is selected and the others are reported as ignored.
-  Detailed processing writes a frame index (**timestamp_index.csv**) beside its output and
+  It writes a frame index (**timestamp_index.csv**) beside its output and
   reuses it on later runs, so the export is read once instead of on every run —
   96 seconds saved per run on the 36 GB Flight_2707 export. The index is
   rebuilt automatically if the export changes on disk or a different export is

@@ -11,7 +11,7 @@
   };
   let payload=null,map=null,mapLayers=[],mapBounds=null;
 
-  async function api(url){const response=await fetch(url,{cache:'no-store'});if(!response.ok)throw new Error(`Request failed (${response.status})`);return response.json();}
+  async function api(url,options={}){const response=await fetch(url,{cache:'no-store',...options});if(!response.ok)throw new Error(`Request failed (${response.status})`);return response.json();}
   function finite(value){return Number.isFinite(Number(value));}
   function layout(title,xTitle,yTitle,extra={}) {
     const base={title:{text:title,x:.5,font:{size:18}},paper_bgcolor:'#f7fafc',plot_bgcolor:'#fff',font:{family:'Arial, sans-serif',size:14,color:'#172431'},margin:{l:92,r:46,t:68,b:76},xaxis:{title:xTitle,gridcolor:'#dce5ea',automargin:true},yaxis:{title:yTitle,gridcolor:'#dce5ea',automargin:true,separatethousands:true,exponentformat:'none'},legend:{orientation:'h',y:1.14,x:0},hovermode:'closest'};
@@ -83,14 +83,33 @@
     if(push)history.pushState({view},'',`/flir/${view==='temperature'?'temperature-map':view}`);
     setTimeout(()=>{document.querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));if(view==='temperature'&&map){map.invalidateSize(false);if(mapBounds?.isValid())map.fitBounds(mapBounds,{padding:[30,30],maxZoom:17});}},80);
   }
+  let flirRetry=null;
   async function load(){
+    if(flirRetry){clearTimeout(flirRetry);flirRetry=null;}
     $('busy').classList.add('show');
     try{
-      const response=await api('/api/flir');$('flightName').textContent=response.flight_id||'No project';
-      if(!response.ready){const message=response.message||response.processing_step||'FLIR metadata quick processing is required';$('statusText').textContent=message;$('summaryGrid').innerHTML=summaryCard('FLIR workspace','Not ready',message);return;}
-      payload=response.data;$('statusDot').classList.add('ready');$('statusText').textContent=response.temperature_ready?'FLIR temperature products and Noseboom map loaded':'FLIR acquisition products loaded · Level 2 temperature processing is pending';
+      // The dashboard holds its state lock while a job runs, so this request can
+      // wait on processing rather than on itself. Without a bound the page sat
+      // on "Preparing FLIR workspace" with nothing to act on.
+      const controller=new AbortController();
+      const timeout=setTimeout(()=>controller.abort(),15000);
+      let response;
+      try{response=await api('/api/flir',{signal:controller.signal});}
+      finally{clearTimeout(timeout);}
+      $('flightName').textContent=response.flight_id||'No project';
+      if(!response.ready){const message=response.message||response.processing_step||'FLIR processing has not run yet';$('statusText').textContent=message;$('summaryGrid').innerHTML=summaryCard('FLIR workspace','Not ready',message);return;}
+      payload=response.data;$('statusDot').classList.add('ready');$('statusText').textContent=response.temperature_ready?'FLIR temperature products and Noseboom map loaded':'FLIR acquisition products loaded · temperature and georeferencing are still running';
       renderSummary();renderAcquisition();renderTemperaturePlots();renderGallery();renderMap();showView(pathView(),false);
-    }catch(error){$('statusText').textContent=`FLIR view failed: ${error.message}`;$('statusText').style.color='var(--danger)';}
+      if(!response.temperature_ready){flirRetry=setTimeout(load,4000);}
+    }catch(error){
+      const busy=error.name==='AbortError';
+      $('statusText').textContent=busy
+        ?'The main window is busy processing. This page will try again shortly.'
+        :`FLIR view failed: ${error.message}`;
+      if(!busy){$('statusText').style.color='var(--danger)';}
+      $('summaryGrid').innerHTML=summaryCard('FLIR workspace',busy?'Waiting for processing':'Unavailable',$('statusText').textContent);
+      if(busy){flirRetry=setTimeout(load,4000);}
+    }
     finally{$('busy').classList.remove('show');}
   }
   function formatBytes(value){const n=Number(value)||0;if(n<1024)return `${n} B`;if(n<1048576)return `${(n/1024).toFixed(1)} KB`;return `${(n/1048576).toFixed(1)} MB`;}

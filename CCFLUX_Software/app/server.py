@@ -562,13 +562,6 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     HTTPStatus.ACCEPTED,
                     {"started": True, "state": self.server.backend.snapshot()},
                 )
-            elif path == "/api/processing/detailed/start":
-                body = self._json_body()
-                self.server.backend.start_detailed_processing(body)
-                self._send_json(
-                    HTTPStatus.ACCEPTED,
-                    {"started": True, "state": self.server.backend.snapshot()},
-                )
             elif path == "/api/remote-sensing/log":
                 body = self._json_body()
                 self.server.backend.log_remote_sensing_workflow(body)

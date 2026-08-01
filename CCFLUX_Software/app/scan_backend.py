@@ -51,6 +51,7 @@ from core.logging_manager import LogLevel, ProcessingLogManager
 from .noseboom_statistics_export import NoseboomStatisticsExportManager
 from core.resource_manager import CameraBatchPolicy, GIB, ResourceLimits, ResourceManager
 from core.priority_manager import create_default_priority_queue
+from core.exceptions import ProcessingCancelledError
 from core.processing_manager import (
     JobOutcome,
     ProcessingContext,
@@ -3189,10 +3190,6 @@ class DashboardScanBackend:
             job.elapsed_time = timedelta(0)
             job.error = None
             job.task = None
-        elif action == "start_detailed":
-            raise ValueError(
-                "Detailed processing requires routine selection and explicit confirmation"
-            )
         else:
             raise ValueError(f"Unknown queue action: {action}")
         with self._lock:
@@ -3214,63 +3211,6 @@ class DashboardScanBackend:
             job_id=job_id or None,
             processing_step="queue-management",
         )
-
-    def start_detailed_processing(self, request: dict[str, object]) -> None:
-        """Start one explicitly confirmed Level 2 camera job."""
-        job_id = str(request.get("job_id", ""))
-        if request.get("confirmed") is not True:
-            raise ValueError("Explicit Level 2 processing confirmation is required")
-        job = self.processing_queue.get(job_id)
-        if not job.detailed or job.worker_group.value != "camera_detailed":
-            raise ValueError("Requested job is not a Level 2 camera job")
-        selected = validate_level2_selection(
-            job.instrument_id, request.get("selected_routines")
-        )
-        with self._lock:
-            if self._phase != "complete" or self._report is None:
-                raise ValueError("Flight Folder scan must complete before Level 2 processing")
-            if self._selected_output_folder is None or self._flight_project is None:
-                raise ValueError("Select an Output Folder before Level 2 processing")
-            state = self._instruments[job.instrument_id]
-            if state.detection_status in {
-                DetectionStatus.NOT_DETECTED, DetectionStatus.FAILED
-            }:
-                raise ValueError(f"{state.display_name} data is not ready")
-            if state.ambiguous:
-                raise ValueError(f"Resolve ambiguous {state.display_name} data first")
-            if self._resource_limits.worker_count < 4:
-                raise ValueError(
-                    "Level 2 camera processing requires at least 4 workers so its "
-                    "dedicated pool does not displace fast or metadata jobs"
-                )
-            if job.instrument_id != "flir":
-                raise ValueError(
-                    "No selected MicaSense Level 2 routine is executable in the modular runtime"
-                )
-            job.task = lambda context: self._flir_detailed_task(context, selected)
-            job.safely_cancellable = False
-            self.processing_queue.set_enabled(job_id, True)
-            if job.status is ProcessingStatus.PAUSED:
-                self.processing_queue.resume(job_id)
-            if self._scheduler is None:
-                self._scheduler = ProcessingScheduler(
-                    self.processing_queue,
-                    total_workers=self._resource_limits.worker_count,
-                    logger=self.logger,
-                    result_callback=self._on_job_update,
-                )
-            scheduler = self._scheduler
-            self._sync_project_queue_state()
-            self._checkpoint_project()
-        self.logger.log(
-            LogLevel.INFO,
-            "camera-level2",
-            "Explicitly confirmed Level 2 routines: " + ", ".join(selected),
-            instrument=job.instrument_id,
-            job_id=job_id,
-            processing_step="level2-confirmation",
-        )
-        scheduler.dispatch()
 
     def log_remote_sensing_workflow(self, request: dict[str, object]) -> None:
         """Persist operator decisions from the guided remote-sensing workflow."""
@@ -3374,11 +3314,22 @@ class DashboardScanBackend:
             # with no capacity would leave every job queued forever in silence.
             worker_count = self._resource_limits.worker_count
             if worker_group_capacities(worker_count)[WorkerGroup.CAMERA_METADATA] < 1:
+                # No capacity at all means the jobs would queue for ever in
+                # silence, which is worth stopping for. A small allocation is
+                # not: it is slower, and the operator is told so.
                 raise ValueError(
-                    "Remote-sensing camera products run in a dedicated worker pool "
-                    f"that has no capacity with {worker_count} CPU worker(s). "
-                    "Raise the CPU allocation to at least 2 workers in Resources, "
-                    "then start Remote Sensing again."
+                    "Remote-sensing camera products have no worker capacity with "
+                    f"{worker_count} CPU worker(s). Raise the CPU allocation to "
+                    "at least 2 workers in Resources, then start again."
+                )
+            if worker_count < 4:
+                self.logger.log(
+                    LogLevel.WARNING, "remote-sensing",
+                    f"Remote sensing is starting with {worker_count} worker(s); "
+                    "camera products share the machine with the flight "
+                    "instruments and will take longer. Raise the CPU allocation "
+                    "in Resources if that matters.",
+                    processing_step="resources",
                 )
             # The camera interval, not the flight Time Filter: the products are
             # selected against their own coverage.
@@ -5208,7 +5159,44 @@ class DashboardScanBackend:
                     Path(value) for value in state.output_files
                 ]
             project.output_locations["flir_browser"] = quicklook_path
-        return JobOutcome(warning=result.warnings[0] if result.warnings else None)
+        # Metadata and georeferencing are one run. Splitting them left the map
+        # view waiting on a second job the operator had to find and start, and a
+        # FLIR delivery is no use without positions. A failure here is reported
+        # as a warning rather than losing the metadata that already succeeded.
+        warning = result.warnings[0] if result.warnings else None
+        try:
+            context.report_progress(
+                55, "Converting temperature and matching Noseboom navigation"
+            )
+            self._flir_detailed_task(context, self._flir_level2_routines())
+        except ProcessingCancelledError:
+            raise
+        except Exception as exc:
+            self.logger.capture_exception(
+                exc,
+                component="flir",
+                message=(
+                    "FLIR temperature conversion and georeferencing did not "
+                    "complete; the acquisition metadata was still written."
+                ),
+                instrument="flir",
+                processing_step="georeferencing",
+            )
+            warning = (
+                "Temperature conversion and georeferencing did not complete: "
+                f"{exc}"
+            )
+        return JobOutcome(warning=warning)
+
+    def _flir_level2_routines(self) -> tuple[str, ...]:
+        """Every available routine. There is nothing useful to leave out."""
+        from core.camera_level2 import level2_capability_snapshot
+
+        return tuple(
+            item["routine_id"]
+            for item in level2_capability_snapshot().get("flir", ())
+            if item.get("available")
+        )
 
     # Per-file coverage is only worth measuring when a delivery is split across
     # files and the whole set is small enough to inspect cheaply. A single file

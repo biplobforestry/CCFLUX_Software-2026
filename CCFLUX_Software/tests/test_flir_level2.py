@@ -133,12 +133,16 @@ def test_invalid_options_are_rejected(backend, payload, expected):
         backend.update_flir_level2_options(payload)
 
 
-def test_level2_still_requires_four_workers(backend):
-    """Level 2 owns a dedicated pool; without it the job could never run."""
+def test_a_small_allocation_no_longer_blocks_the_conversion(backend):
+    """It owned a dedicated pool and refused to start without four workers,
+    which stopped a 2-core laptop processing camera products at all. The
+    conversion now runs inside the FLIR job and a small allocation is a speed
+    matter, reported to the operator with the means to change it."""
     import inspect
 
-    source = inspect.getsource(DashboardScanBackend.start_detailed_processing)
-    assert "worker_count < 4" in source
+    source = inspect.getsource(DashboardScanBackend)
+    assert "requires at least 4 workers" not in source
+    assert not hasattr(DashboardScanBackend, "start_detailed_processing")
 
 
 def test_task_georeferences_and_records_provenance():
