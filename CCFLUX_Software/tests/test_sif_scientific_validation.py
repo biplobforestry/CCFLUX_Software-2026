@@ -222,6 +222,16 @@ def test_bundled_science_differs_from_the_original_only_where_recorded():
         # module-level lines to the preceding def, and the new
         # GETCOORDINATES_R_LONGITUDE_MEAN constant sits after it.
         "parse_gps_coord",
+        # Flight_2707: the AirFloX record clock is set to campaign local time and
+        # its GPS gets a fix on only part of the FLUO channel and none of FULL.
+        # The offset is measured from the spectra that do have a fix and applied
+        # to the rest, instead of discarding them.
+        "real_gps_fix_mask",            # new helper
+        "measure_record_clock_offset",  # new helper
+        "_apply_record_clock_offset",   # new helper
+        "probe_record_clock_offset",    # new helper
+        "run_flight",                   # probes the channels before processing
+        "_gps_is_unusable",             # trailing lines attributed by the splitter
     }
 
     mine = _top_level_definitions(BUNDLED / "airflox_sif_automation.py")

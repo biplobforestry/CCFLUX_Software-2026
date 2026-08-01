@@ -219,6 +219,49 @@ def _gps_is_unusable(utc,clock):
         if abs((a-b).total_seconds())>86400: disagreeing+=1
     return usable>0 and disagreeing==usable
 
+# A GPS date this far from the record-clock date is the receiver's power-on
+# default, not a fix. Two days rather than one, so a flight crossing midnight
+# is not rejected.
+GPS_FIX_MAX_DATE_GAP_SECONDS=2*86400
+
+# FULL and FLUO are two channels of one AirFloX box and share its record clock,
+# so an offset measured on the channel that got a fix is the offset for the one
+# that did not. run_flight() resolves the channels in whichever order gives an
+# anchor and clears this between flights.
+RECORD_CLOCK_OFFSET_HINT={}
+
+def real_gps_fix_mask(utc,clock):
+    """Which rows carry a genuine GPS date rather than the 1980 default.
+
+    Compared against the record clock rather than by hard-coding 1980/2080, so
+    any implausible date is caught whatever the receiver stamps.
+    """
+    mask=[]
+    for a,b in zip(utc,clock):
+        if pd.isna(a) or pd.isna(b):
+            mask.append(False); continue
+        mask.append(abs((a-b).total_seconds())<=GPS_FIX_MAX_DATE_GAP_SECONDS)
+    return np.asarray(mask,dtype=bool)
+
+def measure_record_clock_offset(utc,clock):
+    """Seconds the AirFloX record clock runs ahead of GPS UTC.
+
+    The record clock is set to campaign local time and is not disciplined, so
+    the offset is neither zero nor a whole timezone step: on Flight_2707 it is
+    2 h 0 m 40 s. Measuring it from the rows that do have a fix, instead of
+    assuming a timezone, keeps this correct when the clock is simply set wrong.
+
+    Returns (median_offset_seconds, count, spread_seconds) or (None, 0, 0.0).
+    """
+    fix=real_gps_fix_mask(utc,clock)
+    offsets=[(clock[i]-utc[i]).total_seconds() for i in np.flatnonzero(fix)]
+    if not offsets: return None,0,0.0
+    return float(np.median(offsets)),len(offsets),float(np.max(offsets)-np.min(offsets))
+
+def _apply_record_clock_offset(record_clock,offset_seconds):
+    shift=timedelta(seconds=float(offset_seconds))
+    return [pd.NaT if pd.isna(t) else t-shift for t in record_clock]
+
 def get_gps_utc(raw):
     clock_dates=pd.to_numeric(pd.Series(raw.date),errors='coerce').to_numpy(float)
     invalid=(clock_dates==181818)|(clock_dates==4516585)|(clock_dates==191919)|(clock_dates<180000)|(~np.isfinite(clock_dates))
@@ -241,9 +284,24 @@ def get_gps_utc(raw):
     # interpolated one.
     record_clock=[_record_clock_datetime(t,d) for t,d in zip(raw.time,fixed_clock_dates)]
     clock=record_clock
+    # The GPS may be absent for the whole file, or acquire a fix part-way
+    # through. Both happen on Flight_2707: FULL never gets one, FLUO gets one
+    # after 177 spectra. Where there is a fix, use it and measure how far ahead
+    # the record clock runs; elsewhere, correct the record clock by that amount.
+    offset,fixes,spread=measure_record_clock_offset(utc,record_clock)
     if _gps_is_unusable(utc,record_clock):
-        print('warning=AirFloX GPS clock never acquired a fix; the instrument record clock is used for UTC.')
+        hint=getattr(raw,'record_clock_offset_seconds',None)
+        if hint is None: hint=RECORD_CLOCK_OFFSET_HINT.get('seconds')
+        if hint is not None:
+            print(f'warning=AirFloX GPS never acquired a fix; the record clock is used for UTC, '
+                  f'corrected by {hint:.1f} s measured from the other AirFloX channel of this flight.')
+            return _apply_record_clock_offset(record_clock,hint)
+        print('warning=AirFloX GPS clock never acquired a fix, and no channel of this flight has one; '
+              'the instrument record clock is used for UTC uncorrected. It is set to campaign local '
+              'time, so timestamps may be offset by the local UTC difference.')
         return record_clock
+    if offset is not None:
+        RECORD_CLOCK_OFFSET_HINT['seconds']=offset
     diffs=[]
     for i in range(len(clock)-1):
         if pd.isna(clock[i]) or pd.isna(clock[i+1]): diffs.append(0.0)
@@ -259,6 +317,29 @@ def get_gps_utc(raw):
     for i in range(len(utc)):
         if pd.isna(utc[i]):
             utc[i]=utc[i-1] if i>0 and not pd.isna(utc[i-1]) else datetime(1970,1,1,tzinfo=timezone.utc)
+    # R's repair above rewrites a bad row from its neighbour, which works for an
+    # isolated one. Flight_2707's FLUO channel has no fix for its first 177
+    # spectra, and a neighbour taken from inside that block is itself in 1980, so
+    # the repair propagates the wrong year instead of correcting it. Only rows
+    # still implausible after R has had its turn are corrected here, using the
+    # record-clock offset measured from the rows that do have a fix - so a file
+    # R handles correctly is left exactly as R leaves it.
+    still_wrong=np.flatnonzero(~real_gps_fix_mask(utc,record_clock))
+    if len(still_wrong):
+        correction=offset if offset is not None else RECORD_CLOCK_OFFSET_HINT.get('seconds')
+        if correction is None:
+            print(f'warning=AirFloX GPS is unusable on {len(still_wrong)}/{len(utc)} spectra and no '
+                  'row of this flight has a fix to calibrate the record clock. Their timestamps are '
+                  'left as recorded.')
+        else:
+            source='this channel' if offset is not None else 'the other AirFloX channel'
+            print(f'warning=AirFloX GPS acquired no fix on {len(still_wrong)}/{len(utc)} spectra. '
+                  f'The record clock runs {correction:.1f} s ahead of GPS UTC '
+                  f'(spread {spread:.1f} s, measured on {fixes} spectra from {source}); '
+                  'those spectra are corrected by that amount.')
+            corrected=_apply_record_clock_offset(record_clock,correction)
+            for i in still_wrong:
+                if not pd.isna(corrected[i]): utc[i]=corrected[i]
     return utc
 def solar(times):
     """Port of the GUI's solar(): the Astronomical Almanac solar position.
@@ -612,7 +693,15 @@ def process_common(raw_path,cal,index_path,mode,apply_nl=False,spectral_shift_co
         sif_b=ifld_band(wl,e,l,'B')*1000
         out.update({'Incoming at 750nm FLUO [W m-2nm-1sr-1]':ein750,'Reflected 750nm FLUO [W m-2nm-1sr-1]':lin750,'E_stability FLUO [%]':est,'sat value L FLUO':(np.nanmax(raw.l,axis=0)>=200000).astype(int),'sat value E FLUO':(np.nanmax(raw.e,axis=0)>=200000).astype(int),'sat value E2 FLUO':(np.nanmax(raw.e2,axis=0)>=200000).astype(int),'Dynamic range E FLUO [%]':np.nanmax(raw.e,axis=0)*100/200000,'Dynamic range L FLUO [%]':np.nanmax(raw.l,axis=0)*100/200000,'SIF_A_ifld [mW m-2nm-1sr-1]':sif_a,'SIF_B_ifld [mW m-2nm-1sr-1]':sif_b})
     out.update(idx)
-    return {'out':pd.DataFrame(out),'wl':wl,'E':e,'L':l,'Ref':ref}
+    # Whether the AirFloX's own receiver gave a position at all. On Flight_2707
+    # it reports 0.00000 for every row, so the solar zenith angle above was
+    # computed at latitude 0, longitude 0 and read 101 degrees at 05:20 UTC
+    # instead of 75. process_to_files() recomputes it from the Noseboom position
+    # once the telemetry match has supplied one.
+    position_usable=bool(np.isfinite(lat).any() and np.isfinite(lon).any()
+                         and np.any((lat!=0)|(lon!=0)))
+    return {'out':pd.DataFrame(out),'wl':wl,'E':e,'L':l,'Ref':ref,
+            'utc_base':list(base),'position_usable':position_usable}
 def process_full(raw,cal,idx,apply_nonlinearity_correction=False,spectral_shift_correction=False,retain_zero_gps=False): return process_common(raw,read_full_calibration(cal),idx,'FULL',apply_nonlinearity_correction,spectral_shift_correction,retain_zero_gps)
 def process_fluo(raw,cal,idx,apply_nonlinearity_correction=False,spectral_shift_correction=False,retain_zero_gps=False): return process_common(raw,read_full_calibration(cal),idx,'FLUO',apply_nonlinearity_correction,False,retain_zero_gps)
 
@@ -739,6 +828,17 @@ def process_to_files(raw,log,cal,idx,out,mode,apply_nl=False,position_source='ua
     else:
         if log is None: raise ValueError('UAV/Airship mode requires a HATCH-BOX/custom SIF log.')
         m,v=match_data(r['out'],log)
+        if not r.get('position_usable',True):
+            # The AirFloX had no fix, so the solar zenith angle was computed at
+            # latitude 0, longitude 0. Redo it now that the Noseboom has supplied
+            # the real position, using the same acquisition times as before.
+            base=r.get('utc_base')
+            if base is not None and len(base)==len(m):
+                m.loc[:,'SZA']=zenith(base,
+                                      pd.to_numeric(m['Lon'],errors='coerce').to_numpy(float),
+                                      pd.to_numeric(m['Lat'],errors='coerce').to_numpy(float))
+                print(f'{mode} solar zenith angle recomputed from the Noseboom position '
+                      '(the AirFloX reported no GPS fix).')
         kept=int(np.count_nonzero(v)); total=len(v)
         print(f'{mode} telemetry match: kept {kept}/{total} row(s).')
         m=m.loc[v].reset_index(drop=True)
@@ -749,6 +849,25 @@ def process_to_files(raw,log,cal,idx,out,mode,apply_nl=False,position_source='ua
     out.mkdir(parents=True,exist_ok=True); stem=raw.stem
     targets=[out/f'Incoming_radiance_{mode}_{stem}.csv',out/f'Reflected_radiance_{mode}_{stem}.csv',out/f'Reflectance_{mode}_{stem}.csv',out/f'ALL_INDEX_AIRFLOX_{mode}_{stem}.csv']
     paths=[]; paths.append(write_spectra(r['wl'],r['E'],v,m['datetime [UTC]'],targets[0])); paths.append(write_spectra(r['wl'],r['L'],v,m['datetime [UTC]'],targets[1])); paths.append(write_spectra(r['wl'],r['Ref'],v,m['datetime [UTC]'],targets[2])); paths.append(write_r_table(m,targets[3])); paths+=export_gis(m,raw,out); return paths
+
+def probe_record_clock_offset(raw_path,calibration_path,mode):
+    """Measure the record-clock offset from one AirFloX channel, if it has a fix.
+
+    Cheap enough to run before processing: the raw files are a few hundred KB.
+    Returns (offset_seconds, fixes, total) or (None, 0, 0).
+    """
+    try:
+        cal=read_full_calibration(calibration_path)
+        raw=read_drox_full(raw_path,len(cal['wl']),drop_e500_zero=(mode=='FLUO'),drop_zero_gps=False)
+    except Exception as exc:
+        print(f'warning=Could not probe the AirFloX record clock in {raw_path.name}: {exc}')
+        return None,0,0
+    gps_time=[('111111' if str(v).strip() in {'no GPS fix','no GPS  fix','no GPS   fix','0','0.0'} else v) for v in raw.gps_time]
+    gps_date=[('111111' if len(str(v).strip().split('.')[0]) not in (5,6) else v) for v in raw.gps_date]
+    utc=[_r_datetime(t,d) for t,d in zip(gps_time,gps_date)]
+    record=[_record_clock_datetime(t,d) for t,d in zip(raw.time,raw.date)]
+    offset,fixes,_spread=measure_record_clock_offset(utc,record)
+    return offset,fixes,len(record)
 
 def resolve_flight_root(directory,flight_name):
     directory=Path(directory)
@@ -847,6 +966,25 @@ def run_flight(args):
     if not full: raise FileNotFoundError(f'warning=No FULL raw files matched in {full_folder}')
     fraw=concat(full,out/'_combined'/f'{args.flight_name}_FULL.CSV'); fcal,idx=detect_essential_file(args.essentials,'FULL')
     step('full_raw','done',f'{len(full)} FULL raw file(s) combined')
+    # Establish the record-clock offset before anything is processed. FULL is
+    # written first but on Flight_2707 it is FLUO that has the fix, so probing
+    # only the channel about to run would leave FULL two hours out and drop most
+    # of it during telemetry matching.
+    RECORD_CLOCK_OFFSET_HINT.clear()
+    try: fluo_folder_probe=find_named_folder(flox,{'FLOX','FLUO'}); fluo_probe=raw_files(fluo_folder_probe,'FLUO',raw_min_kb)
+    except FileNotFoundError: fluo_probe=[]
+    probe_sources=[(fraw,fcal,'FULL')]
+    if fluo_probe:
+        fluo_raw_probe=concat(fluo_probe,out/'_combined'/f'{args.flight_name}_FLUO.CSV')
+        fluo_cal_probe,_=detect_essential_file(args.essentials,'FLUO')
+        probe_sources.append((fluo_raw_probe,fluo_cal_probe,'FLUO'))
+    for path,calibration,channel in probe_sources:
+        offset,fixes,total=probe_record_clock_offset(path,calibration,channel)
+        if offset is not None and fixes:
+            RECORD_CLOCK_OFFSET_HINT['seconds']=offset
+            print(f'AirFloX record clock: {channel} has a GPS fix on {fixes}/{total} spectra; '
+                  f'the record clock runs {offset:.1f} s ({offset/3600:.3f} h) ahead of UTC.')
+            break
     step('full_process','running','Calculating FULL radiance, reflectance, indices and GIS')
     made+=process_to_files(fraw,log,fcal,idx,out/'FLOX','FULL',apply_nl,position_source,static_lat,static_lon,static_alt,spectral_shift,time_start,time_end)
     step('full_process','done','FULL processing and export complete')

@@ -109,6 +109,30 @@ def _read(path):
     return frame
 
 
+def _align_to_r(mine, theirs):
+    """Drop the leading spectra we recover but R discards.
+
+    R's day-jump repair rewrites a bad row from ``UTC_time[i+1]``, walking
+    forwards, so when a file opens with a run of rows that have no GPS fix the
+    neighbour it reads is itself still uncorrected and the run stays in 1980.
+    Those rows then fall outside the telemetry window and R drops them. We
+    correct them from the measured record-clock offset instead and keep them:
+    on the FULL channel that is 2 spectra, on Flight_2707's FLUO channel 176.
+
+    Every row R does produce must still match ours exactly, which is what the
+    callers assert once the recovered rows are removed.
+    """
+    recovered = len(mine) - len(theirs)
+    assert recovered >= 0, "we produced fewer rows than R"
+    if recovered:
+        first_r = pd.to_datetime(theirs["datetime [UTC]"]).iloc[0]
+        dropped = pd.to_datetime(mine["datetime [UTC]"]).iloc[:recovered]
+        assert (dropped <= first_r).all(), (
+            "the extra rows are not the recovered leading block"
+        )
+    return mine.iloc[recovered:].reset_index(drop=True), recovered
+
+
 def _numeric(series):
     return pd.to_numeric(
         series.replace({"#N/D": np.nan, "NA": np.nan, "": np.nan, "NaN": np.nan}),
@@ -122,11 +146,14 @@ def test_index_table_matches_r(produced, mode, folder, stem, _cal, rdir, rstem):
     mine = _read(produced / folder / f"ALL_INDEX_AIRFLOX_{mode}_{stem}.csv")
     theirs = _read(R_OUTPUT / rdir / f"ALL_INDEX_AIRFLOX_{rstem}.csv")
 
-    assert len(mine) == len(theirs), "row count differs from R"
     assert list(mine.columns) == list(theirs.columns)
+    mine, recovered = _align_to_r(mine, theirs)
+    assert recovered <= 5, f"unexpectedly many recovered rows: {recovered}"
 
     failures = []
     for column in theirs.columns:
+        if column == "ID":
+            continue        # renumbered when a recovered row is kept
         a, b = _numeric(theirs[column]), _numeric(mine[column])
         if a.isna().all() and b.isna().all():
             # A column R could not compute either; check they agree on that.
@@ -154,6 +181,13 @@ def test_spectral_products_match_r(produced, mode, folder, stem, _cal, rdir,
     mine = _read(produced / folder / f"{product}_{mode}_{stem}.csv")
     theirs = _read(R_OUTPUT / rdir / f"{product}_{rstem}.csv")
 
+    # Column 0 is the wavelength; every other column is one acquisition, so a
+    # recovered spectrum is an extra column. Keep the wavelength, drop the
+    # recovered acquisitions from the front.
+    recovered = mine.shape[1] - theirs.shape[1]
+    assert 0 <= recovered <= 5, f"column count differs from R by {recovered}"
+    if recovered:
+        mine = pd.concat([mine.iloc[:, [0]], mine.iloc[:, 1 + recovered:]], axis=1)
     assert mine.shape == theirs.shape
     a = theirs.apply(_numeric).to_numpy(float)
     b = mine.apply(_numeric).to_numpy(float)
@@ -168,6 +202,7 @@ def test_timestamps_match_r_exactly(produced):
     for mode, folder, stem, _cal, rdir, rstem in MODES:
         mine = _read(produced / folder / f"ALL_INDEX_AIRFLOX_{mode}_{stem}.csv")
         theirs = _read(R_OUTPUT / rdir / f"ALL_INDEX_AIRFLOX_{rstem}.csv")
+        mine, _ = _align_to_r(mine, theirs)
         a = pd.to_datetime(theirs["datetime [UTC]"])
         b = pd.to_datetime(mine["datetime [UTC]"])
         assert (a == b).all(), f"{mode}: matched telemetry timestamps differ from R"
@@ -179,6 +214,7 @@ def test_position_matches_r_exactly(produced):
     for mode, folder, stem, _cal, rdir, rstem in MODES:
         mine = _read(produced / folder / f"ALL_INDEX_AIRFLOX_{mode}_{stem}.csv")
         theirs = _read(R_OUTPUT / rdir / f"ALL_INDEX_AIRFLOX_{rstem}.csv")
+        mine, _ = _align_to_r(mine, theirs)
         for column in ("Lat", "Lon", "Alt", "radius_nocos"):
             worst = float((_numeric(theirs[column]) - _numeric(mine[column])).abs().max())
             assert worst < 1e-9, f"{mode} {column}: max|diff|={worst:.3e}"
