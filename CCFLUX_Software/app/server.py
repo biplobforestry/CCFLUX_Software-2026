@@ -6,6 +6,7 @@ import argparse
 import json
 import mimetypes
 import os
+import shutil
 import threading
 import webbrowser
 from http import HTTPStatus
@@ -287,8 +288,51 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Route not found"})
 
+    def _request_origin_is_trusted(self) -> bool:
+        """Whether this POST came from the dashboard rather than another page.
+
+        CC-FLUX listens on 127.0.0.1, which any page open in the same browser can
+        also reach. Without this check a website could quietly POST to
+        /api/processing/start, /api/reset or /api/exit while a campaign run was
+        under way - the browser attaches no credentials, but none are needed
+        here, so the request would simply be carried out.
+
+        A same-origin fetch from the dashboard sends Origin; some browsers send
+        only Referer. Either must name this server. A request with neither is
+        refused, because a form POST from another page is exactly the case that
+        omits both.
+        """
+        host = self.headers.get("Host", "")
+        allowed = {f"http://{host}", f"https://{host}"}
+        origin = self.headers.get("Origin")
+        if origin is not None:
+            return origin in allowed
+        referer = self.headers.get("Referer")
+        if referer:
+            parsed = urlparse(referer)
+            return f"{parsed.scheme}://{parsed.netloc}" in allowed
+        return False
+
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        if not self._request_origin_is_trusted():
+            self.server.backend.logger.log(
+                LogLevel.WARNING,
+                "server",
+                f"Refused a cross-origin request to {path} from "
+                f"{self.headers.get('Origin') or self.headers.get('Referer') or 'an unnamed page'}",
+                processing_step="request-origin",
+            )
+            self._send_json(
+                HTTPStatus.FORBIDDEN,
+                {
+                    "error": (
+                        "This request did not come from the CC-FLUX dashboard and "
+                        "was refused. Open the dashboard from the launcher."
+                    )
+                },
+            )
+            return
         try:
             if path == "/api/select-flight-folder":
                 result = self.server.backend.select_and_start()
@@ -610,28 +654,40 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+    # Streamed rather than read whole: the same helper serves 20 KB dashboard
+    # assets and instrument exports that run to hundreds of megabytes, and
+    # read_bytes() allocated the entire file before writing a single byte.
+    FILE_CHUNK_BYTES = 64 * 1024
+
     def _send_file(self, path: Path, *, download: bool = False) -> None:
         try:
-            body = path.read_bytes()
+            size = path.stat().st_size
+            stream = path.open("rb")
         except OSError:
             self._send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {"error": "Dashboard asset is unavailable"},
             )
             return
-        self.send_response(HTTPStatus.OK)
-        self.send_header(
-            "Content-Type",
-            mimetypes.guess_type(path.name)[0] or "application/octet-stream",
-        )
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        if download:
+        with stream:
+            self.send_response(HTTPStatus.OK)
             self.send_header(
-                "Content-Disposition", f'attachment; filename="{path.name}"'
+                "Content-Type",
+                mimetypes.guess_type(path.name)[0] or "application/octet-stream",
             )
-        self.end_headers()
-        self.wfile.write(body)
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store")
+            if download:
+                self.send_header(
+                    "Content-Disposition", f'attachment; filename="{path.name}"'
+                )
+            self.end_headers()
+            try:
+                shutil.copyfileobj(stream, self.wfile, self.FILE_CHUNK_BYTES)
+            except (BrokenPipeError, ConnectionResetError):
+                # The browser navigated away or cancelled the download. The
+                # headers are already out, so there is nothing to report.
+                pass
 
 
 def create_server(

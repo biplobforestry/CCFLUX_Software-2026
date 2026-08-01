@@ -132,16 +132,19 @@ def parse_gps_coord(vals,pos_hemi,neg_hemi):
 # whichever axis has no negative-hemisphere letter anywhere in the file, assigns
 # the flight mean to *every* row. The latitude branch indexes with nalatn (rows
 # that failed to parse) but the longitude branch indexes with nalonw (rows with
-# no "W"), which for an all-East flight is every row. The result is that all
-# longitudes collapse to one number.
+# no "W"), which for an all-East flight is every row, so all longitudes collapse
+# to one number. It is a defect in the reference implementation.
 #
-# It is reproduced because the R output is the reference, and because the only
-# thing these coordinates feed is the solar zenith angle - the Lat/Lon columns
-# written out are overwritten by the telemetry match. Collapsing the longitude
-# of a 3 km flight leg moves SZA by about 2e-4 degrees. It is still wrong, and
-# GETCOORDINATES_R_LONGITUDE_MEAN turns it off for anyone who would rather have
-# the per-row position.
-GETCOORDINATES_R_LONGITUDE_MEAN=True
+# CC-FLUX keeps the per-row longitude. A Zeppelin transect covers kilometres and
+# assigning it a single longitude is not defensible, even though the only thing
+# these coordinates feed is the solar zenith angle - the Lat/Lon columns written
+# out are overwritten by the telemetry match. The cost is that our SZA differs
+# from an R run by about 2e-4 degrees; the 4-decimal rounding above is kept
+# because that part of getcoordinates() is deliberate.
+#
+# Set this True to reproduce the R output exactly, e.g. when re-checking against
+# an archived R result.
+GETCOORDINATES_R_LONGITUDE_MEAN=False
 
 def r_round_half_even(values,digits=4):
     """R's round(): IEC 60559 round-half-to-even, which np.round also uses."""

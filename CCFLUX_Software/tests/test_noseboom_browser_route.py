@@ -165,7 +165,7 @@ def test_http_noseboom_routes_api_export_logo_and_settings(tmp_path: Path):
         request = urllib.request.Request(
             base + "/api/noseboom/straight-settings",
             data=json.dumps({"settings": {"min_speed_mps": 12.0}}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "Origin": base},
             method="POST",
         )
         with urllib.request.urlopen(request) as response:

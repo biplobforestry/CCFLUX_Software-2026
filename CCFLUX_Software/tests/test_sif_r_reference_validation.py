@@ -60,6 +60,12 @@ requires_r_reference = pytest.mark.skipif(
 TOLERANCES = {
     "SIF_A_ifld [mW m-2nm-1sr-1]": 5e-3,
     "SIF_B_ifld [mW m-2nm-1sr-1]": 5e-3,
+    # CC-FLUX keeps the per-row AirFloX longitude where R's getcoordinates()
+    # collapses it to the flight mean. That is a deliberate departure and it is
+    # the only reason the solar zenith angle differs;
+    # test_only_the_longitude_decision_moves_the_zenith_angle proves it by
+    # switching the R behaviour back on and requiring an exact match.
+    "SZA": 2e-2,
     # REP is a red-edge position in nm (~700), so 1e-5 nm is 1.7e-8 relative -
     # floating point in the index expression, not a difference in the science.
     "REP": 1e-4,
@@ -286,3 +292,37 @@ def test_solar_zenith_uses_the_almanac_algorithm(airflox):
     sza = airflox.zenith(times, np.array([6.9870304]), np.array([50.623186]))
     # R: zenith(solar(...), 6.9870304, 50.623186) -> 43.2594909260179
     assert sza[0] == pytest.approx(43.2594909260179, abs=1e-9)
+
+
+@requires_r_reference
+def test_only_the_longitude_decision_moves_the_zenith_angle(airflox, tmp_path):
+    """Turning the R behaviour back on must reproduce R's SZA exactly.
+
+    This is what licenses the loose SZA tolerance above: the difference is the
+    per-row longitude we deliberately keep, and nothing else. If some other
+    change ever moved the zenith angle, this case would fail while the tolerance
+    quietly absorbed it.
+    """
+    original = airflox.GETCOORDINATES_R_LONGITUDE_MEAN
+    airflox.GETCOORDINATES_R_LONGITUDE_MEAN = True
+    try:
+        for mode, folder, stem, calibration, rdir, rstem in MODES:
+            airflox.process_to_files(
+                RAW / f"{stem}.CSV", TELEMETRY,
+                CALIBRATION / calibration, CALIBRATION / "Indices_ICOS.txt",
+                tmp_path / folder, mode,
+            )
+            mine = _read(tmp_path / folder / f"ALL_INDEX_AIRFLOX_{mode}_{stem}.csv")
+            theirs = _read(R_OUTPUT / rdir / f"ALL_INDEX_AIRFLOX_{rstem}.csv")
+            mine, _ = _align_to_r(mine, theirs)
+            worst = float(
+                (_numeric(theirs["SZA"]) - _numeric(mine["SZA"])).abs().max()
+            )
+            assert worst < 1e-9, f"{mode}: SZA differs from R by {worst:.3e}"
+    finally:
+        airflox.GETCOORDINATES_R_LONGITUDE_MEAN = original
+
+
+def test_the_per_row_longitude_is_the_shipped_behaviour(airflox):
+    """A Zeppelin transect covers kilometres; one longitude for it is not usable."""
+    assert airflox.GETCOORDINATES_R_LONGITUDE_MEAN is False

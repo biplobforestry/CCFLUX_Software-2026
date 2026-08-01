@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 import threading
 import traceback as traceback_module
 from dataclasses import asdict, dataclass, field
@@ -138,12 +139,22 @@ LogCallback = Callable[[LogRecord], None]
 class ProcessingLogManager:
     """Thread-safe diagnostics log for main and worker processing events."""
 
-    def __init__(self, persistent_log_file: Path) -> None:
+    # The in-memory views are what the GUI reads; the persistent JSONL on disk
+    # is the complete record and is never trimmed. A campaign day with camera
+    # processing produces a lot of entries, and both lists grew without bound -
+    # the oldest are the least useful on screen, and they are still on disk.
+    IN_MEMORY_RECORD_LIMIT = 20_000
+
+    def __init__(
+        self, persistent_log_file: Path, *, memory_limit: int | None = None
+    ) -> None:
         self.persistent_log_file = Path(persistent_log_file)
         self.persistent_log_file.parent.mkdir(parents=True, exist_ok=True)
         self.gui_state = GUIProcessingLogState()
-        self._records: list[LogRecord] = []
-        self._visible_records: list[LogRecord] = []
+        limit = self.IN_MEMORY_RECORD_LIMIT if memory_limit is None else memory_limit
+        self.memory_limit = int(limit)
+        self._records: deque[LogRecord] = deque(maxlen=self.memory_limit)
+        self._visible_records: deque[LogRecord] = deque(maxlen=self.memory_limit)
         self._callbacks: list[LogCallback] = []
         self._lock = threading.RLock()
 

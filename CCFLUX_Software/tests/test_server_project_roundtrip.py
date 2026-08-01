@@ -17,7 +17,16 @@ def _request(server, method: str, path: str, body: dict | None = None):
         "127.0.0.1", server.server_port, timeout=20
     )
     payload = json.dumps(body or {}).encode("utf-8") if method == "POST" else None
-    headers = {"Content-Type": "application/json"} if payload is not None else {}
+    # A same-origin POST from the dashboard carries Origin; the server refuses
+    # one that does not, so the harness has to behave like the browser.
+    headers = (
+        {
+            "Content-Type": "application/json",
+            "Origin": f"http://127.0.0.1:{server.server_port}",
+        }
+        if payload is not None
+        else {}
+    )
     connection.request(method, path, body=payload, headers=headers)
     response = connection.getresponse()
     data = json.loads(response.read().decode("utf-8"))

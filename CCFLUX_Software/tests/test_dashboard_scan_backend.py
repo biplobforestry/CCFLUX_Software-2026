@@ -683,7 +683,7 @@ def test_http_scan_endpoint_accepts_folder_and_clear_only_hides_gui_logs(
         request = urllib.request.Request(
             base + "/api/scan",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "Origin": base},
             method="POST",
         )
         with urllib.request.urlopen(request) as response:
@@ -691,7 +691,8 @@ def test_http_scan_endpoint_accepts_folder_and_clear_only_hides_gui_logs(
         _wait(backend)
         persistent_size = backend.logger.persistent_log_file.stat().st_size
         clear = urllib.request.Request(
-            base + "/api/logs/clear", data=b"{}", method="POST"
+            base + "/api/logs/clear", data=b"{}", method="POST",
+            headers={"Origin": base},
         )
         with urllib.request.urlopen(clear):
             pass
@@ -709,10 +710,12 @@ def test_http_exit_endpoint_stops_server_cleanly():
     server = _server_or_skip(backend)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    origin = f"http://127.0.0.1:{server.server_port}"
     request = urllib.request.Request(
-        f"http://127.0.0.1:{server.server_port}/api/application/exit",
+        origin + "/api/application/exit",
         data=b"{}",
         method="POST",
+        headers={"Origin": origin},
     )
     try:
         with urllib.request.urlopen(request) as response:

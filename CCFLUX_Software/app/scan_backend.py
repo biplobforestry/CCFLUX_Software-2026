@@ -4684,56 +4684,6 @@ class DashboardScanBackend:
         self._publish_hatchbox_browser(project, "sif", browser.path)
         return JobOutcome(warning=result.warnings[0] if result.warnings else None)
 
-    def _camera_quick_task(
-        self, instrument_id: str, context: ProcessingContext
-    ) -> JobOutcome | None:
-        """Bounded discovery metadata only; never decode complete camera datasets."""
-        with self._lock:
-            report = self._report
-        if report is None:
-            raise RuntimeError("Flight scan is required for camera metadata checks")
-        candidates = [
-            item for item in report.candidates if item.instrument_id == instrument_id
-        ]
-        if not candidates:
-            raise RuntimeError(f"No detected {instrument_id} camera data")
-        context.report_progress(20.0, "Reviewing scanner metadata")
-        file_count = sum(item.matching_file_count for item in candidates)
-        samples = tuple(
-            dict.fromkeys(
-                path for item in candidates for path in item.all_matching_files
-            )
-        )
-        total_sample_bytes = 0
-        for index, path in enumerate(samples, 1):
-            context.check_cancelled()
-            try:
-                total_sample_bytes += path.stat().st_size
-            except OSError as exc:
-                self.logger.file_read_error(exc, path, instrument=instrument_id)
-            context.report_progress(
-                20.0 + 70.0 * index / max(1, len(samples)),
-                f"Inspecting bounded metadata sample {index}/{len(samples)}",
-            )
-        with self._lock:
-            state = self._instruments[instrument_id]
-            state.warnings = list(dict.fromkeys(
-                state.warnings + [
-                    "Metadata-only camera quick check; no images were fully decoded."
-                ]
-            ))
-        self.logger.log(
-            LogLevel.SUCCESS, "camera-metadata",
-            f"{instrument_id} metadata quick check complete: {file_count} files",
-            instrument=instrument_id, processing_step="metadata-quick-check",
-        )
-        return JobOutcome(
-            warning=(
-                f"Metadata-only quick check ({file_count} files; "
-                f"{total_sample_bytes} sampled bytes)"
-            )
-        )
-
     def _micasense_quick_task(self, context: ProcessingContext) -> JobOutcome | None:
         """Run the bounded Level 1 adapter in the camera-metadata worker group."""
         with self._lock:
