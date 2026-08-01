@@ -128,12 +128,41 @@ def parse_gps_coord(vals,pos_hemi,neg_hemi):
         except Exception: out.append(np.nan)
     return np.asarray(out,float)
 
-def fill_bad_gps(lat,lon):
+# R's getcoordinates() rounds each parsed coordinate to 4 decimals and then, for
+# whichever axis has no negative-hemisphere letter anywhere in the file, assigns
+# the flight mean to *every* row. The latitude branch indexes with nalatn (rows
+# that failed to parse) but the longitude branch indexes with nalonw (rows with
+# no "W"), which for an all-East flight is every row. The result is that all
+# longitudes collapse to one number.
+#
+# It is reproduced because the R output is the reference, and because the only
+# thing these coordinates feed is the solar zenith angle - the Lat/Lon columns
+# written out are overwritten by the telemetry match. Collapsing the longitude
+# of a 3 km flight leg moves SZA by about 2e-4 degrees. It is still wrong, and
+# GETCOORDINATES_R_LONGITUDE_MEAN turns it off for anyone who would rather have
+# the per-row position.
+GETCOORDINATES_R_LONGITUDE_MEAN=True
+
+def r_round_half_even(values,digits=4):
+    """R's round(): IEC 60559 round-half-to-even, which np.round also uses."""
+    return np.round(np.asarray(values,float),digits)
+
+def fill_bad_gps(lat,lon,*,r_getcoordinates=True):
     lat=np.asarray(lat,float).copy(); lon=np.asarray(lon,float).copy()
     bad=(~np.isfinite(lat))|(~np.isfinite(lon))|(lat==0)|(lon==0)
     good=~bad
     if good.any():
         lat[bad]=lat[good][0]; lon[bad]=lon[good][0]
+    if not r_getcoordinates:
+        return lat,lon
+    lat=r_round_half_even(lat,4); lon=r_round_half_even(lon,4)
+    if GETCOORDINATES_R_LONGITUDE_MEAN and np.isfinite(lon).any():
+        mean_lon=float(np.nanmean(lon))
+        if not np.allclose(lon[np.isfinite(lon)],mean_lon,atol=0,rtol=0):
+            print(f'warning=AirFloX longitude replaced by the flight mean ({mean_lon:.7f}) '
+                  'to reproduce the R getcoordinates() reference. This affects the solar '
+                  'zenith angle only; the written Lat/Lon come from the telemetry match.')
+        lon=np.full_like(lon,mean_lon)
     return lat,lon
 def _r_time_to_hms(value):
     text=str(value).strip().split('.')[0]
@@ -204,8 +233,14 @@ def get_gps_utc(raw):
     bad_idx=np.flatnonzero(invalid)
     for i in bad_idx:
         if 0<i<len(fixed_clock_dates): fixed_clock_dates[i]=fixed_clock_dates[i-1]
-    clock=[_r_datetime(t,d) for t,d in zip(raw.time,fixed_clock_dates)]
+    # R reads the two date fields with two different functions: DateTimeFloX
+    # takes the record clock as YYMMDD, DateTimeRoXGPS takes the GPS date as
+    # DDMMYY. Parsing the record clock with the GPS convention turned 240828
+    # into 2028-08-24, which is 1457 days from the GPS date, so the day-jump
+    # repair below fired on good rows and replaced their GPS time with an
+    # interpolated one.
     record_clock=[_record_clock_datetime(t,d) for t,d in zip(raw.time,fixed_clock_dates)]
+    clock=record_clock
     if _gps_is_unusable(utc,record_clock):
         print('warning=AirFloX GPS clock never acquired a fix; the instrument record clock is used for UTC.')
         return record_clock
@@ -225,18 +260,48 @@ def get_gps_utc(raw):
         if pd.isna(utc[i]):
             utc[i]=utc[i-1] if i>0 and not pd.isna(utc[i-1]) else datetime(1970,1,1,tzinfo=timezone.utc)
     return utc
+def solar(times):
+    """Port of the GUI's solar(): the Astronomical Almanac solar position.
+
+    The earlier port used the Spencer/NOAA Fourier approximation instead, which
+    is a different algorithm and left the solar zenith angle up to 0.23 degrees
+    away from the reference.
+    """
+    rad=math.pi/180
+    epoch=np.array([np.nan if pd.isna(t) else pd.Timestamp(t).timestamp() for t in times],dtype=float)
+    jd=epoch/86400.0+2440587.5
+    jc=(jd-2451545.0)/36525.0
+    l0=(280.46646+jc*(36000.76983+0.0003032*jc))%360.0
+    m=357.52911+jc*(35999.05029-0.0001537*jc)
+    e=0.016708634-jc*(4.2037e-05+1.267e-07*jc)
+    eqctr=(np.sin(rad*m)*(1.914602-jc*(0.004817+1.4e-05*jc))
+           +np.sin(rad*2*m)*(0.019993-0.000101*jc)
+           +np.sin(rad*3*m)*0.000289)
+    lambda0=l0+eqctr
+    omega=125.04-1934.136*jc
+    lam=lambda0-0.00569-0.00478*np.sin(rad*omega)
+    seconds=21.448-jc*(46.815+jc*(0.00059-jc*0.001813))
+    obliq0=23+(26+(seconds/60))/60
+    obliq=obliq0+0.00256*np.cos(rad*omega)
+    y=np.tan(rad*obliq/2)**2
+    eqn_time=4/rad*(y*np.sin(rad*2*l0)-2*e*np.sin(rad*m)
+                    +4*e*y*np.sin(rad*m)*np.cos(rad*2*l0)
+                    -0.5*y**2*np.sin(rad*4*l0)-1.25*e**2*np.sin(rad*2*m))
+    solar_dec=np.arcsin(np.sin(rad*obliq)*np.sin(rad*lam))
+    solar_time=((jd-0.5)%1.0*1440+eqn_time)/4
+    return {'solarTime':solar_time,'eqnTime':eqn_time,
+            'sinSolarDec':np.sin(solar_dec),'cosSolarDec':np.cos(solar_dec)}
+
 def zenith(times,lon,lat):
-    z=[]
-    for dt,lo,la in zip(times,lon,lat):
-        if not np.isfinite(lo) or not np.isfinite(la): z.append(np.nan); continue
-        doy=dt.timetuple().tm_yday; hour=dt.hour+dt.minute/60+dt.second/3600
-        gamma=2*math.pi/365*(doy-1+(hour-12)/24)
-        decl=0.006918-0.399912*math.cos(gamma)+0.070257*math.sin(gamma)-0.006758*math.cos(2*gamma)+0.000907*math.sin(2*gamma)-0.002697*math.cos(3*gamma)+0.00148*math.sin(3*gamma)
-        eq=229.18*(0.000075+0.001868*math.cos(gamma)-0.032077*math.sin(gamma)-0.014615*math.cos(2*gamma)-0.040849*math.sin(2*gamma))
-        tst=hour*60+eq+4*lo; ha=math.radians(tst/4-180); la_r=math.radians(la)
-        cz=math.sin(la_r)*math.sin(decl)+math.cos(la_r)*math.cos(decl)*math.cos(ha)
-        z.append(math.degrees(math.acos(max(-1,min(1,cz)))))
-    return np.asarray(z,float)
+    rad=math.pi/180
+    sun=solar(times)
+    lon=np.asarray(lon,dtype=float); lat=np.asarray(lat,dtype=float)
+    hour_angle=sun['solarTime']+lon-180
+    with np.errstate(invalid='ignore'):
+        cos_zenith=(np.sin(rad*lat)*sun['sinSolarDec']
+                    +np.cos(rad*lat)*sun['cosSolarDec']*np.cos(rad*hour_angle))
+        cos_zenith=np.clip(cos_zenith,-1.0,1.0)
+        return np.arccos(cos_zenith)/rad
 
 def stats_mean(wl,sp,a,b):
     m=(wl>=a)&(wl<=b)
@@ -268,7 +333,8 @@ def apply_optional_nl(raw,cal,apply_nl):
     return AirFloXRaw(apply_nonlinearity(raw.e,coeff),apply_nonlinearity(raw.dc_e,coeff),apply_nonlinearity(raw.e2,coeff),apply_nonlinearity(raw.l,coeff),apply_nonlinearity(raw.dc_l,coeff),raw.it_e_ms,raw.it_l_ms,raw.date,raw.time,raw.temp1,raw.humidity,raw.gps_time,raw.gps_date,raw.gps_lat,raw.gps_lon,raw.cpu1,raw.cpu2)
 
 def stats_on_spectra(wl,start,end,sp,fun='mean'):
-    m=(wl>start)&(wl<end)
+    # R: which(wl >= wlStart & wl <= wlEnd) - the endpoints are inside the range.
+    m=(wl>=start)&(wl<=end)
     if not np.any(m):
         return np.full(sp.shape[1],np.nan)
     sub=sp[m,:]
@@ -280,33 +346,137 @@ def stats_on_spectra(wl,start,end,sp,fun='mean'):
         out[good]=np.nanmin(sub[:,good],axis=0) if fun=='min' else np.nanmean(sub[:,good],axis=0)
     return out
 
+def nknots_smspl(n):
+    """R stats:::.nknots.smspl - how many knots smooth.spline uses for n points."""
+    n=int(n)
+    if n<50: return n
+    a1,a2,a3,a4=math.log2(50),math.log2(100),math.log2(140),math.log2(200)
+    if n<200: v=2**(a1+(a2-a1)*(n-50)/150)
+    elif n<800: v=2**(a2+(a3-a2)*(n-200)/600)
+    elif n<3200: v=2**(a3+(a4-a3)*(n-800)/2400)
+    else: v=200+(n-3200)**0.2
+    return int(v)  # R trunc()
+
+def _bspline_design(knots,nk,xs):
+    from scipy.interpolate import BSpline
+    B=np.zeros((len(xs),nk))
+    eye=np.eye(nk)
+    for i in range(nk):
+        B[:,i]=np.nan_to_num(BSpline(knots,eye[i],3,extrapolate=False)(xs))
+    return B
+
+def _bspline_penalty(knots,nk):
+    """Omega_ij = integral of B_i''(t) B_j''(t) dt, the sgram() matrix in R."""
+    from scipy.interpolate import BSpline
+    eye=np.eye(nk)
+    second=[BSpline(knots,eye[i],3,extrapolate=False).derivative(2) for i in range(nk)]
+    breaks=np.unique(knots)
+    # The second derivative of a cubic B-spline is piecewise linear, so the
+    # integrand is piecewise quadratic and 3-point Gauss-Legendre is exact.
+    gx,gw=np.polynomial.legendre.leggauss(3)
+    omega=np.zeros((nk,nk))
+    for a,b in zip(breaks[:-1],breaks[1:]):
+        if not b>a: continue
+        t=0.5*(b-a)*gx+0.5*(a+b); w=0.5*(b-a)*gw
+        V=np.column_stack([np.nan_to_num(f(t)) for f in second])
+        omega+=V.T@(w[:,None]*V)
+    return omega
+
+_SMOOTH_SPLINE_CACHE={}
+
+def _smooth_spline_basis(x,df,spar_low=-1.5,spar_high=1.5,tol=1e-4,maxit=500):
+    """Set up R's smooth.spline(x, y, df=df) for a fixed x: knots, basis, lambda.
+
+    Everything here depends only on x and df, so the factorisation is shared by
+    every spectrum with the same gap pattern. Reproduces stats::smooth.spline:
+    x is scaled to [0,1], .nknots.smspl chooses the knot count, the penalty is
+    the Gram matrix of the second derivatives, and lambda is searched on R's
+    spar scale until the hat-matrix trace equals the requested df.
+    """
+    key=(x.tobytes(),len(x),float(df))
+    hit=_SMOOTH_SPLINE_CACHE.get(key)
+    if hit is not None: return hit
+    nx=len(x); x0=float(x[0]); r_ux=float(x[-1]-x[0])
+    xbar=(x-x0)/r_ux
+    nknots=nknots_smspl(nx)
+    # R: xbar[seq.int(1, nx, length.out = nknots)] - a double index, truncated.
+    idx=np.trunc(np.linspace(1,nx,nknots)).astype(int)-1
+    knots=np.concatenate([np.repeat(xbar[0],3),xbar[idx],np.repeat(xbar[-1],3)])
+    nk=nknots+2
+    B=_bspline_design(knots,nk,xbar)
+    omega=_bspline_penalty(knots,nk)
+    xtx=B.T@B
+    # sbart.c forms the ratio from the middle of the diagonal band only, not
+    # from the full trace: for(i = 3-1; i < nk-3; ++i) { t1 += hs0[i]; t2 += sg0[i]; }
+    lo_i,hi_i=2,max(3,nk-3)
+    ratio=float(np.sum(np.diag(xtx)[lo_i:hi_i])/np.sum(np.diag(omega)[lo_i:hi_i]))
+
+    def trace_for(spar):
+        lam=ratio*256.0**(3.0*spar-1.0)
+        return float(np.trace(np.linalg.solve(xtx+lam*omega,xtx))),lam
+
+    lo,hi=spar_low,spar_high
+    t_lo,_=trace_for(lo); t_hi,_=trace_for(hi)
+    if df>=t_lo: spar=lo
+    elif df<=t_hi: spar=hi
+    else:
+        for _ in range(maxit):
+            mid=0.5*(lo+hi)
+            t_mid,_=trace_for(mid)
+            if abs(t_mid-df)<tol or (hi-lo)<1e-12: lo=hi=mid; break
+            if t_mid>df: lo=mid
+            else: hi=mid
+        spar=0.5*(lo+hi)
+    trace,lam=trace_for(spar)
+    factor=np.linalg.inv(xtx+lam*omega)@B.T
+    fit=(knots,nk,x0,r_ux,factor,spar,lam,trace)
+    _SMOOTH_SPLINE_CACHE[key]=fit
+    return fit
+
+def _smooth_spline_predict(fit,wl,y):
+    from scipy.interpolate import BSpline
+    knots,nk,x0,r_ux,factor,_spar,_lam,_trace=fit
+    coef=factor@y
+    xs=(np.asarray(wl,float)-x0)/r_ux
+    spline=BSpline(knots,coef,3,extrapolate=False)
+    out=spline(np.clip(xs,0.0,1.0))
+    # R's predict.smooth.spline continues linearly beyond the fitted range.
+    slope=spline.derivative(1)
+    left=xs<0.0; right=xs>1.0
+    if left.any(): out[left]=float(spline(0.0))+float(slope(0.0))*xs[left]
+    if right.any(): out[right]=float(spline(1.0))+float(slope(1.0))*(xs[right]-1.0)
+    return out
+
 def spline_gapfill_matrix(wl,sp,df=80):
-    try:
-        from scipy.interpolate import LSQUnivariateSpline, UnivariateSpline
-    except Exception:
-        out=np.empty_like(sp,dtype=float)
-        for j in range(sp.shape[1]):
-            y=sp[:,j].astype(float); ok=np.isfinite(y)
-            out[:,j]=np.interp(wl,wl[ok],y[ok]) if ok.sum()>=2 else y
-        return out
+    """FieldSpectroscopyCC::SplineSmoothGapfilling, column by column.
+
+    R drops the NA rows, fits smooth.spline(df=80) on what is left, and predicts
+    back onto the full wavelength grid. The earlier port approximated that with
+    a least-squares regression spline, which is a different estimator: it left
+    the smoothed reflectance and irradiance ~1e-1 away from R and moved every
+    retrieved SIF value.
+    """
+    sp=np.asarray(sp,dtype=float)
     out=np.empty_like(sp,dtype=float)
+    masks={}
     for j in range(sp.shape[1]):
-        y=sp[:,j].astype(float); ok=np.isfinite(y)
-        if ok.sum()<4:
-            out[:,j]=np.interp(wl,wl[ok],y[ok]) if ok.sum()>=2 else y
+        ok=np.isfinite(sp[:,j])
+        masks.setdefault(ok.tobytes(),(ok,[]))[1].append(j)
+    for ok,columns in masks.values():
+        count=int(ok.sum())
+        if count<4:
+            for j in columns:
+                y=sp[:,j]
+                out[:,j]=np.interp(wl,wl[ok],y[ok]) if count>=2 else y
             continue
-        xv=wl[ok]; yv=y[ok]
         try:
-            n_knots=max(0,min(int(df)-4,ok.sum()-4))
-            if n_knots>0:
-                knots=np.quantile(xv,np.linspace(0,1,n_knots+2)[1:-1])
-                knots=np.unique(knots[(knots>xv.min())&(knots<xv.max())])
-                fit=LSQUnivariateSpline(xv,yv,knots,k=3) if len(knots)>0 else UnivariateSpline(xv,yv,k=3,s=0)
-            else:
-                fit=UnivariateSpline(xv,yv,k=3,s=0)
-            out[:,j]=fit(wl)
-        except Exception:
-            out[:,j]=np.interp(wl,xv,yv)
+            fit=_smooth_spline_basis(wl[ok],float(df))
+            for j in columns:
+                out[:,j]=_smooth_spline_predict(fit,wl,sp[ok,j])
+        except Exception as exc:
+            print(f'warning=Smoothing spline failed ({exc}); falling back to linear gap filling.')
+            for j in columns:
+                out[:,j]=np.interp(wl,wl[ok],sp[ok,j])
     return out
 
 def ifld_band(wl,e,l,band):
@@ -455,12 +625,18 @@ def match_data(air,log):
     """
     t=pd.read_csv(log)
     t['_match_time']=pd.to_datetime(t['date_time_utc'],utc=True,errors='coerce')
-    t=t.dropna(subset=['_match_time']).sort_values('_match_time').reset_index(drop=True)
+    # A stable sort, because the telemetry is logged at ~10 Hz but timestamped to
+    # the whole second: R's which.min() picks the first row of that second in file
+    # order, and an unstable sort picked an arbitrary one of the ten. Within a
+    # single second the log moves up to 2.5 m in altitude, so the choice showed up
+    # directly in Alt, Lat, Lon and the footprint radius.
+    t=t.dropna(subset=['_match_time']).sort_values('_match_time',kind='stable').reset_index(drop=True)
     if t.empty: raise ValueError(f'No valid date_time_utc rows found in log: {log}')
     rt=t['_match_time'].dt.tz_convert(None).to_numpy(dtype='datetime64[ns]')
+    # R compares the AirFloX time at full precision: bf <- as.numeric(floxtime),
+    # where floxtime is UTC_time + CPU1sec and always carries a fractional part.
+    # Flooring it to the second matched the telemetry sample one second early.
     air_time=pd.to_datetime(air['datetime [UTC]'],utc=True,errors='coerce').dt.tz_convert(None)
-    # R writes/matches at whole-second timestamp precision; floor AirFloX times for matching.
-    air_time=air_time.dt.floor('s')
     ft=air_time.to_numpy(dtype='datetime64[ns]'); valid=~pd.isna(air_time).to_numpy()
     ind=np.searchsorted(rt,ft,side='left')
     matched=valid & (ind < len(rt))
