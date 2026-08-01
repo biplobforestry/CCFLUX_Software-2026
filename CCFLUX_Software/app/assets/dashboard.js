@@ -52,7 +52,6 @@
   let latestScanState = { scans: {} };
   // Reset on each new scan so the coverage window appears once per scan.
   let cameraCoverageAnnounced = false;
-  let sifWorkspaceWindow = null;
 
   document.querySelectorAll('.instrument-card').forEach(card => {
     card.dataset.instrumentId = instrumentIds[card.dataset.name] || '';
@@ -1270,10 +1269,17 @@
     const custom = Object.entries(calibration).filter(([, value]) => value);
     const minutes = Math.floor((progress.elapsed_seconds || 0) / 60);
     const seconds = Math.round((progress.elapsed_seconds || 0) % 60);
+    const status = String(progress.status || 'idle');
+    const finished = ['complete', 'warning'].includes(status);
+    const failed = ['failed', 'cancelled'].includes(status);
     body.innerHTML = `
       <div class="progress-bar"><div class="progress-fill" style="width:${Math.max(0, Math.min(100, progress.percent || 0))}%"></div></div>
-      <p><strong>${(progress.percent || 0).toFixed(1)}%</strong> — ${escapeHtml(progress.step || 'Not started')}</p>
-      <p class="muted">Elapsed ${minutes}m ${String(seconds).padStart(2, '0')}s · status ${escapeHtml(String(progress.status || 'idle'))}</p>
+      ${finished
+        ? '<p><strong class="sif-done">&#10003; Done</strong> — SIF / FLOX processing finished. Open the SIF card for the overview and maps.</p>'
+        : failed
+          ? `<p><strong>Stopped: ${escapeHtml(status)}</strong> — see Processing Log &amp; Diagnostics.</p>`
+          : `<p><strong>${(progress.percent || 0).toFixed(1)}%</strong> — ${escapeHtml(progress.step || 'Not started')}</p>`}
+      <p class="muted">Elapsed ${minutes}m ${String(seconds).padStart(2, '0')}s · status ${escapeHtml(status)}</p>
       <ul class="stage-list">${rows}</ul>
       <p class="muted">${custom.length
         ? `Custom files: ${custom.map(([, value]) => escapeHtml(fileName(value))).join(', ')}`
@@ -1283,9 +1289,11 @@
 
   async function refreshSifProgress() {
     try {
-      renderSifProgress(await api('/api/sif/progress'));
+      const progress = await api('/api/sif/progress');
+      renderSifProgress(progress);
+      return String(progress.status || '');
     } catch (_) {
-      // A failed poll must not close the window or disturb processing.
+      return '';        // a failed poll must not close the window or stop the run
     }
   }
 
@@ -1300,15 +1308,24 @@
     };
     refreshSifProgress();
     if (sifProgressTimer) clearInterval(sifProgressTimer);
-    sifProgressTimer = setInterval(() => {
+    sifProgressTimer = setInterval(async () => {
       if (!modal.classList.contains('show')) {
         clearInterval(sifProgressTimer); sifProgressTimer = null; return;
       }
-      refreshSifProgress();
+      const status = await refreshSifProgress();
+      if (['complete', 'warning', 'failed', 'cancelled'].includes(status)) {
+        clearInterval(sifProgressTimer); sifProgressTimer = null;
+      }
     }, 1500);
   }
 
-  function openSifConfiguration() {
+  // beforeProcessing turns the dialog into the settings step of a processing
+  // run: it resolves true when the operator saves and wants to go ahead, false
+  // when they back out, so the caller can wait for the answer.
+  function openSifConfiguration(options = {}) {
+    const beforeProcessing = Boolean(options.beforeProcessing);
+    let settle = () => {};
+    const answered = new Promise(resolve => { settle = resolve; });
     const options = latestScanState.sif_options || {};
     const modes = options.modes || ['FULL', 'FLUO'];
     const checked = value => value ? 'checked' : '';
@@ -1339,11 +1356,18 @@
         ${sifEssentialRow('calibration_fluo', 'FLUO calibration', options.calibration_fluo)}
         ${sifEssentialRow('indices_file', 'Vegetation-index definitions', options.indices_file)}
       </div>
-      <div class="modal-actions"><button class="btn" id="cancelSifOptions">Cancel</button><button class="btn primary" id="saveSifOptions">Save SIF options</button></div>`;
+      <div class="modal-actions"><button class="btn" id="cancelSifOptions">${
+        beforeProcessing ? 'Cancel processing' : 'Cancel'
+      }</button><button class="btn primary" id="saveSifOptions">${
+        beforeProcessing ? 'Save and start processing' : 'Save SIF options'
+      }</button></div>`;
     modal.classList.add('show');
     document.getElementById('sifPositionMode').value = options.position_mode || 'uav_airship';
     wireSifEssentialButtons();
-    document.getElementById('cancelSifOptions').onclick = () => modal.classList.remove('show');
+    document.getElementById('cancelSifOptions').onclick = () => {
+      modal.classList.remove('show');
+      settle(false);
+    };
     document.getElementById('saveSifOptions').onclick = async () => {
       const value = id => document.getElementById(id).value.trim();
       const rawMinKb = Number(value('sifRawMinKb'));
@@ -1378,11 +1402,16 @@
         });
         latestScanState.sif_options = response.options;
         modal.classList.remove('show');
-        showToast('SIF options saved. Select SIF and click Start Processing when ready.');
+        if (beforeProcessing) {
+          settle(true);
+        } else {
+          showToast('SIF options saved. Select SIF and click Start Processing when ready.');
+        }
       } catch (error) {
         showToast(error.message);
       }
     };
+    return answered;
   }
 
   function logRemoteWorkflow(message, step) {
@@ -1717,17 +1746,29 @@
     const sifSelected = (currentQueue.jobs || []).some(job =>
       job.job_id === 'sif' && job.enabled && !job.previously_completed
     );
-    if (sifSelected && (!sifWorkspaceWindow || sifWorkspaceWindow.closed)) {
-      sifWorkspaceWindow = window.open(
-        '/sif/overview',
-        'ccflux-sif-workspace'
-      );
+    // SIF is the one instrument whose run depends on choices the operator has
+    // to make - modes, position source, corrections, calibration files - so it
+    // asks for them here rather than using whatever was left from last time.
+    if (sifSelected) {
+      const proceed = await openSifConfiguration({ beforeProcessing: true });
+      if (!proceed) {
+        showToast('Processing cancelled. No instrument was started.');
+        return;
+      }
     }
     try {
       const response = await api('/api/processing/start', { method: 'POST', body: JSON.stringify({ confirmed_limited_coverage: Boolean(confirmedLimitedCoverage) }) });
       renderScanState(response.state);
+      if (sifSelected) {
+        // Progress is shown here, in the window that owns the run. The SIF
+        // workspace used to be opened automatically to act as a progress
+        // monitor, which left a second window sitting at 0% for the whole run -
+        // and for good if the run never started. It now opens only when the
+        // operator clicks the SIF card, and only ever shows finished products.
+        openSifProgressWindow();
+      }
       showToast(sifSelected
-        ? 'Processing started. The SIF workspace will follow progress and display results automatically.'
+        ? 'Processing started. SIF progress is shown here; open the SIF card for the maps when it is done.'
         : 'Processing started with the selected instruments and global Time Filter.');
     } catch (error) { showToast(error.message); }
   }

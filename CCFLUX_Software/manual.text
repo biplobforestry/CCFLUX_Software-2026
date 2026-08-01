@@ -99,8 +99,13 @@ overlaps the Time Filter.
   export rotation is detected and restored to chronological order.
 * **SIF / FLOX** — AirFLOX spectral fluorescence in FULL and FLUO modes with
   configurable corrections, position mode and vegetation indices.
-  **Configure SIF** sets the modes to process, the position source, the
-  corrections, and the calibration files. The validated CAL_FROG calibration
+  Starting processing with SIF selected opens the settings first — modes,
+  position source, corrections and calibration files — and the run begins when
+  you save them. Progress is shown in the main window, stage by stage, and says
+  Done when it finishes. The SIF workspace opens when you click the SIF card,
+  and shows the overview, plots and maps once the products exist; it does not
+  open by itself and does not run the processing.
+  **Configure SIF** sets the same options at any time. The validated CAL_FROG calibration
   and Indices_ICOS definitions shipped with CC-FLUX are used by default; a
   recalibrated instrument or a different index list can be selected instead,
   separately for FULL and FLUO, and **Use default** reverts. The chosen file is

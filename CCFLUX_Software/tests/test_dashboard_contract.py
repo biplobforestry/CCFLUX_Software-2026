@@ -306,7 +306,14 @@ def test_dashboard_and_server_expose_complete_sif_workspace():
     assert "Configure SIF" in dashboard_script
     assert "/api/sif/options" in dashboard_script
     assert "sifRawMinKb" in dashboard_script
-    assert "ccflux-sif-workspace" in dashboard_script
+    # The workspace is opened by clicking the SIF card, not automatically when
+    # processing starts. Auto-opening it left a second window acting as a
+    # progress monitor, stuck at 0% for the whole run - and for good if the run
+    # never started. Progress belongs in the window that owns the run.
+    assert "ccflux-sif-workspace" not in dashboard_script
+    assert "window.open(\n        '/sif/overview'" not in dashboard_script
+    assert "openSifConfiguration({ beforeProcessing: true })" in dashboard_script
+    assert "openSifProgressWindow()" in dashboard_script
     for label in ("Variables", "Vegetation Index", "Manual", "Map view"):
         assert label in sif_html
     for plot_id in (

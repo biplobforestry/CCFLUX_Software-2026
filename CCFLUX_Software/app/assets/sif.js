@@ -239,17 +239,22 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
           : response.message || 'Process SIF / FLOX from the Main GUI first.';
         document.getElementById('summaryGrid').innerHTML = `<div class="summary"><span>Status</span><strong>Not ready</strong><small>${escapeHtml(response.message || '')}</small></div>`;
         document.querySelector('.chart-grid').style.display = 'none';
+        // This page shows the products; it does not run the job and must not
+        // look as though it does. A blocking spinner here sat at 0% for as long
+        // as the run took, and stayed there for good if the run never started.
+        // Progress belongs in the main window, which owns the processing.
+        document.getElementById('busy').classList.remove('show');
+        document.getElementById('summaryGrid').innerHTML = active || publishing
+          ? `<div class="summary"><span>Status</span><strong>${
+              publishing ? 'Publishing' : 'Processing in the main window'
+            }</strong><small>${escapeHtml(state.processing_step || '')}${
+              progress ? ` · ${progress.toFixed(0)}%` : ''
+            }<br>This page will show the products when it finishes.</small></div>`
+          : `<div class="summary"><span>Status</span><strong>Not processed yet</strong><small>${
+              escapeHtml(response.message || '')
+            }<br>Select SIF in the main window and start processing.</small></div>`;
         if (active || publishing) {
-          keepBusy = true;
-          document.getElementById('busyTitle').textContent = publishing
-            ? 'Publishing SIF / FLOX workspace'
-            : 'Processing SIF / FLOX';
-          document.getElementById('busyMessage').textContent =
-            state.processing_step || 'Preparing scientific products…';
-          document.querySelector('#sifProgress span').style.width = `${progress}%`;
-          document.getElementById('sifProgressValue').textContent =
-            `${progress.toFixed(0)}% complete`;
-          retryTimer = setTimeout(load, 900);
+          retryTimer = setTimeout(load, 2000);
         }
         return;
       }
