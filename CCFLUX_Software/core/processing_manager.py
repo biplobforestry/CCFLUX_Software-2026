@@ -94,7 +94,7 @@ class ProcessingPriorityQueue:
             job.order = len(self._jobs)
             if not job.enabled:
                 job.status = ProcessingStatus.PAUSED
-                job.current_step = "Disabled"
+                job.current_step = "Not selected"
             self._jobs[job.job_id] = job
 
     def ordered(self) -> tuple[ProcessingJob, ...]:
@@ -138,7 +138,7 @@ class ProcessingPriorityQueue:
                 job.current_step = "Waiting"
             elif not enabled and job.status is ProcessingStatus.QUEUED:
                 job.status = ProcessingStatus.PAUSED
-                job.current_step = "Disabled"
+                job.current_step = "Not selected"
 
     def pause(self, job_id: str) -> None:
         with self._lock:

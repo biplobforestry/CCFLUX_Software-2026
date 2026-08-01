@@ -3471,6 +3471,13 @@ class DashboardScanBackend:
                     + "; ".join(limited_coverage)
                     + ". Review availability and confirm processing."
                 )
+            missing_navigation = self._noseboom_dependency_messages(integrated_tasks)
+            if missing_navigation and not confirmed_limited_coverage:
+                raise ValueError(
+                    "Noseboom is not selected, and it is the navigation reference: "
+                    + "; ".join(missing_navigation)
+                    + ". Select Noseboom, or confirm to process without positions."
+                )
             registered = []
             skipped = []
             for job_id, task in integrated_tasks.items():
@@ -3535,6 +3542,38 @@ class DashboardScanBackend:
             if percentage is not None and 0 < percentage < 100:
                 messages.append(f"{job.display_name} ({percentage:.1f}% available)")
         return messages
+    # What each of these needs from the Noseboom, in the operator's terms.
+    NOSEBOOM_DEPENDENTS = {
+        "gopro": "capture positions",
+        "flir": "frame georeferencing",
+    }
+
+    def _noseboom_dependency_messages(self, tasks) -> list[str]:
+        """Selected products that would come out without positions.
+
+        GoPro and the detailed FLIR conversion both read the Noseboom's
+        *processed* 1 Hz navigation. Leaving the Noseboom unselected used to be
+        silent: the run finished, and the camera products came out with no
+        positions and nothing said why. The Noseboom is the campaign's UTC and
+        navigation reference, so this is worth stopping for.
+        """
+        noseboom = self.processing_queue.get("noseboom")
+        already_processed = bool(
+            self._instruments["noseboom"].quicklook.get("points")
+        )
+        if noseboom.enabled or already_processed:
+            return []
+        messages: list[str] = []
+        for job in self.processing_queue.ordered():
+            if not job.enabled or job.job_id not in tasks:
+                continue
+            needs = self.NOSEBOOM_DEPENDENTS.get(job.instrument_id)
+            if needs and _instrument_is_processable(
+                self._instruments[job.instrument_id]
+            ):
+                messages.append(f"{job.display_name} would have no {needs}")
+        return messages
+
     def _validate_processing_preflight(self, tasks) -> None:
         if self._selected_folder is None:
             raise ValueError("Select a Flight Folder before processing")
