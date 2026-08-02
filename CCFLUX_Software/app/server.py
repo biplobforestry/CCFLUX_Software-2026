@@ -342,10 +342,14 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 result = self.server.backend.select_and_start()
                 self._send_json(HTTPStatus.OK, result)
             elif path == "/api/select-scan-folders":
-                result = self.server.backend.select_folders()
+                result = self.server.backend.select_folders(
+                    self._json_body().get("folder")
+                )
                 self._send_json(HTTPStatus.OK, result)
             elif path == "/api/select-camera-folder":
-                result = self.server.backend.select_camera_folder()
+                result = self.server.backend.select_camera_folder(
+                    self._json_body().get("folder")
+                )
                 self._send_json(HTTPStatus.OK, result)
             elif path == "/api/scan":
                 body = self._json_body()
@@ -361,7 +365,10 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.ACCEPTED, result)
             elif path == "/api/select-output-folder":
                 self._send_json(
-                    HTTPStatus.OK, self.server.backend.select_output_folder()
+                    HTTPStatus.OK,
+                    self.server.backend.select_output_folder(
+                        self._json_body().get("folder")
+                    ),
                 )
             elif path == "/api/project/save":
                 miro_rack = self.server.miro_rack.persist_main_project()

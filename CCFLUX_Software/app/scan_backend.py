@@ -489,11 +489,13 @@ class FolderDialog:
         selection, failure = self._run_chooser_script(hosted)
         if selection is not None or failure is None:
             return selection
-        # Finder could not be used. Say so, then ask without it.
-        LOGGER.warning(
-            "The folder window could not be opened through Finder (%s). "
-            "Trying again without it; the window may open behind the browser.",
-            failure,
+        # Finder could not be used. Say so where the operator will see it: this
+        # used to go to a module logger wired to nothing, so a machine that
+        # refused the Automation permission left no trace anywhere.
+        LOGGER.warning("Finder could not open the folder window: %s", failure)
+        self._chooser_warning = (
+            f"The folder window could not be opened through Finder ({failure}). "
+            "Trying again without it; it may appear behind the browser."
         )
         selection, fallback_failure = self._run_chooser_script(
             f"POSIX path of ({chooser_clause})"
@@ -759,11 +761,13 @@ class DashboardScanBackend:
             return Path(current_file).name
         return relative.parts[0] if relative.parts else Path(current_file).name
 
-    def select_output_folder(self) -> dict[str, object]:
-        self.logger.log(
-            LogLevel.INFO, "output-folder", "Opening Output Folder chooser"
-        )
-        folder = self._choose_folder_once(
+    def select_output_folder(self, folder: str | Path | None = None) -> dict[str, object]:
+        typed = self._typed_folder("output-folder", folder)
+        if typed is None:
+            self.logger.log(
+                LogLevel.INFO, "output-folder", "Opening Output Folder chooser"
+            )
+        folder = typed or self._choose_folder_once(
             "output-folder", self.folder_dialog.choose_output_folder
         )
         if folder is None:
@@ -821,6 +825,20 @@ class DashboardScanBackend:
             ),
         )
 
+    def _typed_folder(self, component: str, folder: str | Path | None) -> Path | None:
+        """Accept a path the operator typed instead of opening a window."""
+        if folder in (None, ""):
+            return None
+        candidate = Path(str(folder)).expanduser()
+        if not candidate.is_dir():
+            raise ValueError(f"No such folder: {candidate}")
+        resolved = candidate.resolve(strict=False)
+        self.logger.log(
+            LogLevel.INFO, component, f"Folder entered directly: {resolved}",
+            file_path=resolved,
+        )
+        return resolved
+
     def _choose_folder_once(
         self, component: str, chooser: Callable[[], Path | None]
     ) -> Path | None:
@@ -845,14 +863,25 @@ class DashboardScanBackend:
         self._dialog_holder = (component, time.monotonic())
         try:
             self.logger.log(LogLevel.INFO, component, "Opening folder chooser")
-            return chooser()
+            self.folder_dialog._chooser_warning = None
+            selected = chooser()
+            note = getattr(self.folder_dialog, "_chooser_warning", None)
+            if note:
+                self.logger.log(LogLevel.WARNING, component, note)
+            return selected
         finally:
             self._dialog_holder = (None, None)
             self._dialog_lock.release()
 
-    def select_folders(self) -> dict[str, object]:
-        """Select only the Flight Folder; camera selection is an explicit action."""
-        folder = self._choose_folder_once(
+    def select_folders(self, folder: str | Path | None = None) -> dict[str, object]:
+        """Select only the Flight Folder; camera selection is an explicit action.
+
+        ``folder`` sets it directly. macOS decides for itself whether a window
+        opened by a launcher-started server may come to the front, so the native
+        chooser sometimes appears behind the browser and the operator sees
+        nothing happen. Typing the path always works.
+        """
+        folder = self._typed_folder("flight-folder", folder) or self._choose_folder_once(
             "flight-folder", self.folder_dialog.choose_flight_folder
         )
         if folder is None:
@@ -919,11 +948,13 @@ class DashboardScanBackend:
             "camera_folder": None,
         }
 
-    def select_camera_folder(self) -> dict[str, object]:
+    def select_camera_folder(self, folder: str | Path | None = None) -> dict[str, object]:
         chooser = getattr(self.folder_dialog, "choose_camera_folder", None)
         if not callable(chooser):
             raise RuntimeError("Camera Folder selection is not available")
-        folder = self._choose_folder_once("camera-folder", chooser)
+        folder = self._typed_folder("camera-folder", folder) or self._choose_folder_once(
+            "camera-folder", chooser
+        )
         if folder is None:
             self.logger.log(
                 LogLevel.INFO, "camera-folder", "Camera Folder selection cancelled"

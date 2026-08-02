@@ -137,3 +137,58 @@ def test_a_network_failure_is_explained_rather_than_reported_raw():
 
     assert "The CC-FLUX server did not respond" in script
     assert "still open" in script
+
+
+# --------------------------------------------------------------------------
+# A typed path, because the native window cannot be relied on to be visible
+# --------------------------------------------------------------------------
+def test_a_typed_path_selects_without_any_window(tmp_path):
+    """Measured on macOS: the same request from a launcher-started server
+    sometimes leaves the Finder window behind the browser and sometimes brings
+    it forward. Focus is the operating system's decision, so selection cannot
+    depend on it."""
+    from app.scan_backend import DashboardScanBackend
+
+    class _NeverCalled:
+        def choose_flight_folder(self):
+            raise AssertionError("the native window must not be opened")
+        def choose_camera_folder(self): return self.choose_flight_folder()
+        def choose_output_folder(self): return self.choose_flight_folder()
+
+    backend = DashboardScanBackend(tmp_path, folder_dialog=_NeverCalled())
+    flight = tmp_path / "flight"; flight.mkdir()
+
+    result = backend.select_folders(flight)
+
+    assert result["cancelled"] is False
+    assert result["folder"] == str(flight.resolve())
+
+
+def test_a_typed_path_is_checked(tmp_path):
+    from app.scan_backend import DashboardScanBackend
+
+    backend = DashboardScanBackend(tmp_path)
+
+    with pytest.raises(ValueError, match="No such folder"):
+        backend.select_folders(tmp_path / "absent")
+
+
+def test_a_home_relative_path_is_expanded(tmp_path):
+    from app.scan_backend import DashboardScanBackend
+
+    backend = DashboardScanBackend(tmp_path)
+
+    assert backend._typed_folder("flight-folder", "~") == Path.home().resolve()
+
+
+def test_every_folder_button_offers_both(tmp_path):
+    """The path box has to be on all three, or one of them is still a dead end."""
+    script = (Path(__file__).parents[1] / "app" / "assets" / "dashboard.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert script.count("chooseFolder(") >= 4      # the helper plus three callers
+    for endpoint in ("/api/select-scan-folders", "/api/select-camera-folder",
+                     "/api/select-output-folder"):
+        assert f"chooseFolder('{endpoint}'" in script, endpoint
+    assert "It can appear behind this" in script, "the operator must be told where it is"

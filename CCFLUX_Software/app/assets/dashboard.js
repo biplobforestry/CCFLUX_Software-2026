@@ -381,7 +381,7 @@
     showToast('Opening Output Folder window...');
     await nextPaint();
     try {
-      const result = await api('/api/select-output-folder', { method: 'POST' });
+      const result = await chooseFolder('/api/select-output-folder', 'Output Folder');
       if (result.cancelled) {
         showToast('Output Folder selection cancelled.');
         return;
@@ -521,13 +521,60 @@
     return new Promise(resolve => requestAnimationFrame(() => resolve()));
   }
 
+
+  // macOS decides for itself whether a window opened by a launcher-started
+  // server may come to the front. Measured on this machine: the same request
+  // sometimes leaves the Finder window behind the browser and sometimes brings
+  // it forward. So the operator is told the window is open and where to look,
+  // and is given a path box that always works.
+  function chooseFolder(endpoint, label) {
+    return new Promise(resolve => {
+      modalTitle.textContent = `Select the ${label}`;
+      modalBody.innerHTML = `
+        <p>A folder window is opening. <strong>It can appear behind this
+        window</strong> — check the Dock if you do not see it.</p>
+        <p class="muted">Or type the folder path here, which always works:</p>
+        <label class="form-row"><span>${escapeHtml(label)}</span>
+          <input id="folderPathInput" placeholder="/Volumes/... or C:\\..." autofocus></label>
+        <div id="folderChooseStatus" class="muted"></div>
+        <div class="modal-actions">
+          <button class="btn" id="folderChooseCancel">Cancel</button>
+          <button class="btn primary" id="folderChooseUse">Use this path</button>
+        </div>`;
+      modal.classList.add('show');
+      let settled = false;
+      const finish = value => {
+        if (settled) return;
+        settled = true;
+        modal.classList.remove('show');
+        resolve(value);
+      };
+      const status = document.getElementById('folderChooseStatus');
+      document.getElementById('folderChooseCancel').onclick = () => finish({ cancelled: true });
+      const useTyped = async () => {
+        const folder = document.getElementById('folderPathInput').value.trim();
+        if (!folder) { status.textContent = 'Enter a path, or use the folder window.'; return; }
+        try {
+          finish(await api(endpoint, { method: 'POST', body: JSON.stringify({ folder }) }));
+        } catch (error) { status.textContent = error.message; }
+      };
+      document.getElementById('folderChooseUse').onclick = useTyped;
+      document.getElementById('folderPathInput').addEventListener('keydown', event => {
+        if (event.key === 'Enter') { event.preventDefault(); useTyped(); }
+      });
+      // The native window runs alongside; whichever answers first wins.
+      api(endpoint, { method: 'POST', body: '{}' })
+        .then(selection => { if (!selection.cancelled) finish(selection); })
+        .catch(error => { if (!settled) status.textContent = error.message; });
+    });
+  }
+
   async function selectFlightFolder() {
     const button = document.getElementById('openFolderBtn');
     button.disabled = true;
-    showToast('Opening Flight Folder window...');
     await nextPaint();
     try {
-      const selection = await api('/api/select-scan-folders', { method: 'POST' });
+      const selection = await chooseFolder('/api/select-scan-folders', 'Flight Folder');
       if (selection.cancelled) {
         showToast('Flight Folder selection cancelled.');
         return null;
@@ -554,7 +601,7 @@
         showToast('Select a Flight Folder first.');
         return;
       }
-      const result = await api('/api/select-camera-folder', { method: 'POST' });
+      const result = await chooseFolder('/api/select-camera-folder', 'Camera Folder');
       if (result.cancelled) {
         showToast('Camera Folder selection cancelled.');
         return;
@@ -1951,7 +1998,7 @@
         modal.classList.remove('show');
         showToast('Select an Output Folder to continue processing.');
         await nextPaint();
-        const outputSelection = await api('/api/select-output-folder', { method: 'POST' });
+        const outputSelection = await chooseFolder('/api/select-output-folder', 'Output Folder');
         if (outputSelection.cancelled) {
           showToast('Output Folder selection cancelled. Processing was not started.');
           return;
