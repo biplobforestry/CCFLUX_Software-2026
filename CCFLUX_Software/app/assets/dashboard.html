@@ -1071,6 +1071,43 @@
       border-bottom: 1px solid var(--line);
     }
 
+    .modal-header-buttons {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    /* Minimised dialogs park here. A long SIF run can be set aside without
+       losing the window it reports into, so the dashboard stays usable. */
+    .modal-restore {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 3200;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      max-width: min(420px, 90vw);
+      padding: 10px 16px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: #12263b;
+      color: var(--text);
+      font: inherit;
+      font-size: 0.92rem;
+      box-shadow: var(--shadow);
+      cursor: pointer;
+    }
+
+    .modal-restore[hidden] { display: none; }
+    .modal-restore:hover { border-color: var(--accent); }
+
+    .modal-restore .restore-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .modal-body {
       max-height: calc(88vh - 74px);
       overflow: auto;
@@ -2322,11 +2359,18 @@
     <div class="modal-card">
       <div class="modal-header">
         <strong id="modalTitle">Instrument</strong>
-        <button class="close-btn" id="closeModal">×</button>
+        <div class="modal-header-buttons">
+          <button class="close-btn" id="minimizeModal" title="Minimize this window" aria-label="Minimize this window">&#8211;</button>
+          <button class="close-btn" id="closeModal" title="Close this window" aria-label="Close this window">×</button>
+        </div>
       </div>
       <div class="modal-body" id="modalBody"></div>
     </div>
   </div>
+
+  <button class="modal-restore" id="modalRestore" hidden aria-label="Restore the minimized window">
+    <span aria-hidden="true">&#9633;</span><span class="restore-label" id="modalRestoreLabel"></span>
+  </button>
 
   <section class="scan-window flight" id="flightScanWindow" role="dialog" aria-labelledby="flightScanTitle" title="Scanning Flight Data">
     <div class="scan-window-header">

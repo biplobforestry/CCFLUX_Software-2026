@@ -214,7 +214,7 @@
     await refreshUpdateStatus(false);
     modalTitle.textContent = 'Software Update';
     renderUpdateDialog();
-    modal.classList.add('show');
+    showModal();
   });
 
   document.getElementById('softwareUpdateBtn').addEventListener('contextmenu', event => {
@@ -263,9 +263,59 @@
     document.getElementById(id).addEventListener('change', synchronizeFlightTimes);
   });
 
-  document.getElementById('closeModal').addEventListener('click', () => modal.classList.remove('show'));
+  // ----------------------------------------------------------- modal window
+  // A dialog that asks a question hands its resolver to modalPendingAnswer, so
+  // that closing the window by any route answers the caller. SIF hung exactly
+  // here: the run waited on a dialog the operator had already dismissed with
+  // the X, so processing never started and nothing said why.
+  let modalPendingAnswer = null;
+  let modalMinimized = false;
+  const modalRestore = document.getElementById('modalRestore');
+  const modalRestoreLabel = document.getElementById('modalRestoreLabel');
+
+  function modalIsOpen() {
+    // Minimised still counts as open: the dialog owns its run either way, and
+    // pollers must keep going rather than freeze behind the operator's back.
+    return modal.classList.contains('show') || modalMinimized;
+  }
+
+  function showModal() {
+    // A fresh dialog replaces the body, so nothing minimised can survive it.
+    modalMinimized = false;
+    modalRestore.hidden = true;
+    showModal();
+  }
+
+  function settleModalAnswer(answer) {
+    const pending = modalPendingAnswer;
+    modalPendingAnswer = null;
+    if (pending) pending(answer);
+  }
+
+  function closeModal() {
+    modal.classList.remove('show');
+    modalMinimized = false;
+    modalRestore.hidden = true;
+    settleModalAnswer(false);
+  }
+
+  function minimizeModal() {
+    if (!modal.classList.contains('show')) return;
+    modalMinimized = true;
+    modal.classList.remove('show');
+    modalRestoreLabel.textContent = modalTitle.textContent;
+    modalRestore.hidden = false;
+  }
+
+  document.getElementById('closeModal').addEventListener('click', closeModal);
+  document.getElementById('minimizeModal').addEventListener('click', minimizeModal);
+  modalRestore.addEventListener('click', () => {
+    modalMinimized = false;
+    modalRestore.hidden = true;
+    modal.classList.add('show');
+  });
   modal.addEventListener('click', event => {
-    if (event.target === modal) modal.classList.remove('show');
+    if (event.target === modal) closeModal();
   });
 
   document.getElementById('refreshBtn').addEventListener('click', async () => {
@@ -460,7 +510,7 @@
       modal.classList.remove('show');
       document.getElementById('openProjectBtn').click();
     };
-    modal.classList.add('show');
+    showModal();
   }
 
   document.getElementById('openProjectBtn').addEventListener('click', async () => {
@@ -486,7 +536,7 @@
           modal.classList.remove('show');
           button.click();
         };
-        modal.classList.add('show');
+        showModal();
         return;
       }
       if (discovery.projects.length === 1) {
@@ -541,7 +591,7 @@
           <button class="btn" id="folderChooseCancel">Cancel</button>
           <button class="btn primary" id="folderChooseUse">Use this path</button>
         </div>`;
-      modal.classList.add('show');
+      showModal();
       let settled = false;
       const finish = value => {
         if (settled) return;
@@ -636,7 +686,7 @@
       modal.classList.remove('show');
       await startSelectedScans(selection, true);
     };
-    modal.classList.add('show');
+    showModal();
   }
 
   async function startSelectedScans(selection, includeCamera = false) {
@@ -692,7 +742,7 @@
       </div>`;
     document.getElementById('cancelSystemReset').onclick = () => modal.classList.remove('show');
     document.getElementById('confirmSystemReset').onclick = resetSystem;
-    modal.classList.add('show');
+    showModal();
   }
 
   async function resetSystem() {
@@ -722,7 +772,7 @@
       </div>`;
     document.getElementById('cancelApplicationExit').onclick = () => modal.classList.remove('show');
     document.getElementById('confirmApplicationExit').onclick = exitApplication;
-    modal.classList.add('show');
+    showModal();
   }
 
   async function exitApplication() {
@@ -831,7 +881,7 @@
       await cancelScan(source);
       if (hideAfter) document.getElementById(`${source}ScanWindow`).classList.remove('show');
     };
-    modal.classList.add('show');
+    showModal();
   }
   function startPolling() {
     cameraCoverageAnnounced = false;
@@ -1108,11 +1158,16 @@
       const rowClass = job.status === 'processing' ? 'is-processing' : job.status === 'complete' ? 'is-complete' : job.status === 'failed' ? 'is-failed' : job.status === 'warning' ? 'is-warning' : '';
       const statusClass = job.status === 'complete' ? 'complete' : job.status === 'processing' ? 'running' : ['warning', 'failed'].includes(job.status) ? 'warning' : 'queued';
       const actions = [];
-      if (job.previously_completed && !job.detailed) {
-        actions.push(`<button class="btn" data-queue-action="reprocess" ${busy ? 'disabled' : ''}>Reprocess</button>`);
-      } else if (job.instrument_id === 'sif' && !job.detailed) {
+      if (job.instrument_id === 'sif' && !job.detailed) {
+        // Configuration stays reachable after a completed run. Changing a
+        // setting is the usual reason to run SIF again, and the dialog offers
+        // to save and restart in one step, so SIF needs no Reprocess button of
+        // its own - it used to get one *instead* of Configure, which left no
+        // route back to the settings at all once a run had finished.
         actions.push(`<button class="btn" data-queue-action="configure_sif" ${busy ? 'disabled' : ''}>Configure SIF</button>`);
         actions.push(`<button class="btn" data-queue-action="sif_progress">SIF Progress</button>`);
+      } else if (job.previously_completed && !job.detailed) {
+        actions.push(`<button class="btn" data-queue-action="reprocess" ${busy ? 'disabled' : ''}>Reprocess</button>`);
       }
       const selectable = Boolean(job.available_for_selection);
       const selectionNote = selectable ? '' : ` · ${escapeHtml(job.selection_reason || 'Not available for selection')}`;
@@ -1192,7 +1247,7 @@
         <button class="btn" id="cancelReprocess">Keep previous result</button>
         <button class="btn danger" id="confirmReprocess">Queue reprocessing</button>
       </div>`;
-    modal.classList.add('show');
+    showModal();
     document.getElementById('cancelReprocess').onclick = () => {
       modal.classList.remove('show');
     };
@@ -1314,7 +1369,7 @@
     modalTitle.textContent = 'SIF / FLOX processing progress';
     modalBody.innerHTML = `<div id="sifProgressBody"><p class="muted">Loading…</p></div>
       <div class="modal-actions"><button class="btn" id="closeSifProgress">Close</button></div>`;
-    modal.classList.add('show');
+    showModal();
     document.getElementById('closeSifProgress').onclick = () => {
       modal.classList.remove('show');
       if (sifProgressTimer) { clearInterval(sifProgressTimer); sifProgressTimer = null; }
@@ -1322,7 +1377,9 @@
     refreshSifProgress();
     if (sifProgressTimer) clearInterval(sifProgressTimer);
     sifProgressTimer = setInterval(async () => {
-      if (!modal.classList.contains('show')) {
+      // modalIsOpen(), not the class: a minimised window is still this run's
+      // reporter, and must not silently stop updating while it is set aside.
+      if (!modalIsOpen()) {
         clearInterval(sifProgressTimer); sifProgressTimer = null; return;
       }
       const status = await refreshSifProgress();
@@ -1339,6 +1396,12 @@
     // Named apart from the SIF options below: one is how the dialog behaves,
     // the other is the instrument configuration it edits.
     const beforeProcessing = Boolean(dialogOptions.beforeProcessing);
+    // Opening the settings a second time, after SIF has already produced a
+    // result, means the operator wants different settings applied - which is
+    // only meaningful if the run is repeated. So the dialog offers to do both
+    // rather than saving settings that would sit unused until a manual requeue.
+    const sifJob = (currentQueue.jobs || []).find(job => job.job_id === 'sif');
+    const canRestart = !beforeProcessing && Boolean(sifJob && sifJob.previously_completed);
     let settle = () => {};
     const answered = new Promise(resolve => { settle = resolve; });
     const options = latestScanState.sif_options || {};
@@ -1371,16 +1434,27 @@
         ${sifEssentialRow('calibration_fluo', 'FLUO calibration', options.calibration_fluo)}
         ${sifEssentialRow('indices_file', 'Vegetation-index definitions', options.indices_file)}
       </div>
+      ${canRestart
+        ? '<p class="muted">SIF has already been processed for this flight. Saving these settings runs it again and replaces the previous result.</p>'
+        : ''}
       <div class="modal-actions"><button class="btn" id="cancelSifOptions">${
         beforeProcessing ? 'Cancel processing' : 'Cancel'
       }</button><button class="btn primary" id="saveSifOptions">${
-        beforeProcessing ? 'Save and start processing' : 'Save SIF options'
+        beforeProcessing
+          ? 'Save and start processing'
+          : canRestart ? 'Save and restart processing' : 'Save SIF options'
       }</button></div>`;
-    modal.classList.add('show');
+    showModal();
+    // Registered before any await, so dismissing the window by the X or the
+    // backdrop answers a waiting caller instead of stranding it.
+    if (beforeProcessing) modalPendingAnswer = settle;
     document.getElementById('sifPositionMode').value = options.position_mode || 'uav_airship';
     wireSifEssentialButtons();
     document.getElementById('cancelSifOptions').onclick = () => {
+      modalPendingAnswer = null;
       modal.classList.remove('show');
+      modalMinimized = false;
+      modalRestore.hidden = true;
       settle(false);
     };
     document.getElementById('saveSifOptions').onclick = async () => {
@@ -1416,12 +1490,31 @@
           body: JSON.stringify(payload)
         });
         latestScanState.sif_options = response.options;
+        modalPendingAnswer = null;
         modal.classList.remove('show');
+        modalMinimized = false;
+        modalRestore.hidden = true;
         if (beforeProcessing) {
           settle(true);
-        } else {
-          showToast('SIF options saved. Select SIF and click Start Processing when ready.');
+          return;
         }
+        if (!canRestart) {
+          showToast('SIF options saved. Select SIF and click Start Processing when ready.');
+          return;
+        }
+        // Requeue explicitly: the backend refuses to overwrite a completed
+        // result without it, and rightly so.
+        await api('/api/queue', {
+          method: 'POST',
+          body: JSON.stringify({ action: 'reprocess', job_id: 'sif', confirmed: true })
+        });
+        const started = await api('/api/processing/start', {
+          method: 'POST',
+          body: JSON.stringify({ confirmed_limited_coverage: true })
+        });
+        renderScanState(started.state);
+        openSifProgressWindow();
+        showToast('SIF options saved. Processing restarted with the new settings.');
       } catch (error) {
         showToast(error.message);
       }
@@ -1596,7 +1689,7 @@
         refreshHybridState();
       } catch (error) { showToast(error.message); }
     };
-    modal.classList.add('show');
+    showModal();
   }
 
   function showWorkPackageDialog() {
@@ -1640,7 +1733,7 @@
         document.getElementById('closeWorker2').onclick = () => modal.classList.remove('show');
       } catch (error) { showToast(error.message); }
     };
-    modal.classList.add('show');
+    showModal();
   }
 
 
@@ -1674,7 +1767,7 @@
           state.worker.assigned_instruments.join(', ')}.`);
       } catch (error) { showToast(error.message); }
     };
-    modal.classList.add('show');
+    showModal();
   }
 
   function openFusionDialog() {
@@ -1731,7 +1824,7 @@
         };
       }
     };
-    modal.classList.add('show');
+    showModal();
   }
 
   function logRemoteWorkflow(message, step) {
@@ -1786,7 +1879,7 @@
         }. A product needs a readable clock before it can be matched to the flight.</p>` : ''}
         <div class="modal-actions"><button class="btn" id="closeRemote">Close</button></div>`;
       document.getElementById('closeRemote').onclick = () => modal.classList.remove('show');
-      modal.classList.add('show');
+      showModal();
       return;
     }
     modalTitle.textContent = 'Remote Sensing Products';
@@ -1840,7 +1933,7 @@
       modal.classList.remove('show');
     };
     document.getElementById('verifyRemote').onclick = () => verifyRemoteSensing(coverage);
-    modal.classList.add('show');
+    showModal();
   }
 
   async function verifyRemoteSensing(coverage) {
@@ -1938,7 +2031,7 @@
         }
       };
     }
-    modal.classList.add('show');
+    showModal();
   }
 
 
@@ -1985,14 +2078,14 @@
       </div>`;
     document.getElementById('closeCameraCoverage').onclick = () => modal.classList.remove('show');
     document.getElementById('openRemoteFromCoverage').onclick = () => openRemoteSensingDialog();
-    modal.classList.add('show');
+    showModal();
     logRemoteWorkflow('Camera coverage presented after scanning', 'scan-result');
   }
   async function startRegisteredProcessing() {
     if (isSystemBusy()) { showBusyWarning(); return; }
     modalTitle.textContent = 'Checking health';
     modalBody.innerHTML = '<p><strong>Checking the selected instruments and their available time periods...</strong></p><div class="scan-progress indeterminate"><span></span></div>';
-    modal.classList.add('show');
+    showModal();
     try {
       let scan = await api('/api/scan');
       renderScanState(scan);
@@ -2010,7 +2103,7 @@
         renderScanState(scan);
         modalTitle.textContent = 'Checking health';
         modalBody.innerHTML = '<p><strong>Checking the selected instruments and their available time periods...</strong></p><div class="scan-progress indeterminate"><span></span></div>';
-        modal.classList.add('show');
+        showModal();
       }
       const selected = (currentQueue.jobs || []).filter(job =>
         job.enabled && !job.detailed && job.available_for_selection
@@ -2268,7 +2361,7 @@
       <p><strong>The global Time Filter is active.</strong></p>
       <p>Please select the instrument or instruments to process in the Processing Priority panel. Start Processing will become available after at least one healthy instrument is selected.</p>
       <div class="modal-actions"><button class="btn primary" id="reviewInstrumentSelection">Select instruments</button></div>`;
-    modal.classList.add('show');
+    showModal();
     document.getElementById('reviewInstrumentSelection').addEventListener('click', () => {
       modal.classList.remove('show');
       document.getElementById('priorityPanel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -2418,7 +2511,7 @@
         }
       });
     }
-    modal.classList.add('show');
+    showModal();
     if (false && card.dataset.instrumentId === 'noseboom' && state.quicklook?.available) {
       renderNoseboomMap(state.quicklook);
     }
@@ -2622,7 +2715,7 @@
   async function openEditableInformation(source, title, presentation = 'standard') {
     modalTitle.textContent = title;
     modalBody.innerHTML = '<div class="info-loading">Loading information…</div>';
-    modal.classList.add('show');
+    showModal();
     try {
       const response = await fetch(source, { cache: 'no-store' });
       if (!response.ok) throw new Error(`Information file could not be loaded (${response.status})`);
