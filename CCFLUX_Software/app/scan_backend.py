@@ -333,21 +333,40 @@ class FolderDialog:
             startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
             startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
             run_options["startupinfo"] = startupinfo
-        completed = subprocess.run(
-            [
-                "powershell.exe",
-                "-NoProfile",
-                "-STA",
-                "-WindowStyle",
-                "Hidden",
-                "-Command",
-                script,
-            ],
-            **run_options,
-        )
+        # Bounded, like the macOS chooser. Without this a PowerShell dialog that
+        # never returns - blocked by an execution policy, or opened where the
+        # operator cannot see it - holds the single-dialog lock for the life of
+        # the session, and every later attempt to choose a folder fails.
+        run_options["timeout"] = FolderDialog.CHOOSER_TIMEOUT_SECONDS
+        try:
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-STA",
+                    "-WindowStyle",
+                    "Hidden",
+                    "-Command",
+                    script,
+                ],
+                **run_options,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                "The folder window did not return within "
+                f"{FolderDialog.CHOOSER_TIMEOUT_SECONDS // 60} minutes and was "
+                "closed. If you never saw it, type the folder path instead."
+            ) from None
+        except OSError as exc:
+            raise RuntimeError(
+                f"The folder window could not be opened: {exc}. "
+                "Type the folder path instead."
+            ) from None
         if completed.returncode != 0:
             details = completed.stderr.strip() or "Windows dialog process failed"
-            raise RuntimeError(details)
+            raise RuntimeError(
+                f"{details} Type the folder path instead."
+            )
         selected = completed.stdout.strip()
         return Path(selected) if selected else None
 
