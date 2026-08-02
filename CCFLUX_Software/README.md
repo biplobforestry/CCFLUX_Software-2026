@@ -44,20 +44,21 @@ Python 3.10 and newer are supported. Startup opens
 
 ## One-click launchers
 
-- **Windows:** double-click `Start_CCFLUX_Dashboard.bat`.
-- **macOS Finder:** double-click `Start_CCFLUX_Dashboard.command`.
-- **macOS Terminal:** open Terminal in the project folder and run:
+- **Windows:** double-click `Windows_CCFLUX.bat`.
+- **macOS:** double-click `Mac_CCFLUX.command`, or run `bash Mac_CCFLUX.command`
+  from Terminal in the project folder.
 
-  ```bash
-  bash Start_CCFLUX_Dashboard.sh
-  ```
+Each launcher creates a private virtual environment, installs missing libraries,
+starts the dashboard on an available local port, and requests the default browser
+to open. An unsupported or missing Python is offered an installer rather than
+simply refused. Launcher diagnostics are appended to `logs/launcher.log`.
 
-Both launchers create a private virtual environment, install missing libraries, start the
-dashboard on an available local port, and request the default browser to open.
-Launcher diagnostics are appended to `logs/launcher.log`.
-
-On macOS, a Windows-style `.venv/Scripts` folder is preserved and a separate
-`.venv-macos` is created automatically.
+The two environments are named apart — `.venv-windows` and `.venv-macos` — so one
+folder can be shared between platforms without either overwriting the other.
+There is exactly one launcher per platform; earlier `Start_CCFLUX_Dashboard.*`
+files built a third environment named `.venv` and have been removed, because
+running one while updating the other looked precisely like an update that had
+failed to apply.
 
 The `logs/` and `outputs/` directories are placeholders for local development.
 Production projects will use an operator-selected output directory.

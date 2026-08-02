@@ -270,21 +270,23 @@ independent of both raw roots (checked on selection, on scan start, and in
 
 ## 10. Known structural weaknesses
 
-1. **No test suite.** `pyproject.toml` sets `testpaths = ["tests"]` and a `test`
-   extra; the directory does not exist. Zero automated coverage.
-2. **`scan_backend.py` is 4 823 lines** and mixes HTTP-facing API, session state,
-   native dialogs, all 11 job closures, and file I/O.
-3. **Four parallel state stores** for the same facts: `InstrumentRegistry`,
+1. **`scan_backend.py` is ~6 000 lines** and mixes HTTP-facing API, session state,
+   native dialogs, all 11 job closures, and file I/O. Splitting it into
+   `app/tasks/` is the largest outstanding piece of work.
+2. **Four parallel state stores** for the same facts: `InstrumentRegistry`,
    `InstrumentScanState`, `ProcessingJob`, `FlightProject.detected_instruments`.
    The registry's `enabled`/`priority` fields are effectively write-only.
-4. **Two launcher families** (`Start_CCFLUX_Dashboard.*` using `.venv` vs.
-   `Windows_CCFLUX.bat` / `Mac_CCFLUX.command` using `.venv-windows` /
-   `.venv-macos`), documented inconsistently across `README.md` and `manual.text`.
-5. **Repository hygiene.** No `.gitignore`; two committed virtualenvs, `__pycache__`,
-   `.DS_Store`, `logs/`, and `outputs/` account for ~33 000 of the tracked files.
-6. **`instruments/base/interface.py` is aspirational** — adapters implement a
+3. **`instruments/base/interface.py` is aspirational** — adapters implement a
    looser de-facto contract (`load` / `process_quicklook` / `create_plots` /
    `export_results` / `export_browser_data`) than the ABC declares.
+4. **MicaSense processing is not implemented.** Its imagery is scanned, indexed
+   and time-ranged like the other cameras, but no science runs on it yet.
+
+Resolved since this document was first written: the test suite now exists and
+covers the tree (including a parse of every browser script, after a syntax error
+once disabled the whole interface); `.gitignore` is in place and no virtualenv
+is tracked; and the duplicate launcher family using `.venv` has been deleted,
+leaving one launcher per platform.
 
 ---
 

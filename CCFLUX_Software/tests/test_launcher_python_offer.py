@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-BATCH_LAUNCHERS = ["Windows_CCFLUX.bat", "Start_CCFLUX_Dashboard.bat"]
-SHELL_LAUNCHERS = ["Mac_CCFLUX.command", "Start_CCFLUX_Dashboard.sh"]
+BATCH_LAUNCHERS = ["Windows_CCFLUX.bat"]
+SHELL_LAUNCHERS = ["Mac_CCFLUX.command"]
 ALL_LAUNCHERS = BATCH_LAUNCHERS + SHELL_LAUNCHERS
 
 REQUIRED_PYTHON = "3.10"
