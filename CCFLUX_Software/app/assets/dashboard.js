@@ -115,6 +115,13 @@
   document.getElementById('resetSystemBtn').addEventListener('click', confirmSystemReset);
   document.getElementById('exitAppBtn').addEventListener('click', confirmApplicationExit);
   document.getElementById('remoteSensingBtn').addEventListener('click', openRemoteSensingDialog);
+  document.getElementById('hybridBtn').addEventListener('click', openHybridDialog);
+  document.getElementById('openProjectBtn').addEventListener('contextmenu', event => {
+    // A work package is also a .ccflux, but it is opened with a passphrase and
+    // makes this computer a worker, so it is a deliberate separate action.
+    event.preventDefault();
+    openWorkPackageLoader();
+  });
   document.getElementById('dataProductsBtn').addEventListener('click', () => {
     openEditableInformation('/data_products.txt', 'Data Products');
   });
@@ -826,6 +833,7 @@
     renderScanChannel('camera', state.scans?.camera || {});
     renderControlStates(state);
     renderRemoteSensingState(state);
+    refreshHybridState();
     Object.values(state.instruments || {}).forEach(instrument => {
       const card = document.querySelector(`[data-instrument-id="${instrument.instrument_id}"]`);
       if (card) updateCard(card, instrument);
@@ -1370,6 +1378,311 @@
       }
     };
     return answered;
+  }
+
+
+  // ------------------------------------------------------------------ hybrid
+  let hybridState = {};
+
+  function renderHybridState(state) {
+    hybridState = state || {};
+    const button = document.getElementById('hybridBtn');
+    const banner = document.getElementById('workerBanner');
+    if (!button || !banner) return;
+    const worker = hybridState.worker;
+    if (worker) {
+      // A worker computer never hands out packages; it shows what it was given.
+      button.disabled = false;
+      button.setAttribute('aria-disabled', 'false');
+      button.textContent = 'Work package';
+      button.classList.add('remote-ready');
+      button.classList.remove('remote-inactive');
+      button.title = `Processing ${worker.assigned_instruments.join(', ')} for ${worker.flight_id}`;
+      banner.hidden = false;
+      banner.innerHTML = `Work package · ${escapeHtml(worker.worker_name)} · ${
+        escapeHtml(worker.flight_id)}
+        <small>Processing ${escapeHtml(worker.assigned_instruments.join(', '))}
+        · the scientific configuration is fixed; only the data, camera and output
+        folders are chosen here.</small>`;
+      return;
+    }
+    banner.hidden = true;
+    const ready = Boolean(hybridState.available);
+    button.textContent = 'Hybrid Processing';
+    button.disabled = !ready;
+    button.setAttribute('aria-disabled', String(!ready));
+    button.classList.toggle('remote-ready', ready);
+    button.classList.toggle('remote-inactive', !ready);
+    button.title = ready
+      ? 'Split this flight across several computers'
+      : (hybridState.blocked_reasons || []).join('; ') || 'Complete the project first';
+  }
+
+  async function refreshHybridState() {
+    try { renderHybridState(await api('/api/hybrid/state')); } catch (_) {}
+  }
+
+  function hybridInstrumentRow(instrument, workerCount) {
+    const options = ['<option value="primary">Primary computer</option>']
+      .concat(Array.from({ length: workerCount }, (_, index) =>
+        `<option value="${index}">Worker ${index + 1}</option>`))
+      .concat('<option value="none">Do not process</option>');
+    return `<label class="form-row">
+      <span>${escapeHtml(instrument.display_name)}</span>
+      <select data-hybrid-instrument="${escapeAttribute(instrument.instrument_id)}">
+        ${options.join('')}
+      </select>
+    </label>`;
+  }
+
+  function openHybridDialog() {
+    if (hybridState.worker) { showWorkPackageDialog(); return; }
+    if (!hybridState.available) {
+      showToast((hybridState.blocked_reasons || []).join('; ')
+        || 'Complete the project before splitting it.');
+      return;
+    }
+    const instruments = hybridState.instruments || [];
+    const maximum = Math.min(hybridState.maximum_packages || 4, instruments.length);
+    modalTitle.textContent = 'Hybrid Processing';
+    modalBody.innerHTML = `
+      <p>Split <strong>${escapeHtml(hybridState.flight_id || '')}</strong> across
+      several computers. Every package carries the same time range and settings;
+      a worker chooses only where its own folders are.</p>
+      <p class="muted">${escapeHtml(displayDateTime(hybridState.analysis_start, 'UTC'))}
+      – ${escapeHtml(displayDateTime(hybridState.analysis_end, 'UTC'))} UTC</p>
+      <label class="form-row"><span>Worker computers</span>
+        <select id="hybridWorkerCount">${
+          Array.from({ length: maximum }, (_, index) =>
+            `<option value="${index + 1}"${index === 0 ? ' selected' : ''}>${index + 1}</option>`
+          ).join('')}</select></label>
+      <div id="hybridWorkerNames"></div>
+      <h4 class="section-heading">Who processes what</h4>
+      <div class="detail-grid" id="hybridAssignments">
+        ${instruments.map(item => hybridInstrumentRow(item, 1)).join('')}
+      </div>
+      <label class="form-row"><span>Passphrase</span>
+        <input type="password" id="hybridPassphrase" placeholder="at least 8 characters"></label>
+      <p class="muted">Each package is encrypted with this passphrase. Every worker
+      needs it; it is never written into a package.</p>
+      <div id="hybridSummary" class="muted"></div>
+      <div class="modal-actions">
+        <button class="btn" id="cancelHybrid">Cancel</button>
+        <button class="btn" id="openFusion">Fuse results</button>
+        <button class="btn primary" id="createHybrid">Create work packages</button>
+      </div>`;
+    const rebuild = () => {
+      const count = Number(document.getElementById('hybridWorkerCount').value);
+      document.getElementById('hybridWorkerNames').innerHTML =
+        Array.from({ length: count }, (_, index) =>
+          `<label class="form-row"><span>Worker ${index + 1} name</span>
+            <input id="hybridName${index}" value="Worker-${index + 1}"></label>`).join('');
+      const chosen = {};
+      modalBody.querySelectorAll('[data-hybrid-instrument]').forEach(select => {
+        chosen[select.dataset.hybridInstrument] = select.value;
+      });
+      document.getElementById('hybridAssignments').innerHTML =
+        instruments.map(item => hybridInstrumentRow(item, count)).join('');
+      modalBody.querySelectorAll('[data-hybrid-instrument]').forEach(select => {
+        const previous = chosen[select.dataset.hybridInstrument];
+        if (previous !== undefined && select.querySelector(`option[value="${previous}"]`)) {
+          select.value = previous;
+        }
+        select.addEventListener('change', summarise);
+      });
+      summarise();
+    };
+    const summarise = () => {
+      const count = Number(document.getElementById('hybridWorkerCount').value);
+      const buckets = Array.from({ length: count }, () => []);
+      const primary = [], skipped = [];
+      modalBody.querySelectorAll('[data-hybrid-instrument]').forEach(select => {
+        const id = select.dataset.hybridInstrument;
+        if (select.value === 'primary') primary.push(id);
+        else if (select.value === 'none') skipped.push(id);
+        else buckets[Number(select.value)].push(id);
+      });
+      document.getElementById('hybridSummary').innerHTML =
+        buckets.map((items, index) =>
+          `Worker ${index + 1}: ${items.length ? escapeHtml(items.join(', ')) : '<em>nothing</em>'}`)
+          .concat(`Primary: ${primary.length ? escapeHtml(primary.join(', ')) : '<em>nothing</em>'}`)
+          .concat(skipped.length ? `Not processed: ${escapeHtml(skipped.join(', '))}` : [])
+          .map(line => `<div>${line}</div>`).join('');
+    };
+    document.getElementById('hybridWorkerCount').addEventListener('change', rebuild);
+    rebuild();
+    document.getElementById('cancelHybrid').onclick = () => modal.classList.remove('show');
+    document.getElementById('openFusion').onclick = () => openFusionDialog();
+    document.getElementById('createHybrid').onclick = async () => {
+      const count = Number(document.getElementById('hybridWorkerCount').value);
+      const workers = Array.from({ length: count }, (_, index) => ({
+        worker_name: document.getElementById(`hybridName${index}`).value.trim(),
+        instruments: [],
+      }));
+      const primary = [];
+      modalBody.querySelectorAll('[data-hybrid-instrument]').forEach(select => {
+        const id = select.dataset.hybridInstrument;
+        if (select.value === 'primary') primary.push(id);
+        else if (select.value !== 'none') workers[Number(select.value)].instruments.push(id);
+      });
+      try {
+        const result = await api('/api/hybrid/create', {
+          method: 'POST',
+          body: JSON.stringify({
+            workers, primary_instruments: primary,
+            passphrase: document.getElementById('hybridPassphrase').value,
+          }),
+        });
+        modalTitle.textContent = 'Work packages created';
+        modalBody.innerHTML = `
+          <p>${result.created.length} package(s) written. Give each worker their
+          file and the passphrase.</p>
+          <ul class="stage-list">${result.created.map(path =>
+            `<li class="stage stage-done"><span class="stage-mark">&#10003;</span>
+             <span class="stage-label">${escapeHtml(path)}</span></li>`).join('')}</ul>
+          ${result.unassigned.length ? `<p class="muted">Nobody will process:
+            ${escapeHtml(result.unassigned.join(', '))}</p>` : ''}
+          <div class="modal-actions"><button class="btn" id="closeHybrid">Close</button></div>`;
+        document.getElementById('closeHybrid').onclick = () => modal.classList.remove('show');
+        refreshHybridState();
+      } catch (error) { showToast(error.message); }
+    };
+    modal.classList.add('show');
+  }
+
+  function showWorkPackageDialog() {
+    const worker = hybridState.worker || {};
+    modalTitle.textContent = 'Work package';
+    modalBody.innerHTML = `
+      <div class="detail-grid">
+        ${[['Worker', worker.worker_name], ['Flight', worker.flight_id],
+           ['Campaign', worker.campaign], ['Project', worker.project_id],
+           ['Assigned', (worker.assigned_instruments || []).join(', ')],
+           ['Time range', `${displayDateTime(worker.analysis_start, 'UTC')} – ${
+             displayDateTime(worker.analysis_end, 'UTC')} UTC`],
+           ['Created', worker.created_utc], ['Software', worker.software_version],
+          ].map(([label, value]) =>
+            `<div class="detail-row"><span><strong>${escapeHtml(label)}</strong><br>
+             <small>${escapeHtml(String(value ?? '—'))}</small></span></div>`).join('')}
+      </div>
+      <p class="muted">These are fixed by the package and cannot be changed here.
+      Choose your own Flight, Camera and Output folders, process the assigned
+      instruments, then hand the results back.</p>
+      <label class="form-row"><span>Passphrase</span>
+        <input type="password" id="workerPassphrase" placeholder="the campaign passphrase"></label>
+      <div class="modal-actions">
+        <button class="btn" id="closeWorker">Close</button>
+        <button class="btn primary" id="exportWorker">Export results</button>
+      </div>`;
+    document.getElementById('closeWorker').onclick = () => modal.classList.remove('show');
+    document.getElementById('exportWorker').onclick = async () => {
+      try {
+        const result = await api('/api/hybrid/export', {
+          method: 'POST',
+          body: JSON.stringify({
+            passphrase: document.getElementById('workerPassphrase').value,
+          }),
+        });
+        modalBody.innerHTML = `<p><strong>&#10003; Results sealed</strong></p>
+          <p>${escapeHtml(result.package)}</p>
+          <p class="muted">Contains ${escapeHtml(result.processed_instruments.join(', '))}.
+          Send this file back for fusion.</p>
+          <div class="modal-actions"><button class="btn" id="closeWorker2">Close</button></div>`;
+        document.getElementById('closeWorker2').onclick = () => modal.classList.remove('show');
+      } catch (error) { showToast(error.message); }
+    };
+    modal.classList.add('show');
+  }
+
+
+  function openWorkPackageLoader() {
+    modalTitle.textContent = 'Open a work package';
+    modalBody.innerHTML = `
+      <p>Open a hybrid work package handed out by the primary computer. This
+      computer will then process only the instruments it was assigned, with the
+      campaign settings fixed.</p>
+      <label class="form-row"><span>Package file</span>
+        <input id="workPackagePath" placeholder="full path to the .ccflux work package"></label>
+      <label class="form-row"><span>Passphrase</span>
+        <input type="password" id="workPackagePassphrase"></label>
+      <div class="modal-actions">
+        <button class="btn" id="cancelWorkPackage">Cancel</button>
+        <button class="btn primary" id="loadWorkPackage">Open</button>
+      </div>`;
+    document.getElementById('cancelWorkPackage').onclick = () => modal.classList.remove('show');
+    document.getElementById('loadWorkPackage').onclick = async () => {
+      try {
+        const state = await api('/api/hybrid/load', {
+          method: 'POST',
+          body: JSON.stringify({
+            path: document.getElementById('workPackagePath').value.trim(),
+            passphrase: document.getElementById('workPackagePassphrase').value,
+          }),
+        });
+        renderHybridState(state);
+        modal.classList.remove('show');
+        showToast(`Work package opened: ${state.worker.worker_name} processing ${
+          state.worker.assigned_instruments.join(', ')}.`);
+      } catch (error) { showToast(error.message); }
+    };
+    modal.classList.add('show');
+  }
+
+  function openFusionDialog() {
+    modalTitle.textContent = 'Project Fusion';
+    modalBody.innerHTML = `
+      <p>Combine result packages from the worker computers into one project.
+      Two to four packages, all from the same flight and the same plan.</p>
+      <label class="form-row"><span>Result packages</span>
+        <textarea id="fusionPaths" rows="4" placeholder="One full path per line"></textarea></label>
+      <label class="form-row"><span>Passphrase</span>
+        <input type="password" id="fusionPassphrase"></label>
+      <div id="fusionReport"></div>
+      <div class="modal-actions">
+        <button class="btn" id="cancelFusion">Cancel</button>
+        <button class="btn" id="reviewFusion">Check packages</button>
+      </div>`;
+    document.getElementById('cancelFusion').onclick = () => modal.classList.remove('show');
+    document.getElementById('reviewFusion').onclick = async () => {
+      const packages = document.getElementById('fusionPaths').value
+        .split('\n').map(line => line.trim()).filter(Boolean);
+      const passphrase = document.getElementById('fusionPassphrase').value;
+      let report;
+      try {
+        report = await api('/api/hybrid/fusion/review', {
+          method: 'POST', body: JSON.stringify({ packages, passphrase }),
+        });
+      } catch (error) { showToast(error.message); return; }
+      const target = document.getElementById('fusionReport');
+      target.innerHTML = `
+        <ul class="stage-list">${report.packages.map(item =>
+          `<li class="stage stage-done"><span class="stage-mark">&#10003;</span>
+           <span class="stage-label"><strong>${escapeHtml(item.worker_name)}</strong> — ${
+             escapeHtml((item.processed_instruments || []).join(', '))}</span></li>`).join('')}</ul>
+        ${report.ok
+          ? `<p><strong>&#10003; These belong together.</strong> ${
+              escapeHtml(report.instruments.join(', '))}</p>`
+          : `<p><strong>Fusion would be cancelled:</strong></p><ul>${
+              report.reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}</ul>`}`;
+      const actions = modalBody.querySelector('.modal-actions');
+      if (report.ok && !document.getElementById('startFusion')) {
+        actions.insertAdjacentHTML('beforeend',
+          '<button class="btn primary" id="startFusion">Fuse into one project</button>');
+        document.getElementById('startFusion').onclick = async () => {
+          try {
+            const result = await api('/api/hybrid/fusion/start', {
+              method: 'POST', body: JSON.stringify({ packages, passphrase }),
+            });
+            modalBody.innerHTML = `<p><strong>&#10003; Fused</strong></p>
+              <p>${escapeHtml(result.folder)}</p>
+              <p class="muted">Covering ${escapeHtml(result.instruments.join(', '))}.</p>
+              <div class="modal-actions"><button class="btn" id="closeFusion">Close</button></div>`;
+            document.getElementById('closeFusion').onclick = () => modal.classList.remove('show');
+          } catch (error) { showToast(error.message); }
+        };
+      }
+    };
+    modal.classList.add('show');
   }
 
   function logRemoteWorkflow(message, step) {

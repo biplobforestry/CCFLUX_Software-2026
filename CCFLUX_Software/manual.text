@@ -139,7 +139,69 @@ The project is named after its flight and written to the top of the Output Folde
 
 The folder-selection window opens in front of the browser. If you do not see it, check for a Finder window behind the browser and bring it forward.
 
-## 7. Software updates and privacy
+## 7. Hybrid processing and project fusion
+
+Optional. A flight can be processed on one computer exactly as before; hybrid
+processing exists only to shorten a large flight by sharing it out.
+
+### On the primary computer
+
+Prepare the project as usual — folders, Initial Check, Time Filter, instrument
+settings. **Hybrid Processing** becomes available once that is complete; until
+then the button says what is still missing.
+
+The dialog asks how many worker computers there are, what each is called, and
+which computer processes each instrument. An instrument can go to one worker,
+stay on the primary, or be left out; it cannot go to two computers, because
+fusion would then have two answers for the same thing. A summary shows the
+split before anything is written.
+
+You then set a passphrase. Each worker gets a file named after the flight and
+the worker, and needs the passphrase to open it.
+
+### On a worker computer
+
+Right-click **Load .ccflux** and choose **Open a work package**, then give the
+file and the passphrase. A banner across the top of the window shows which
+worker this computer is and which instruments it was given.
+
+The flight, campaign, time range, assigned instruments and every processing
+setting come from the package and cannot be changed here — attempting it is
+refused with an explanation. The Flight, Camera and Output folders are chosen
+locally, so each computer uses its own disks.
+
+Process the assigned instruments as normal, then open the work package again
+and choose **Export results**. That writes a sealed result package containing
+the processed project, the identity it was authorised under, the processing log
+and the audit trail.
+
+### Fusion
+
+On the primary, open **Hybrid Processing** and choose **Fuse results**. Give
+between two and four result packages and the passphrase. **Check packages**
+validates them before anything is merged: same project, same flight, same time
+range, same configuration, only authorised instruments, no instrument returned
+twice, and each processed project matching its own checksum. If any check
+fails, fusion is cancelled and every reason is listed. Nothing is written until
+all of them pass.
+
+### What the security does and does not do
+
+Packages are encrypted with AES-256-GCM under a key derived from the passphrase
+with scrypt. That is authenticated encryption: the same operation that hides
+the contents also detects any change to them, so an altered package, a
+truncated one, or one assembled from two others fails to open and is refused.
+The passphrase is never written into a package. A short unencrypted header
+carries only the flight, worker and creation time, so a file can be identified
+before anyone is asked for a passphrase.
+
+This is a shared-passphrase scheme. It confines each computer to the
+instruments it was assigned and makes tampering evident. It is not a public-key
+signature: anyone holding the campaign passphrase can also create packages, so
+it does not prove which colleague produced a result. The audit trail records
+what each package claims about itself.
+
+## 8. Software updates and privacy
 
 The **Update** button reports whether a newer release has been published.
 
@@ -171,7 +233,7 @@ disabled and no network request is made.
 CCFLUX_UPDATE_CHECK=off bash Mac_CCFLUX.command
 ```
 
-## 8. Logs, troubleshooting, and safe operation
+## 9. Logs, troubleshooting, and safe operation
 
 * Keep the launcher window open while CC-FLUX is running.
 * Read **logs/launcher.log** when startup or library installation fails.
@@ -184,7 +246,7 @@ CCFLUX_UPDATE_CHECK=off bash Mac_CCFLUX.command
 * Use **Reset System** only to clear the active GUI state. It does not delete raw input files or existing output products.
 * Use **Exit** to stop the local CC-FLUX server cleanly.
 
-## 9. Scientific responsibility
+## 10. Scientific responsibility
 
 Review warnings, calibration inputs, time alignment, QC information, and generated products before scientific interpretation or publication. The software assists reproducible processing but does not replace instrument-PI validation.
 

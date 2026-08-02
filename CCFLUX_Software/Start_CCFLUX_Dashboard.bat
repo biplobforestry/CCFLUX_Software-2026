@@ -84,7 +84,7 @@ set "DASHBOARD_PYTHON=%CD%\.venv\Scripts\python.exe"
 if errorlevel 1 goto :python_version_failed
 
 echo Checking dashboard libraries...
-"%DASHBOARD_PYTHON%" -c "import numpy, pandas, PIL, yaml, scipy, matplotlib, tables, flask, plotly, werkzeug, openpyxl" >nul 2>&1
+"%DASHBOARD_PYTHON%" -c "import numpy, pandas, PIL, yaml, scipy, matplotlib, tables, flask, plotly, werkzeug, openpyxl, cryptography" >nul 2>&1
 if errorlevel 1 (
   echo One or more required libraries are missing. Installing them now...
   >>"%LAUNCH_LOG%" echo [!date! !time!] Missing dependencies detected; installation started.

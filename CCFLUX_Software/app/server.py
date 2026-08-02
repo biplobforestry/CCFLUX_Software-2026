@@ -272,6 +272,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._send_bytes(status, body, content_type, headers)
         elif path == "/api/scan":
             self._send_json(HTTPStatus.OK, self.server.backend.snapshot())
+        elif path == "/api/hybrid/state":
+            self._send_json(HTTPStatus.OK, self.server.backend.hybrid_state())
         elif path == "/api/remote-sensing/coverage":
             self._send_json(HTTPStatus.OK, self.server.backend.camera_coverage())
         elif path == "/api/sif/progress":
@@ -566,6 +568,35 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 body = self._json_body()
                 self.server.backend.log_remote_sensing_workflow(body)
                 self._send_json(HTTPStatus.OK, {"logged": True})
+            elif path == "/api/hybrid/create":
+                body = self._json_body()
+                self._send_json(
+                    HTTPStatus.OK, self.server.backend.create_hybrid_packages(body)
+                )
+            elif path == "/api/hybrid/load":
+                body = self._json_body()
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.backend.load_work_package(
+                        Path(str(body.get("path", ""))),
+                        str(body.get("passphrase", "")),
+                    ),
+                )
+            elif path == "/api/hybrid/export":
+                body = self._json_body()
+                self._send_json(
+                    HTTPStatus.OK, self.server.backend.export_hybrid_results(body)
+                )
+            elif path == "/api/hybrid/fusion/review":
+                body = self._json_body()
+                self._send_json(
+                    HTTPStatus.OK, self.server.backend.review_hybrid_fusion(body)
+                )
+            elif path == "/api/hybrid/fusion/start":
+                body = self._json_body()
+                self._send_json(
+                    HTTPStatus.OK, self.server.backend.fuse_hybrid_results(body)
+                )
             elif path == "/api/remote-sensing/preview":
                 body = self._json_body()
                 self._send_json(

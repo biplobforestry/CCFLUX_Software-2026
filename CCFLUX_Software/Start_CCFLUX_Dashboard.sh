@@ -134,7 +134,7 @@ if ! "$VENV_PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3
 fi
 
 printf '%s\n' 'Checking dashboard libraries...'
-if ! "$VENV_PYTHON" -c 'import numpy, pandas, PIL, yaml, scipy, matplotlib, tables, flask, plotly, werkzeug, openpyxl' >/dev/null 2>&1; then
+if ! "$VENV_PYTHON" -c 'import numpy, pandas, PIL, yaml, scipy, matplotlib, tables, flask, plotly, werkzeug, openpyxl, cryptography' >/dev/null 2>&1; then
   printf '%s\n' 'One or more required libraries are missing. Installing them now...'
   log_event 'Missing dependencies detected; installation started.'
   "$VENV_PYTHON" -m pip install --disable-pip-version-check --upgrade pip ||

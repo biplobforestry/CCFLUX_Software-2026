@@ -83,7 +83,7 @@ echo Installing and checking all required CC-FLUX libraries...
 "%DASHBOARD_PYTHON%" -m pip install --disable-pip-version-check --upgrade-strategy only-if-needed -e ".[noseboom,miro,partector,ins-gimbal,sif,micasense,flir,gopro]"
 if errorlevel 1 goto :setup_failed
 
-"%DASHBOARD_PYTHON%" -c "import numpy, pandas, PIL, yaml, scipy, matplotlib, tables, flask, plotly, werkzeug, openpyxl" >nul 2>&1
+"%DASHBOARD_PYTHON%" -c "import numpy, pandas, PIL, yaml, scipy, matplotlib, tables, flask, plotly, werkzeug, openpyxl, cryptography" >nul 2>&1
 if errorlevel 1 goto :verification_failed
 >>"%LAUNCH_LOG%" echo [!date! !time!] All required libraries are ready.
 

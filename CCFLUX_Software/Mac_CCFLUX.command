@@ -135,7 +135,7 @@ log_event 'Dependency installation and validation started.'
   -e '.[noseboom,miro,partector,ins-gimbal,sif,micasense,flir,gopro]' ||
   fail_and_wait 'Required libraries could not be installed. Check the internet connection and available disk space.'
 
-if ! "$VENV_PYTHON" -c 'import numpy, pandas, PIL, yaml, scipy, matplotlib, tables, flask, plotly, werkzeug, openpyxl' >/dev/null 2>&1; then
+if ! "$VENV_PYTHON" -c 'import numpy, pandas, PIL, yaml, scipy, matplotlib, tables, flask, plotly, werkzeug, openpyxl, cryptography' >/dev/null 2>&1; then
   fail_and_wait 'Library verification failed after installation.'
 fi
 log_event 'All required libraries are ready.'

@@ -1103,6 +1103,12 @@
     .stage-active .stage-mark { color: #35c07c; animation: stage-pulse 1.2s ease-in-out infinite; }
     .stage-pending { opacity: .6; }
     .sif-done { color: #35c07c; }
+    .worker-banner {
+      padding: 10px 18px; text-align: center; font-weight: 600;
+      color: #04170e; background: linear-gradient(135deg, #f0c674, #e0a93c);
+      border-bottom: 1px solid rgba(0,0,0,.25);
+    }
+    .worker-banner small { display: block; font-weight: 400; opacity: .85; }
     @keyframes stage-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
     @media (prefers-reduced-motion: reduce) { .stage-active .stage-mark { animation: none; } }
 
@@ -1817,6 +1823,7 @@
 </head>
 <body>
   <div class="app-shell">
+    <div id="workerBanner" class="worker-banner" hidden></div>
     <header class="topbar">
       <div class="brand">
         <div class="brand-emblem" role="img" aria-label="CC-FLUX 2026 airship logo">
@@ -1897,6 +1904,7 @@
         <div class="action-group" style="--action-columns:2">
           <span class="action-group-label">3 · Process</span>
           <button class="btn remote-inactive" id="remoteSensingBtn" disabled aria-disabled="true" title="Camera scanning must finish successfully">Remote Sensing</button>
+          <button class="btn remote-inactive" id="hybridBtn" disabled aria-disabled="true" title="Complete the project first">Hybrid Processing</button>
           <button class="btn primary" id="runBtn" disabled title="Complete scan, Time Filter, and instrument selection first">Start Processing</button>
         </div>
       </div>
@@ -2300,7 +2308,7 @@
       </div>
     </div>
     <footer class="app-footer">
-      <span>© 2026 Biplob Dey · Forschungszentrum Jülich GmbH · <span class="app-version">Version 1.0.0</span></span>
+      <span>© 2026 Biplob Dey · Forschungszentrum Jülich GmbH · <span class="app-version">Version 1.0.1</span></span>
       <div class="footer-actions">
         <button class="manual-link" id="manualBtn" type="button" aria-haspopup="dialog">Manual</button>
         <button class="license-link" id="licenseBtn" type="button" aria-haspopup="dialog">License</button>

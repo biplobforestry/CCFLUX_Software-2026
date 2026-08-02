@@ -31,6 +31,17 @@ from core.dashboard_time import (
     parse_dashboard_datetime,
 )
 from core.enums import DetectionStatus, ProcessingStatus
+from core.hybrid_processing import (
+    MAXIMUM_FUSION_PACKAGES,
+    HybridPlan,
+    WorkerAssignment,
+    create_work_packages,
+    export_result_package,
+    fuse,
+    load_result_package,
+    review_fusion,
+)
+from core.hybrid_processing import load_work_package as load_work_package_file
 from core.flight_project import (
     LEGACY_PROJECT_FILENAME,
     PROJECT_FILENAME,
@@ -148,6 +159,14 @@ DEFAULT_FLIR_LEVEL2_OPTIONS: dict[str, object] = {
 }
 
 LOGGER = logging.getLogger(__name__)
+
+# Shown on the packages so a worker can see which campaign they belong to.
+CAMPAIGN_NAME = "CC-FLUX Campaign 2026"
+# Presentation order for the hybrid plan; the same order the cards use.
+INSTRUMENT_ORDER = (
+    "noseboom", "miro", "picarro", "opc_hbx4", "opc_hbx5",
+    "partector", "ins_gimbal", "sif", "gopro", "flir", "micasense",
+)
 
 DEFAULT_SIF_OPTIONS: dict[str, object] = {
     "modes": ["FULL", "FLUO"],
@@ -636,6 +655,9 @@ class DashboardScanBackend:
         # kept apart from the flight Time Filter, which the cameras no longer
         # take part in.
         self._dialog_holder: tuple[str | None, float | None] = (None, None)
+        # Set only on a worker computer, by adopting a hybrid work package. Its
+        # presence is what makes the scientific configuration read-only.
+        self._work_package = None
         self._camera_selected_start: datetime | None = None
         self._camera_selected_end: datetime | None = None
         self._flir_level2_options = dict(DEFAULT_FLIR_LEVEL2_OPTIONS)
@@ -1304,6 +1326,276 @@ class DashboardScanBackend:
             "selected_start": _iso_or_none(self._camera_selected_start),
             "selected_end": _iso_or_none(self._camera_selected_end),
         }
+
+    # ---------------------------------------------------------------- hybrid
+    def hybrid_state(self) -> dict[str, object]:
+        """Whether this flight can be split, and what it would be split into.
+
+        A worker machine reports the package it is running under instead, so the
+        interface can show that its configuration is fixed.
+        """
+        with self._lock:
+            project = self._flight_project
+            time_state = self._time_state
+            processable = [
+                instrument_id
+                for instrument_id in INSTRUMENT_ORDER
+                if instrument_id in self._instruments
+                and _instrument_is_processable(self._instruments[instrument_id])
+            ]
+            worker = self._work_package
+            # Sealed into every package, so it has to survive JSON round-trip.
+            options = {
+                key: json.loads(json.dumps(dict(value), default=str))
+                for key, value in (
+                    ("sif", self._sif_options), ("flir", self._flir_level2_options)
+                )
+            }
+        missing: list[str] = []
+        if project is None:
+            missing.append("Scan a Flight Folder")
+        if not processable:
+            missing.append("No instrument is ready to process")
+        if time_state.selected_analysis_start is None or (
+            time_state.selected_analysis_end is None
+        ):
+            missing.append("Set the processing time range")
+        if self._selected_output_folder is None:
+            missing.append("Select an Output Folder")
+        return {
+            "available": not missing and worker is None,
+            "blocked_reasons": missing,
+            "is_worker": worker is not None,
+            "worker": None if worker is None else {
+                "worker_name": worker.worker_name,
+                "worker_id": worker.worker_id,
+                "flight_id": worker.flight_id,
+                "campaign": worker.payload.get("campaign", ""),
+                "project_id": worker.project_id,
+                "assigned_instruments": list(worker.assigned_instruments),
+                "analysis_start": worker.payload.get("analysis_start"),
+                "analysis_end": worker.payload.get("analysis_end"),
+                "package_file": str(worker.path),
+                "created_utc": worker.header.get("created_utc"),
+                "software_version": worker.header.get("software_version"),
+            },
+            "project_id": None if project is None else str(project.project_id),
+            "flight_id": None if project is None else project.flight_id,
+            "campaign": CAMPAIGN_NAME,
+            "analysis_start": _iso_or_none(time_state.selected_analysis_start),
+            "analysis_end": _iso_or_none(time_state.selected_analysis_end),
+            "instruments": [
+                {
+                    "instrument_id": instrument_id,
+                    "display_name": self._instruments[instrument_id].display_name,
+                }
+                for instrument_id in processable
+            ],
+            "instrument_options": options,
+            "maximum_packages": MAXIMUM_FUSION_PACKAGES,
+        }
+
+    def create_hybrid_packages(self, request: dict[str, object]) -> dict[str, object]:
+        """Write one sealed work package per worker."""
+        state = self.hybrid_state()
+        if state["is_worker"]:
+            raise ValueError(
+                "This computer is running a work package and cannot hand out "
+                "further ones."
+            )
+        if not state["available"]:
+            raise ValueError(
+                "Hybrid processing is not ready: "
+                + "; ".join(state["blocked_reasons"])
+            )
+        passphrase = str(request.get("passphrase", ""))
+        if len(passphrase.strip()) < 8:
+            raise ValueError(
+                "Use a passphrase of at least 8 characters. Every worker needs "
+                "it to open their package."
+            )
+        raw_workers = request.get("workers")
+        if not isinstance(raw_workers, list) or not raw_workers:
+            raise ValueError("Define at least one worker package")
+        available = [item["instrument_id"] for item in state["instruments"]]
+        assignments = []
+        for entry in raw_workers:
+            if not isinstance(entry, dict):
+                raise ValueError("Each worker package must be an object")
+            instruments = entry.get("instruments") or []
+            if not isinstance(instruments, list):
+                raise ValueError("A worker package's instruments must be a list")
+            assignments.append(WorkerAssignment(
+                worker_id=str(entry.get("worker_id") or uuid4()),
+                worker_name=str(entry.get("worker_name", "")).strip(),
+                instruments=tuple(str(value) for value in instruments),
+            ))
+        primary = tuple(
+            str(value) for value in (request.get("primary_instruments") or [])
+        )
+        plan = HybridPlan(
+            project_id=str(state["project_id"]),
+            flight_id=str(state["flight_id"]),
+            campaign=str(state["campaign"]),
+            analysis_start=state["analysis_start"],
+            analysis_end=state["analysis_end"],
+            available_instruments=tuple(available),
+            assignments=tuple(assignments),
+            primary_instruments=primary,
+            instrument_options=state["instrument_options"],
+        )
+        destination = Path(
+            str(request.get("destination") or self._selected_output_folder)
+        )
+        written = create_work_packages(
+            plan, destination, passphrase, software_version=SOFTWARE_VERSION
+        )
+        for path, assignment in zip(written, plan.assignments):
+            self.logger.log(
+                LogLevel.SUCCESS, "hybrid",
+                f"Work package for {assignment.worker_name} covering "
+                + ", ".join(assignment.instruments),
+                file_path=path, processing_step="hybrid-plan",
+            )
+        if plan.unassigned:
+            self.logger.log(
+                LogLevel.WARNING, "hybrid",
+                "No computer was given: " + ", ".join(plan.unassigned)
+                + ". Those instruments will not be processed by anyone.",
+                processing_step="hybrid-plan",
+            )
+        self._checkpoint_project()
+        return {
+            "created": [str(path) for path in written],
+            "unassigned": list(plan.unassigned),
+            "primary_instruments": list(primary),
+        }
+
+    def load_work_package(self, path: Path, passphrase: str) -> dict[str, object]:
+        """Adopt a work package. Everything scientific becomes read-only."""
+        package = load_work_package_file(Path(path), passphrase)
+        with self._lock:
+            self._work_package = package
+            for key, value in package.payload.get("instrument_options", {}).items():
+                if key == "sif":
+                    self._sif_options = {**DEFAULT_SIF_OPTIONS, **value}
+                elif key == "flir":
+                    self._flir_level2_options = {
+                        **DEFAULT_FLIR_LEVEL2_OPTIONS, **value
+                    }
+        start = package.payload.get("analysis_start")
+        end = package.payload.get("analysis_end")
+        if start and end:
+            self.update_time_filter({
+                "action": "set", "start": start, "end": end,
+                "_from_work_package": True,
+            })
+        self.logger.log(
+            LogLevel.SUCCESS, "hybrid",
+            f"Work package adopted: {package.worker_name} processing "
+            + ", ".join(package.assigned_instruments)
+            + f" for {package.flight_id}. The scientific configuration is fixed.",
+            file_path=Path(path), processing_step="hybrid-worker",
+        )
+        return self.hybrid_state()
+
+    def export_hybrid_results(self, request: dict[str, object]) -> dict[str, object]:
+        """Seal this worker's processed project for return to the primary."""
+        with self._lock:
+            package = self._work_package
+            project = self._flight_project
+            processed = [
+                instrument_id for instrument_id, state in self._instruments.items()
+                if state.processing_status in {
+                    ProcessingStatus.COMPLETE, ProcessingStatus.WARNING
+                }
+            ]
+        if package is None:
+            raise ValueError(
+                "This computer is not running a work package, so there is "
+                "nothing to hand back."
+            )
+        if project is None:
+            raise ValueError("Scan and process the assigned instruments first")
+        passphrase = str(request.get("passphrase", ""))
+        authorised = [
+            instrument_id for instrument_id in processed
+            if package.authorises(instrument_id)
+        ]
+        if not authorised:
+            raise ValueError(
+                "None of the assigned instruments has been processed yet: "
+                + ", ".join(package.assigned_instruments)
+            )
+        project_file = self.save_project()
+        destination = Path(
+            str(request.get("destination") or self._selected_output_folder)
+        )
+        exported = export_result_package(
+            package, project_file, destination, passphrase,
+            software_version=SOFTWARE_VERSION,
+            processed_instruments=authorised,
+            log_records=self.visible_logs(),
+        )
+        self.logger.log(
+            LogLevel.SUCCESS, "hybrid",
+            f"Results sealed for {package.worker_name}: " + ", ".join(authorised),
+            file_path=exported, processing_step="hybrid-worker",
+        )
+        return {
+            "package": str(exported),
+            "processed_instruments": authorised,
+            "skipped": sorted(set(processed) - set(authorised)),
+        }
+
+    def review_hybrid_fusion(self, request: dict[str, object]) -> dict[str, object]:
+        """Check result packages belong together, without merging anything."""
+        packages = self._load_result_packages(request)
+        report = review_fusion(packages)
+        return {
+            "ok": report.ok,
+            "reasons": list(report.reasons),
+            "packages": [dict(item) for item in report.packages],
+            "instruments": list(report.instruments),
+            "project_id": report.project_id,
+            "flight_id": report.flight_id,
+        }
+
+    def fuse_hybrid_results(self, request: dict[str, object]) -> dict[str, object]:
+        packages = self._load_result_packages(request)
+        destination = Path(
+            str(request.get("destination") or self._selected_output_folder or ".")
+        )
+        flight = packages[0].payload.get("flight_id", "fused")
+        manifest, report = fuse(
+            packages, destination / f"{flight}_fused",
+            software_version=SOFTWARE_VERSION,
+        )
+        self.logger.log(
+            LogLevel.SUCCESS, "hybrid",
+            f"Fused {len(packages)} result package(s) covering "
+            + ", ".join(report.instruments),
+            file_path=manifest, processing_step="hybrid-fusion",
+        )
+        return {
+            "manifest": str(manifest),
+            "folder": str(manifest.parent),
+            "instruments": list(report.instruments),
+            "packages": [dict(item) for item in report.packages],
+        }
+
+    def _load_result_packages(self, request: dict[str, object]) -> list:
+        raw = request.get("packages")
+        if not isinstance(raw, list) or not raw:
+            raise ValueError("Select the result packages to fuse")
+        passphrase = str(request.get("passphrase", ""))
+        loaded = []
+        for value in raw:
+            path = Path(str(value))
+            if not path.is_file():
+                raise ValueError(f"No such result package: {path}")
+            loaded.append(load_result_package(path, passphrase))
+        return loaded
 
     def camera_coverage(self) -> dict[str, object]:
         with self._lock:
@@ -2470,10 +2762,26 @@ class DashboardScanBackend:
             },
         }
 
+    def _refuse_if_worker(self, what: str) -> None:
+        """A work package fixes the science; only folders stay local.
+
+        Without this the read-only rule would be a label on the interface
+        rather than a property of the software - a worker could change the
+        settings, process, and hand back results that no longer match the plan
+        every other computer used.
+        """
+        if self._work_package is not None:
+            raise ValueError(
+                f"{what} is fixed by the work package for "
+                f"{self._work_package.worker_name} and cannot be changed on this "
+                "computer. Only the data, camera and output folders are local."
+            )
+
     def update_sif_options(
         self, request: Mapping[str, object] | None
     ) -> dict[str, object]:
         """Validate and persist operator-controlled SIF scientific options."""
+        self._refuse_if_worker("The SIF configuration")
         request = request or {}
         modes = [
             str(value).upper()
@@ -3119,6 +3427,10 @@ class DashboardScanBackend:
     })
 
     def update_time_filter(self, request: dict[str, object]) -> None:
+        # Adopting a package sets the range from the plan; that one call is
+        # allowed through, and every other attempt on a worker is refused.
+        if not request.pop("_from_work_package", False):
+            self._refuse_if_worker("The processing time range")
         action = str(request.get("action", "set"))
         # An unrecognised key used to be ignored, and because a half-empty
         # interval is deliberately repaired to the available range, a misspelled
@@ -5473,10 +5785,14 @@ class DashboardScanBackend:
     ) -> dict[str, object]:
         """Validate the operator's radiometric correction inputs.
 
+        Refused outright on a worker computer: the settings came with the work
+        package and every machine must use the same ones.
+
         Apparent mode needs nothing. Corrected mode needs every environment
         measurement, and is only quantitative when the operator states the
         values were measured rather than assumed.
         """
+        self._refuse_if_worker("The FLIR configuration")
         request = request or {}
         options = dict(DEFAULT_FLIR_LEVEL2_OPTIONS)
         mode = str(request.get("mode", options["mode"])).strip().lower()
