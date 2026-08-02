@@ -13,11 +13,8 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 
 ## Conditions
 
-1. Appropriate credit **must always** be given to the original author, **Biplob Dey**, in any redistribution, modification, derivative work, publication, presentation, or other work that uses or is based on this software.
 
-2. The original copyright notice and this license must be included in all copies or substantial portions of the software.
-
-3. Any modifications or derivative works must clearly indicate that changes have been made and must not misrepresent the original software or its authorship.
+Any modifications or derivative works must clearly indicate that changes have been made and must not misrepresent the original software or its authorship.
 
 
 ## Disclaimer
