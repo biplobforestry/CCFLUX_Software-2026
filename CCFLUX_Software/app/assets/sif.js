@@ -365,4 +365,16 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
   document.querySelectorAll('[data-view]').forEach(link => link.onclick = event => { event.preventDefault(); history.pushState({}, '', link.href); routeView(); });
   addEventListener('popstate', routeView);
   load();
+
+  // Stamps the running build into the footer. A version number alone cannot
+  // answer "am I running the code I just pulled?" - it only changes at a
+  // release, so a fetch that was never merged looks identical to an update.
+  fetch('/api/build', {cache: 'no-store'})
+    .then(response => response.json())
+    .then(info => {
+      document.querySelectorAll('.app-version').forEach(node => {
+        node.textContent = `Version ${info.version} · build ${info.build}`;
+      });
+    })
+    .catch(() => {});
 })();

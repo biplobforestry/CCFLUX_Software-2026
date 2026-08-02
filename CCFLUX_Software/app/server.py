@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from core.logging_manager import LogLevel
+from core.version import SOFTWARE_VERSION, build_fingerprint
 
 from .miro_rack_bridge import MiroRackBridge
 from .scan_backend import DashboardScanBackend
@@ -160,6 +161,17 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 "/plotly.min.js"
             )
             self._send_bytes(status, body, content_type, headers)
+        elif path == "/api/build":
+            # Answers "am I running the code I just pulled?" without a terminal.
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "version": SOFTWARE_VERSION,
+                    # dashboard.html sits at <root>/app/assets/, so the
+                    # application root is two levels above its directory.
+                    "build": build_fingerprint(self.server.dashboard_file.parents[2]),
+                },
+            )
         elif path == "/campaign-logo.html":
             self._send_file(self.server.dashboard_file.with_name("campaign-logo.html"))
         elif path in {
