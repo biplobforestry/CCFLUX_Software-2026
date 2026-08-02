@@ -283,7 +283,9 @@
     // A fresh dialog replaces the body, so nothing minimised can survive it.
     modalMinimized = false;
     modalRestore.hidden = true;
-    showModal();
+    // Sets the class directly. Calling showModal() here recurses until the
+    // stack gives out, which is a valid script that opens no dialog at all.
+    modal.classList.add('show');
   }
 
   function settleModalAnswer(answer) {

@@ -56,9 +56,20 @@ def test_a_new_dialog_clears_a_minimized_one():
 
     assert "modalMinimized = false" in show
     assert "modalRestore.hidden = true" in show
-    # Every dialog opens through showModal; only the restore handler may set the
-    # class directly, or minimising would be cleared by the act of restoring.
-    assert SCRIPT.count("modal.classList.add('show')") == 1
+    # It must actually show the window. A bulk rewrite once replaced this very
+    # line with a call to showModal itself: still valid JavaScript, still passed
+    # a parse, and opened no dialog at all because it recursed until the stack
+    # gave out. Counting occurrences elsewhere did not notice.
+    assert "modal.classList.add('show')" in show
+    # Skipping the declaration line, which names the function, and the comments,
+    # which discuss the mistake by name.
+    statements = [
+        line for line in show.splitlines()[1:] if not line.lstrip().startswith("//")
+    ]
+    assert "showModal()" not in "\n".join(statements)
+
+    # Only showModal and the restore handler may touch the class directly.
+    assert SCRIPT.count("modal.classList.add('show')") == 2
 
 
 def test_minimizing_keeps_the_progress_poller_running():
