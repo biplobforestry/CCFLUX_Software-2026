@@ -97,6 +97,7 @@ const captured = {};
 globalThis.Plotly = { react: (id, traces) => { captured[id] = traces; } };
 globalThis.layout = (x, y) => ({ x, y });
 globalThis.config = {};
+let payload = null;
 
 __BODY__
 
@@ -127,6 +128,16 @@ const mode = { variables: { NDVI: [], PRI: [], EVI: [], MTCI: [],
 const offered = indexVariables(mode);
 out.onlyIndices = offered.length === 4 && offered.every(n => ['NDVI','PRI','EVI','MTCI'].indexOf(n) >= 0);
 out.customFallsBack = indexVariables({ variables: { MY_INDEX: [], OTHER: [] } }).length === 2;
+
+// A payload that declares its own indices wins over the built-in list, so an
+// operator's own index definition file is honoured.
+payload = { index_names: ['MY_INDEX'] };
+const declared = indexVariables({ variables: { MY_INDEX: [], NDVI: [], OTHER: [] } });
+out.declaredWins = declared.length === 1 && declared[0] === 'MY_INDEX';
+
+// L800 is in the bundled index file, so it must be offered by the fallback too.
+payload = null;
+out.l800Offered = indexVariables({ variables: { L800: [], 'temp1 [C]': [] } }).indexOf('L800') >= 0;
 
 JSON.stringify(out);
 """
@@ -166,7 +177,7 @@ def outcome(tmp_path_factory):
     [
         "hasHistogram", "hasCurve", "countsAllValues", "onePointPerBin",
         "centresIncrease", "allFinite", "bothModesVisible", "emptyDrawsNothing",
-        "onlyIndices", "customFallsBack",
+        "onlyIndices", "customFallsBack", "declaredWins", "l800Offered",
     ],
 )
 def test_distribution_and_index_behaviour(outcome, behaviour):

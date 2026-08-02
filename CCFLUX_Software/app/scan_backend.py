@@ -50,6 +50,8 @@ from core.flight_project import (
     FlightProject,
     FlightProjectStore,
     InstrumentProjectState,
+    relocate_output_locations,
+    relocate_product_path,
 )
 from core.gopro_georeference import georeference_captures, public_capture
 from core.flir_georeference import georeference_temperature_records
@@ -2062,7 +2064,19 @@ class DashboardScanBackend:
             if instrument_id in completed_instruments:
                 state.processing_progress = 100.0
                 state.processing_step = "Previously processed — skipped by default"
-            state.output_files = [str(value) for value in saved.output_locations]
+            state.output_files = [
+                str(relocate_product_path(value, project.flight_output_root))
+                for value in saved.output_locations
+            ]
+        # Recorded paths are where the products were written, which is not where
+        # they are once the project is opened somewhere else. A project written
+        # on Windows and opened here recorded 'C:\Output\...' for every product,
+        # so nothing below found its file and every workspace reported that its
+        # instrument had not been processed - while the products sat correctly
+        # extracted beside the project.
+        project.output_locations = relocate_output_locations(
+            project.output_locations, project.flight_output_root
+        )
         quicklook_file = project.output_locations.get("noseboom_quicklook")
         if quicklook_file and Path(quicklook_file).is_file():
             try:

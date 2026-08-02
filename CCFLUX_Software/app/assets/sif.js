@@ -39,6 +39,7 @@
     ['TCARI', 'Transformed Chlorophyll Absorption Reflectance Index', '700; 670; 550; 670', '3 × (a − b − 0.2 × (a − c) × a/d)'],
     ['REDCl', 'Red Edge Chlorophyll Index', '785; 725', 'R785 / R725 − 1'],
     ['MCRI', 'Modified Carotenoid Reflectance Index', '510; 725; 785', 'R785 / (R510 − R725)'],
+    ['L800', 'Radiance at 800 nm', '800', 'L800'],
     ['SIF A/B', 'Solar-induced fluorescence by improved FLD', 'O₂-A / O₂-B', 'Validated AirFloX iFLD retrieval']
   ];
   const manual = `SIF / FLOX WORKFLOW
@@ -187,9 +188,15 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
 
   function indexVariables(mode) {
     const available = Object.keys(mode?.variables || {});
-    const indices = available.filter(name => INDEX_NAMES.includes(name));
-    // A custom index list would match nothing; showing everything is better
-    // than showing an empty map with no explanation.
+    // The payload names the indices its own run produced, read from the index
+    // definition file that run used, so an operator's own list works too. The
+    // built-in names are the fallback for a project written before that.
+    const declared = Array.isArray(payload?.index_names) && payload.index_names.length
+      ? payload.index_names
+      : INDEX_NAMES;
+    const indices = available.filter(name => declared.includes(name));
+    // Nothing matched at all: showing everything is a worse view than an index
+    // list, but a far better one than an empty map with no explanation.
     return indices.length ? indices : available;
   }
 
@@ -238,6 +245,10 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
     if (points.length) {
       initialBounds = L.latLngBounds(points).pad(.08);
       map.fitBounds(initialBounds);
+    }
+    const note = document.getElementById('selectionNote');
+    if (!points.length && note) {
+      note.textContent = `${variable} has no value with a position in this product — nothing to map.`;
     }
     document.getElementById('mapLegendName').textContent = variable;
     document.getElementById('mapLegendMin').textContent = formatNumber(low);

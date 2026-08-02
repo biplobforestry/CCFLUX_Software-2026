@@ -309,6 +309,12 @@ class SifAdapter(InstrumentBase):
             "instrument_id": "sif",
             "time_basis": "UTC; AirFloX matched to Gimbal attitude and Noseboom position",
             "summary": _json_safe(result.metadata),
+            # Which of the columns are vegetation indices, taken from the index
+            # definition file this run actually used. The map offers these, and
+            # reading them here means an operator's own index list works as well
+            # as the bundled one - a name the page had never heard of would
+            # otherwise be silently absent from the map.
+            "index_names": _index_names(result.metadata.get("index_file")),
             "modes": modes,
         }
         path = Path(output_directory) / "sif_browser.json"
@@ -432,6 +438,31 @@ def _representative_indices(length, maximum):
         return np.arange(length, dtype=int)
     return np.unique(np.linspace(0, length - 1, maximum, dtype=int))
 
+
+
+def _index_names(index_file: object) -> list[str]:
+    """Index names from a semicolon-separated index definition file.
+
+    The file is the same one the retrieval read, so the names match the columns
+    it produced. An unreadable or unexpected file yields nothing rather than
+    raising: the map falls back to offering every variable, which is a worse
+    view but not a broken one.
+    """
+    if not index_file:
+        return []
+    path = Path(str(index_file))
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    except OSError:
+        return []
+    names: list[str] = []
+    for line in lines[1:]:                      # the first line names the columns
+        name = line.split(";", 1)[0].strip().strip('"')
+        if name and name not in names:
+            names.append(name)
+    return names
 
 def _finite_values(series):
     if series is None:

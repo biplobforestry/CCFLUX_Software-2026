@@ -905,3 +905,49 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+# The directories a project writes its products into. A recorded product path
+# always passes through one of them, which is what makes it relocatable.
+PRODUCT_DIRECTORIES = (*OUTPUT_DIRECTORIES, "processed", "exports")
+
+
+def relocate_product_path(recorded: object, output_root: Path) -> Path:
+    """Point a recorded product path at the copy under *output_root*.
+
+    A project carries its products inside the .ccflux archive, but records where
+    they were when they were written. Open a project processed on Windows from a
+    Mac, or from a USB stick, and every one of those paths is dead - so nothing
+    was restored and every workspace reported that its instrument had not been
+    processed, while the products sat correctly extracted beside the project.
+
+    Recorded separators may not be this platform's: 'C:\\Output\\...' parsed here
+    is a single meaningless filename, so the text is split on both. A path that
+    still resolves is returned untouched, which is every same-machine case.
+    """
+    if not recorded:
+        return Path("")
+    original = Path(str(recorded))
+    if original.is_file():
+        return original
+
+    parts = [part for part in str(recorded).replace("\\", "/").split("/") if part not in ("", ".")]
+    root = Path(output_root)
+    # The last match wins: a flight folder may itself be called "processed".
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index] in PRODUCT_DIRECTORIES:
+            candidate = root.joinpath(*parts[index:])
+            if candidate.is_file():
+                return candidate
+            break
+    return original
+
+
+def relocate_output_locations(
+    locations: dict[str, Path], output_root: Path
+) -> dict[str, Path]:
+    """Every recorded product path, resolved against the extracted tree."""
+    return {
+        key: relocate_product_path(value, output_root)
+        for key, value in (locations or {}).items()
+    }
