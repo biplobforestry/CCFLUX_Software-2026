@@ -1250,8 +1250,12 @@ def test_processing_configuration_is_blocked_while_dispatched_job_is_active():
     job.task = lambda context: None
     job.status = ProcessingStatus.QUEUED
 
-    with pytest.raises(ValueError, match="Please wait! System is busy now!"):
+    # Noseboom is flight science and so is this change, so it is still refused.
+    # The wording now names the half that is running, because the camera half
+    # stays usable meanwhile - see test_camera_flight_independence.py.
+    with pytest.raises(ValueError, match="Flight-data processing is still running"):
         backend.update_queue({"action": "disable", "job_id": "noseboom"})
+    # The worker allocation is shared by both halves, so it stays global.
     with pytest.raises(ValueError, match="Please wait! System is busy now!"):
         backend.update_resources(worker_count=1, memory_bytes=1024**3)
 def test_ready_picarro_is_selectable_in_processing_priority():

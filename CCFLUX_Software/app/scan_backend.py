@@ -3456,21 +3456,50 @@ class DashboardScanBackend:
             processing_step="candidate-confirmation",
         )
 
-    def _processing_configuration_is_busy(self) -> bool:
-        """Whether a dispatched integrated job still owns the processing workflow."""
-        return any(
-            job.enabled
-            and job.task is not None
-            and job.status in {ProcessingStatus.QUEUED, ProcessingStatus.PROCESSING}
+    # Camera work and flight science run in separate scheduler pools with
+    # reserved capacity, so neither can starve the other. Treating them as one
+    # "system" was a property of this check alone, and it meant a long camera
+    # run blocked every flight instrument for its whole duration.
+    CAMERA_WORKER_GROUPS = frozenset({
+        WorkerGroup.CAMERA_METADATA, WorkerGroup.CAMERA_DETAILED,
+    })
+
+    @classmethod
+    def _job_domain(cls, job) -> str:
+        return "camera" if job.worker_group in cls.CAMERA_WORKER_GROUPS else "flight"
+
+    def _busy_domains(self) -> set[str]:
+        """Which halves of the workflow still have a dispatched job."""
+        return {
+            self._job_domain(job)
             for job in (
                 self.processing_queue.get(snapshot.job_id)
                 for snapshot in self.processing_queue.ordered()
             )
-        )
+            if job.enabled
+            and job.task is not None
+            and job.status in {ProcessingStatus.QUEUED, ProcessingStatus.PROCESSING}
+        }
 
-    def _require_processing_configuration_idle(self) -> None:
-        if self._processing_configuration_is_busy():
-            raise ValueError("Please wait! System is busy now!")
+    def _processing_configuration_is_busy(self, domain: str | None = None) -> bool:
+        """Whether a dispatched integrated job still owns the processing workflow.
+
+        Without *domain* this answers for the whole workflow, which is what a
+        genuinely global change - the Time Filter, the worker allocation - has to
+        respect. A change confined to one half asks about that half only.
+        """
+        busy = self._busy_domains()
+        return bool(busy) if domain is None else domain in busy
+
+    def _require_processing_configuration_idle(self, domain: str | None = None) -> None:
+        if self._processing_configuration_is_busy(domain):
+            if domain is None:
+                raise ValueError("Please wait! System is busy now!")
+            side = "Camera" if domain == "camera" else "Flight-data"
+            raise ValueError(
+                f"Please wait! {side} processing is still running. "
+                "The other half of the workflow can be used meanwhile."
+            )
 
     TIME_FILTER_REQUEST_KEYS = frozenset({
         "action", "start", "end", "display_timezone",
@@ -3600,9 +3629,20 @@ class DashboardScanBackend:
         )
 
     def update_queue(self, request: dict[str, object]) -> None:
-        self._require_processing_configuration_idle()
         action = str(request.get("action", ""))
         job_id = str(request.get("job_id", ""))
+        # Only the half this touches has to be idle. Selecting flight
+        # instruments while the cameras run is the whole point of the split.
+        if action == "reorder":
+            self._require_processing_configuration_idle()
+        else:
+            try:
+                affected = self.processing_queue.get(job_id)
+            except (KeyError, ValueError):
+                affected = None
+            self._require_processing_configuration_idle(
+                self._job_domain(affected) if affected is not None else None
+            )
         if action == "reorder":
             job_ids = request.get("job_ids")
             if not isinstance(job_ids, list) or not all(
@@ -3872,7 +3912,11 @@ class DashboardScanBackend:
         return registered
     def start_processing(self, *, confirmed_limited_coverage: bool = False) -> None:
         with self._lock:
-            self._require_processing_configuration_idle()
+            # No blanket idle requirement. Registration below already skips a
+            # job that is COMPLETE, PROCESSING or CANCELLED, so a second start
+            # cannot disturb work in flight; it only adds what is not running.
+            # Refusing outright meant a camera run blocked every flight
+            # instrument until it finished.
             integrated_tasks = {
                 "noseboom": self._noseboom_task,
                 "miro": self._miro_task,
@@ -4815,7 +4859,12 @@ class DashboardScanBackend:
             job for job in jobs
             if job.enabled and not job.detailed and job.job_id in selectable_job_ids
         ]
-        busy = self._processing_configuration_is_busy()
+        busy_domains = self._busy_domains()
+        busy = bool(busy_domains)
+        # What matters for starting is whether the half being started is busy,
+        # not whether anything anywhere is running.
+        selected_domains = {self._job_domain(job) for job in selected}
+        start_blocked = bool(selected_domains & busy_domains)
         interval_ready = (
             self._time_state.selected_analysis_start is not None
             and self._time_state.selected_analysis_end is not None
@@ -4823,13 +4872,17 @@ class DashboardScanBackend:
         scan_ready = self._report is not None and self._phase in {"complete", "scanning_camera"}
         can_start = bool(
             selected
-            and not busy
+            and not start_blocked
             and interval_ready
             and scan_ready
         )
         return {
             "jobs": job_payload,
             "busy": busy,
+            "busy_domains": sorted(busy_domains),
+            "camera_busy": "camera" in busy_domains,
+            "flight_busy": "flight" in busy_domains,
+            "start_blocked": start_blocked,
             "selected_count": len(selected),
             "can_start": can_start,
             "workflow": {
@@ -4837,7 +4890,7 @@ class DashboardScanBackend:
                 "interval_ready": interval_ready,
                 "selection_required": not selected,
                 "next_step": (
-                    "Wait for active processing to finish" if busy else
+                    "Wait for the selected instruments to finish" if start_blocked else
                     "Select at least one instrument" if not selected else
                     "Finish flight scanning and choose the global Time Filter" if not (scan_ready and interval_ready) else
                     "Ready to start; an Output Folder will be requested" if self._selected_output_folder is None else

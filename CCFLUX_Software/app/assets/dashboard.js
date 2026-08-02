@@ -369,9 +369,13 @@
   priorityList.addEventListener('change', event => {
     const selector = event.target.closest('input[data-queue-select]');
     if (!selector) return;
-    if (isSystemBusy()) {
+    // Only the half this instrument belongs to has to be idle.
+    const row = selector.closest('.priority-job');
+    const job = (currentQueue.jobs || []).find(item => item.job_id === row?.dataset.jobId);
+    const domain = job ? jobDomain(job) : null;
+    if (isSystemBusy(domain)) {
       selector.checked = !selector.checked;
-      showBusyWarning();
+      showBusyWarning(domain);
       return;
     }
     queueAction({ action: selector.checked ? 'enable' : 'disable', job_id: selector.closest('.priority-job').dataset.jobId });
@@ -1145,13 +1149,19 @@
   function renderQueue(queue) {
     currentQueue = queue || { jobs: [] };
     const jobs = currentQueue.jobs || [];
-    const busy = isSystemBusy();
+    const running = busyDomains();
+    const anyBusy = running.size > 0;
     const workflow = currentQueue.workflow || {};
     const selected = Number(currentQueue.selected_count || 0);
     const workflowPill = document.getElementById('priorityWorkflowState');
     if (workflowPill) {
-      workflowPill.className = `status-pill ${busy ? 'running' : selected ? 'complete' : 'queued'}`;
-      workflowPill.innerHTML = `<span class="dot"></span>${escapeHtml(busy ? 'System busy' : selected ? `${selected} selected` : 'Selection required')}</span>`;
+      // Naming which half is running, because the other one stays usable.
+      const label = running.size === 2 ? 'Camera + flight running'
+        : running.has('camera') ? 'Camera running'
+          : running.has('flight') ? 'Flight data running'
+            : selected ? `${selected} selected` : 'Selection required';
+      workflowPill.className = `status-pill ${anyBusy ? 'running' : selected ? 'complete' : 'queued'}`;
+      workflowPill.innerHTML = `<span class="dot"></span>${escapeHtml(label)}</span>`;
     }
     const runButton = document.getElementById('runBtn');
     runButton.disabled = !currentQueue.can_start;
@@ -1159,6 +1169,9 @@
     priorityList.innerHTML = `<div class="queue-guide"><strong>1. Complete scan and Time Filter</strong><span>2. Select instruments</span><span>3. Check health and start</span><small>${escapeHtml(workflow.next_step || 'Select instruments after the flight scan is complete.')}</small></div>` + jobs.map(job => {
       const rowClass = job.status === 'processing' ? 'is-processing' : job.status === 'complete' ? 'is-complete' : job.status === 'failed' ? 'is-failed' : job.status === 'warning' ? 'is-warning' : '';
       const statusClass = job.status === 'complete' ? 'complete' : job.status === 'processing' ? 'running' : ['warning', 'failed'].includes(job.status) ? 'warning' : 'queued';
+      // This row is locked by its own half of the workflow only. Reordering is
+      // the exception below: the queue is one list, so it needs both idle.
+      const busy = running.has(jobDomain(job));
       const actions = [];
       if (job.instrument_id === 'sif' && !job.detailed) {
         // Configuration stays reachable after a completed run. Changing a
@@ -1173,15 +1186,43 @@
       }
       const selectable = Boolean(job.available_for_selection);
       const selectionNote = selectable ? '' : ` · ${escapeHtml(job.selection_reason || 'Not available for selection')}`;
-      return `<div class="priority-job ${rowClass}" draggable="${busy ? 'false' : 'true'}" data-job-id="${escapeAttribute(job.job_id)}"><span class="priority-handle" aria-label="Drag to reorder">☷</span><label class="queue-select" title="${escapeAttribute(job.selection_reason || '')}"><input type="checkbox" data-queue-select ${job.enabled ? 'checked' : ''} ${job.detailed || busy || !selectable ? 'disabled' : ''}><span>${job.previously_completed ? 'Skipped' : job.detailed ? 'Detailed only' : 'Include'}</span></label><div class="priority-copy"><div class="priority-name">${escapeHtml(job.display_name)}</div><div class="priority-meta"><strong>${escapeHtml(job.current_step || 'Waiting')}</strong> · ${Number(job.progress).toFixed(0)}% complete · ${formatElapsed(job.elapsed_seconds)}${selectionNote}</div><div class="priority-progress" aria-label="${Number(job.progress).toFixed(0)} percent complete"><span style="width:${Math.max(0, Math.min(100, Number(job.progress) || 0))}%"></span></div></div><span>Priority ${job.priority}</span><span class="status-pill ${statusClass}"><span class="dot"></span>${escapeHtml(capitalize(job.status))}</span><div class="priority-actions">${actions.join('')}</div></div>`;
+      return `<div class="priority-job ${rowClass}" draggable="${anyBusy ? 'false' : 'true'}" data-job-id="${escapeAttribute(job.job_id)}"><span class="priority-handle" aria-label="Drag to reorder">☷</span><label class="queue-select" title="${escapeAttribute(job.selection_reason || '')}"><input type="checkbox" data-queue-select ${job.enabled ? 'checked' : ''} ${job.detailed || busy || !selectable ? 'disabled' : ''}><span>${job.previously_completed ? 'Skipped' : job.detailed ? 'Detailed only' : 'Include'}</span></label><div class="priority-copy"><div class="priority-name">${escapeHtml(job.display_name)}</div><div class="priority-meta"><strong>${escapeHtml(job.current_step || 'Waiting')}</strong> · ${Number(job.progress).toFixed(0)}% complete · ${formatElapsed(job.elapsed_seconds)}${selectionNote}</div><div class="priority-progress" aria-label="${Number(job.progress).toFixed(0)} percent complete"><span style="width:${Math.max(0, Math.min(100, Number(job.progress) || 0))}%"></span></div></div><span>Priority ${job.priority}</span><span class="status-pill ${statusClass}"><span class="dot"></span>${escapeHtml(capitalize(job.status))}</span><div class="priority-actions">${actions.join('')}</div></div>`;
     }).join('');
   }
 
-  function isSystemBusy() {
-    return Boolean(currentQueue.busy) || (currentQueue.jobs || []).some(job => job.enabled && ['queued', 'processing'].includes(job.status) && job.current_step !== 'Disabled' && Boolean(job.task_registered));
+  // Camera work and flight science run in separate scheduler pools, so one
+  // does not block the other. Asking "is anything running?" made a long camera
+  // run disable every flight instrument for its whole duration.
+  const CAMERA_WORKER_GROUPS = ['camera_metadata', 'camera_detailed'];
+
+  function jobDomain(job) {
+    return CAMERA_WORKER_GROUPS.includes(job.worker_group) ? 'camera' : 'flight';
   }
 
-  function showBusyWarning() { showToast('Please wait! System is busy now!'); }
+  function busyDomains() {
+    const reported = currentQueue.busy_domains;
+    if (Array.isArray(reported)) return new Set(reported);
+    // Older payloads only carried a single flag; treat it as both halves.
+    const running = (currentQueue.jobs || []).filter(job =>
+      job.enabled && ['queued', 'processing'].includes(job.status)
+      && job.current_step !== 'Disabled' && Boolean(job.task_registered)
+    );
+    return new Set(running.map(jobDomain));
+  }
+
+  function isDomainBusy(domain) { return busyDomains().has(domain); }
+
+  function isSystemBusy(domain) {
+    return domain ? isDomainBusy(domain) : busyDomains().size > 0;
+  }
+
+  function showBusyWarning(domain) {
+    showToast(domain === 'camera'
+      ? 'Camera processing is still running. Flight instruments can be used meanwhile.'
+      : domain === 'flight'
+        ? 'Flight-data processing is still running. Camera products can be used meanwhile.'
+        : 'Please wait! System is busy now!');
+  }
   function renderCameraStatus(queue) {
     const jobs = new Map((queue.jobs || []).map(job => [job.job_id, job]));
     const cameraRows = [
@@ -2084,7 +2125,11 @@
     logRemoteWorkflow('Camera coverage presented after scanning', 'scan-result');
   }
   async function startRegisteredProcessing() {
-    if (isSystemBusy()) { showBusyWarning(); return; }
+    // Blocked only when something already selected is itself still running.
+    if (currentQueue.start_blocked) {
+      showBusyWarning([...busyDomains()][0]);
+      return;
+    }
     modalTitle.textContent = 'Checking health';
     modalBody.innerHTML = '<p><strong>Checking the selected instruments and their available time periods...</strong></p><div class="scan-progress indeterminate"><span></span></div>';
     showModal();
