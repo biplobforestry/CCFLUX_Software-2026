@@ -19,6 +19,37 @@ from pathlib import Path
 from statistics import mean
 
 
+# Instrument CSVs are not always UTF-8. Acquisition software on Windows writes
+# headers in cp1252, where a degree sign is the single byte 0xb0 that UTF-8
+# rejects: a column named 'Temp [degC]' spelled with the symbol ended the whole
+# run with "invalid start byte" and named no file. The encoding is decided from
+# the head of the file, which is where such a name lives.
+TEXT_PROBE_BYTES = 1 << 20
+
+
+def detect_encoding(path: Path) -> str:
+    try:
+        with Path(path).open("rb") as probe:
+            head = probe.read(TEXT_PROBE_BYTES)
+    except OSError:
+        return "utf-8-sig"
+    try:
+        head.decode("utf-8")
+    except UnicodeDecodeError:
+        # cp1252 has no invalid bytes, and turns 0xb0 back into the degree sign.
+        return "cp1252"
+    return "utf-8-sig"
+
+
+def open_text(path: Path, newline: str = ""):
+    """Read *path* as written. A stray byte deep inside a UTF-8 file degrades
+    one character rather than ending an hour of processing."""
+    encoding = detect_encoding(path)
+    if encoding == "cp1252":
+        return Path(path).open("r", newline=newline, encoding=encoding)
+    return Path(path).open("r", newline=newline, encoding=encoding, errors="replace")
+
+
 SIF_COLUMNS = [
     "lat",
     "lon",
@@ -109,7 +140,7 @@ def print_stats(stats: dict[str, list[float]], rows_written: int, rows_skipped: 
 
 
 def sort_sif_csv(csv_path: Path) -> None:
-    with csv_path.open("r", newline="", encoding="utf-8-sig") as src:
+    with open_text(csv_path) as src:
         reader = csv.DictReader(src)
         rows = list(reader)
     rows.sort(key=lambda row: parse_datetime(row["date_time_utc"]))
@@ -131,7 +162,7 @@ def yes_no(value: str | bool) -> bool:
 def read_time_range(csv_path: Path, time_column: str) -> tuple[datetime, datetime]:
     min_time: datetime | None = None
     max_time: datetime | None = None
-    with csv_path.open("r", newline="", encoding="utf-8-sig") as src:
+    with open_text(csv_path) as src:
         reader = csv.DictReader(src)
         if time_column not in (reader.fieldnames or []):
             raise SystemExit(f"Missing time column: {time_column}")
@@ -158,7 +189,7 @@ def convert_gimbal(args: argparse.Namespace) -> None:
     rows_written = 0
     rows_skipped = 0
 
-    with input_path.open("r", newline="", encoding="utf-8-sig") as src:
+    with open_text(input_path) as src:
         reader = csv.DictReader(src)
         missing = [col for col in args.required_columns if col not in (reader.fieldnames or [])]
         if missing:
@@ -268,7 +299,7 @@ def demo_noseboom(args: argparse.Namespace) -> None:
 def load_noseboom_positions(args: argparse.Namespace) -> list[tuple[datetime, float, float, float]]:
     noseboom_path = Path(args.noseboom_csv)
     samples: list[tuple[datetime, float, float, float]] = []
-    with noseboom_path.open("r", newline="", encoding="utf-8-sig") as src:
+    with open_text(noseboom_path) as src:
         reader = csv.DictReader(src)
         required = [args.noseboom_time_column, args.noseboom_lat_column, args.noseboom_lon_column, args.noseboom_alt_column]
         missing = [col for col in required if col not in (reader.fieldnames or [])]
@@ -380,7 +411,7 @@ def make_sif(args: argparse.Namespace) -> None:
         flight_start, flight_end, message = detect_flight_interval(noseboom_samples)
         print(f"warning={message}")
 
-    with gimbal_path.open("r", newline="", encoding="utf-8-sig") as src:
+    with open_text(gimbal_path) as src:
         reader = csv.DictReader(src)
         missing = [col for col in args.required_columns if col not in (reader.fieldnames or [])]
         if missing:
@@ -615,7 +646,7 @@ def add_make_sif_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def is_sif_log(path: Path) -> bool:
     try:
-        with path.open("r", newline="", encoding="utf-8-sig") as src:
+        with open_text(path) as src:
             reader = csv.DictReader(src)
             return set(SIF_COLUMNS).issubset(set(reader.fieldnames or []))
     except Exception:

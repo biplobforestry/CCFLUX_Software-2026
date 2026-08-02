@@ -15,6 +15,37 @@ from pathlib import Path
 from statistics import mean
 
 
+# Instrument CSVs are not always UTF-8. Acquisition software on Windows writes
+# headers in cp1252, where a degree sign is the single byte 0xb0 that UTF-8
+# rejects: a column named 'Temp [degC]' spelled with the symbol ended the whole
+# run with "invalid start byte" and named no file. The encoding is decided from
+# the head of the file, which is where such a name lives.
+TEXT_PROBE_BYTES = 1 << 20
+
+
+def detect_encoding(path: Path) -> str:
+    try:
+        with Path(path).open("rb") as probe:
+            head = probe.read(TEXT_PROBE_BYTES)
+    except OSError:
+        return "utf-8-sig"
+    try:
+        head.decode("utf-8")
+    except UnicodeDecodeError:
+        # cp1252 has no invalid bytes, and turns 0xb0 back into the degree sign.
+        return "cp1252"
+    return "utf-8-sig"
+
+
+def open_text(path: Path, newline: str = ""):
+    """Read *path* as written. A stray byte deep inside a UTF-8 file degrades
+    one character rather than ending an hour of processing."""
+    encoding = detect_encoding(path)
+    if encoding == "cp1252":
+        return Path(path).open("r", newline=newline, encoding=encoding)
+    return Path(path).open("r", newline=newline, encoding=encoding, errors="replace")
+
+
 SIF_COLUMNS = [
     "lat",
     "lon",
@@ -99,7 +130,7 @@ def convert(args: argparse.Namespace) -> None:
     rows_written = 0
     rows_skipped = 0
 
-    with input_path.open("r", newline="", encoding="utf-8-sig") as src:
+    with open_text(input_path) as src:
         reader = csv.DictReader(src)
         missing = [col for col in args.required_columns if col not in (reader.fieldnames or [])]
         if missing:

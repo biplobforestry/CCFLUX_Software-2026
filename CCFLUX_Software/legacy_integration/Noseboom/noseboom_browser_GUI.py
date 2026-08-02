@@ -62,6 +62,20 @@ def normalized_column_map(columns):
         )
     return mapping
 
+
+# Noseboom CSVs are not always UTF-8: acquisition software on Windows writes
+# headers in cp1252, where a degree sign is the single byte 0xb0 that UTF-8
+# rejects outright. The encoding is decided from the head of the file, which is
+# where a unit in a column name lives.
+TEXT_PROBE_BYTES=1<<20
+def detect_encoding(path):
+    try:
+        with Path(path).open('rb') as probe: head=probe.read(TEXT_PROBE_BYTES)
+    except OSError: return 'utf-8-sig'
+    try: head.decode('utf-8')
+    except UnicodeDecodeError: return 'cp1252'   # no invalid bytes; 0xb0 is the degree sign
+    return 'utf-8-sig'
+
 def safe_name(s): return ''.join(c if c.isalnum() or c in '-_' else '_' for c in ((s or '').strip() or 'Flight'))
 def natural_key(p): return [int(x) if x.isdigit() else x.lower() for x in re.split(r'(\d+)', p.name)]
 def looks_like_noseboom(p): return 'noseboom' in re.sub(r'[\s_\-]+','',str(p).lower())
@@ -134,7 +148,7 @@ def detect_files(flight_root, flight_name):
     return DetectedData(files,files[0].parent,f'Detected {len(files)} CSV file(s) using {mode}. First folder: {files[0].parent}', base.name or Path(flight_root).name)
 
 def csv_usecols(path):
-    header=pd.read_csv(path,nrows=0,encoding='utf-8-sig')
+    header=pd.read_csv(path,nrows=0,encoding=detect_encoding(path))
     mapping=normalized_column_map(header.columns)
     wanted=set(FIELDS.values())|set(FIELDS)
     # usecols must name the columns as the file spells them, so the original
@@ -160,7 +174,7 @@ def load_csv_files(files):
     counts=[count_rows(p,i*10/len(files),10/len(files)) for i,p in enumerate(files)]
     total=max(sum(counts),1); loaded=0; chunks=[]
     for p in files:
-        for raw in pd.read_csv(p,usecols=csv_usecols(p),encoding='utf-8-sig',low_memory=False,chunksize=CHUNKSIZE):
+        for raw in pd.read_csv(p,usecols=csv_usecols(p),encoding=detect_encoding(p),low_memory=False,chunksize=CHUNKSIZE):
             raw=raw.rename(columns=normalize_column_name)
             chunks.append(simplify(raw,p.name)); loaded+=len(raw); set_status(10+90*min(loaded/total,1),f'Loading rows {loaded:,}/{total:,}')
     data=pd.concat(chunks,ignore_index=True)
