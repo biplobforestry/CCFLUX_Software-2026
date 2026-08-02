@@ -2382,11 +2382,31 @@ class DashboardScanBackend:
         return path
 
     def flir_view(self) -> dict[str, object]:
-        """Return saved FLIR acquisition and temperature-map products."""
+        """Return saved FLIR acquisition and temperature-map products.
+
+        The series are bounded here, on the way out, and not only when they are
+        written. A project processed before that reduction existed still holds
+        every frame in its saved flir_browser.json - tens of megabytes - and
+        reprocessing a flight to make its own workspace open is not a reasonable
+        thing to ask. Bounding on the way out covers both.
+        """
         with self._lock:
             state = self._instruments["flir"]
             project = self._flight_project
             payload = dict(state.quicklook)
+            for field, total_field, extremes in (
+                ("temperature_records", "temperature_records_total",
+                 ("temperature_min_c", "temperature_max_c")),
+                ("map_points", "map_points_total", ("temperature_max_c",)),
+            ):
+                series = payload.get(field)
+                if not isinstance(series, list) or not series:
+                    continue
+                reduced, total = decimate_for_view(series, extreme_fields=extremes)
+                payload[field] = reduced
+                # A payload written by the current code already carries the true
+                # count; one written before it does not, so it is set here.
+                payload.setdefault(total_field, total)
             coverage = self._time_state.instruments.get("flir")
             selected_start = self._time_state.selected_analysis_start
             selected_end = self._time_state.selected_analysis_end

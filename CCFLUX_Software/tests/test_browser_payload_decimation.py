@@ -147,3 +147,60 @@ def test_the_reduction_is_large_enough_to_matter():
     before = len(json.dumps(rows))
     after = len(json.dumps(kept))
     assert after * 20 < before, f"{before/1e6:.1f} MB -> {after/1e6:.1f} MB is not enough"
+
+
+class TestTheFlirViewBoundsWhatItServes:
+    """A project processed before the reduction existed still holds every frame
+    in its saved flir_browser.json. Reprocessing a flight so that its own
+    workspace will open is not a reasonable thing to ask, so the view bounds
+    the series on the way out as well as on the way in."""
+
+    @staticmethod
+    def _backend_with(records, tmp_path):
+        from app.scan_backend import DashboardScanBackend
+
+        backend = DashboardScanBackend(tmp_path)
+        backend._instruments["flir"].quicklook = {
+            "available": True, "temperature_available": True,
+            "temperature_records": records, "map_points": [],
+            "summary": {}, "thumbnails": [], "gaps": [],
+        }
+        return backend
+
+    def test_an_unreduced_saved_payload_is_bounded_when_served(self, tmp_path):
+        backend = self._backend_with(_series(120_000), tmp_path)
+
+        served = backend.flir_view()["data"]
+
+        assert len(served["temperature_records"]) <= DEFAULT_VIEW_LIMIT
+        assert served["temperature_records_total"] == 120_000
+
+    def test_the_spike_survives_that_reduction_too(self, tmp_path):
+        backend = self._backend_with(_series(120_000, spike_at=76_543), tmp_path)
+
+        served = backend.flir_view()["data"]
+
+        assert max(r["temperature_max_c"] for r in served["temperature_records"]) == 99.75
+
+    def test_the_stored_payload_is_not_modified(self, tmp_path):
+        """Serving a reduced view must not discard the full record held in
+        memory, which is what the project file is written from."""
+        backend = self._backend_with(_series(120_000), tmp_path)
+
+        backend.flir_view()
+
+        assert len(backend._instruments["flir"].quicklook["temperature_records"]) == 120_000
+
+    def test_a_small_payload_is_served_whole(self, tmp_path):
+        backend = self._backend_with(_series(200), tmp_path)
+
+        served = backend.flir_view()["data"]
+
+        assert len(served["temperature_records"]) == 200
+
+    def test_an_empty_payload_is_untouched(self, tmp_path):
+        backend = self._backend_with([], tmp_path)
+
+        served = backend.flir_view()["data"]
+
+        assert served["temperature_records"] == []

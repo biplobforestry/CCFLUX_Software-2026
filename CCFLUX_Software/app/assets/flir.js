@@ -50,6 +50,9 @@
   }
   function ensureMap(){
     if(map)return;
+    // The page once loaded Leaflet's stylesheet but never its script, so every
+    // L.* call threw and the map silently never appeared. Say so plainly.
+    if(typeof L==='undefined')throw new Error('the map library did not load');
     map=L.map('thermalMap',{zoomControl:true,preferCanvas:true}).setView([47.64,9.38],10);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors',crossOrigin:true}).addTo(map);
   }
@@ -112,6 +115,13 @@
   async function load(){
     if(flirRetry){clearTimeout(flirRetry);flirRetry=null;}
     $('busy').classList.add('show');
+    // Whatever else happens, the overlay comes down. It hides the entire page,
+    // so leaving it up turns any unhandled failure into an apparent hang with
+    // nothing on screen to explain it.
+    const failsafe=setTimeout(()=>{
+      $('busy').classList.remove('show');
+      $('statusText').textContent='FLIR workspace took too long to prepare. Use Refresh, and check the Processing Log.';
+    },20000);
     try{
       // The dashboard holds its state lock while a job runs, so this request can
       // wait on processing rather than on itself. Without a bound the page sat
@@ -141,7 +151,7 @@
       $('summaryGrid').innerHTML=summaryCard('FLIR workspace',busy?'Waiting for processing':'Unavailable',$('statusText').textContent);
       if(busy){flirRetry=setTimeout(load,4000);}
     }
-    finally{$('busy').classList.remove('show');}
+    finally{clearTimeout(failsafe);$('busy').classList.remove('show');}
   }
   function formatBytes(value){const n=Number(value)||0;if(n<1024)return `${n} B`;if(n<1048576)return `${(n/1024).toFixed(1)} KB`;return `${(n/1048576).toFixed(1)} MB`;}
   async function showExports(){
