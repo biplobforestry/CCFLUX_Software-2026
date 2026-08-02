@@ -119,3 +119,81 @@ def test_the_last_matching_directory_wins(tmp_path):
     recorded = r"D:\processed\Flight\processed\sif\runs\x\sif_browser.json"
 
     assert relocate_product_path(recorded, root) == target
+
+
+# ------------------------------------------------- products read from the file
+import json
+import zipfile
+
+from core.flight_project import read_bundled_product
+
+
+def _archive(tmp_path, entries):
+    path = tmp_path / "Flight_2707.ccflux"
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, body in entries.items():
+            archive.writestr(name, body)
+    return path
+
+
+def test_a_product_is_read_from_the_archive(tmp_path):
+    """Extraction assumes the project's own location is writable and still
+    attached. Read-only media, or a volume unplugged afterwards, restores
+    nothing - and every workspace then reports that its instrument was never
+    processed, with the products inside the file the whole time."""
+    project = _archive(tmp_path, {
+        "products/quicklooks/flir_browser.json": json.dumps({"available": True}),
+    })
+
+    raw = read_bundled_product(project, r"C:\Output\Flight_2707\quicklooks\flir_browser.json")
+
+    assert raw is not None
+    assert json.loads(raw)["available"] is True
+
+
+def test_a_deep_product_is_found_in_the_archive(tmp_path):
+    project = _archive(tmp_path, {
+        "products/processed/flir/runs/x/level2/summary.json": "{}",
+    })
+
+    assert read_bundled_product(
+        project, r"D:\out\F\processed\flir\runs\x\level2\summary.json"
+    ) == b"{}"
+
+
+def test_a_product_that_is_not_in_the_archive_is_reported_absent(tmp_path):
+    project = _archive(tmp_path, {"products/quicklooks/a.json": "{}"})
+
+    assert read_bundled_product(project, r"C:\o\F\quicklooks\missing.json") is None
+
+
+@pytest.mark.parametrize("bad", [None, ""])
+def test_nothing_to_read_is_harmless(bad, tmp_path):
+    project = _archive(tmp_path, {"products/quicklooks/a.json": "{}"})
+
+    assert read_bundled_product(project, bad) is None
+    assert read_bundled_product(bad, r"C:\o\F\quicklooks\a.json") is None
+
+
+def test_a_file_that_is_not_a_project_is_refused(tmp_path):
+    plain = tmp_path / "notes.txt"
+    plain.write_text("not an archive", encoding="utf-8")
+
+    assert read_bundled_product(plain, r"C:\o\F\quicklooks\a.json") is None
+
+
+def test_the_extracted_copy_is_preferred_when_it_is_there(tmp_path, output_root):
+    """The archive is the fallback, not the first choice: a product rewritten by
+    a later run must win over the copy sealed into the project."""
+    project = _archive(tmp_path, {
+        "products/quicklooks/flir_browser.json": json.dumps({"from": "archive"}),
+    })
+    newer = output_root / "quicklooks" / "flir_browser.json"
+    newer.write_text(json.dumps({"from": "disk"}), encoding="utf-8")
+
+    resolved = relocate_product_path(
+        r"C:\Output\Flight_2707\quicklooks\flir_browser.json", output_root
+    )
+
+    assert json.loads(resolved.read_text(encoding="utf-8"))["from"] == "disk"
+    assert json.loads(read_bundled_product(project, resolved))["from"] == "archive"

@@ -52,6 +52,7 @@ from core.flight_project import (
     InstrumentProjectState,
     relocate_output_locations,
     relocate_product_path,
+    read_bundled_product,
 )
 from core.gopro_georeference import georeference_captures, public_capture
 from core.flir_georeference import georeference_temperature_records
@@ -1997,6 +1998,30 @@ class DashboardScanBackend:
             "truncated": len(project_files) >= 500,
         }
 
+
+    def _restore_browser_payload(self, project, key: str, project_file):
+        """The saved payload for one instrument, however it can be reached.
+
+        The extracted copy is preferred; the archive is the fallback. Extraction
+        assumes the project's own location is writable and still attached, and a
+        project opened from read-only media - or from a volume removed afterwards
+        - restores nothing at all, leaving every workspace reporting that its
+        instrument was never processed.
+        """
+        recorded = project.output_locations.get(key)
+        if recorded and Path(recorded).is_file():
+            try:
+                return json.loads(Path(recorded).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pass                     # fall through to the archive
+        raw = read_bundled_product(project_file, recorded)
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+
     def open_project(self, project_file: Path | None = None) -> dict[str, object]:
         if project_file is None:
             self.logger.log(
@@ -2077,53 +2102,25 @@ class DashboardScanBackend:
         project.output_locations = relocate_output_locations(
             project.output_locations, project.flight_output_root
         )
-        quicklook_file = project.output_locations.get("noseboom_quicklook")
-        if quicklook_file and Path(quicklook_file).is_file():
-            try:
-                instruments["noseboom"].quicklook = json.loads(
-                    Path(quicklook_file).read_text(encoding="utf-8")
-                )
-                instruments["noseboom"].processing_status = "complete"
-                self._noseboom_straight_settings = dict(
-                    instruments["noseboom"].quicklook.get("straight_settings", {})
-                )
-            except (OSError, json.JSONDecodeError) as exc:
-                instruments["noseboom"].warnings.append(
-                    f"Saved Noseboom browser state could not be loaded: {exc}"
-                )
-        gopro_quicklook = project.output_locations.get("gopro_quicklook")
-        if gopro_quicklook and Path(gopro_quicklook).is_file():
-            try:
-                instruments["gopro"].quicklook = json.loads(
-                    Path(gopro_quicklook).read_text(encoding="utf-8")
-                )
-                instruments["gopro"].processing_status = "complete"
-            except (OSError, json.JSONDecodeError) as exc:
-                instruments["gopro"].warnings.append(
-                    f"Saved GoPro browser state could not be loaded: {exc}"
-                )
-        flir_browser = project.output_locations.get("flir_browser")
-        if flir_browser and Path(flir_browser).is_file():
-            try:
-                instruments["flir"].quicklook = json.loads(
-                    Path(flir_browser).read_text(encoding="utf-8")
-                )
-                instruments["flir"].processing_status = "complete"
-            except (OSError, json.JSONDecodeError) as exc:
-                instruments["flir"].warnings.append(
-                    f"Saved FLIR browser state could not be loaded: {exc}"
-                )
-        sif_browser = project.output_locations.get("sif_browser")
-        if sif_browser and Path(sif_browser).is_file():
-            try:
-                instruments["sif"].quicklook = json.loads(
-                    Path(sif_browser).read_text(encoding="utf-8")
-                )
-                instruments["sif"].processing_status = "complete"
-            except (OSError, json.JSONDecodeError) as exc:
-                instruments["sif"].warnings.append(
-                    f"Saved SIF browser state could not be loaded: {exc}"
-                )
+        payload = self._restore_browser_payload(project, "noseboom_quicklook", project_file)
+        if payload is not None:
+            instruments["noseboom"].quicklook = payload
+            instruments["noseboom"].processing_status = "complete"
+            self._noseboom_straight_settings = dict(
+                instruments["noseboom"].quicklook.get("straight_settings", {})
+            )
+        payload = self._restore_browser_payload(project, "gopro_quicklook", project_file)
+        if payload is not None:
+            instruments["gopro"].quicklook = payload
+            instruments["gopro"].processing_status = "complete"
+        payload = self._restore_browser_payload(project, "flir_browser", project_file)
+        if payload is not None:
+            instruments["flir"].quicklook = payload
+            instruments["flir"].processing_status = "complete"
+        payload = self._restore_browser_payload(project, "sif_browser", project_file)
+        if payload is not None:
+            instruments["sif"].quicklook = payload
+            instruments["sif"].processing_status = "complete"
         ranges = {
             instrument_id: (
                 saved.utc_start_time,

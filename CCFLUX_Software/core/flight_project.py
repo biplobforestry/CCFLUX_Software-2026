@@ -951,3 +951,32 @@ def relocate_output_locations(
         key: relocate_product_path(value, output_root)
         for key, value in (locations or {}).items()
     }
+
+
+def read_bundled_product(project_file: object, recorded: object) -> bytes | None:
+    """The bytes of one product, read straight out of the .ccflux.
+
+    Extraction writes products beside the project, which assumes that location
+    is writable and still attached. A project opened from read-only media, or
+    from a volume that is removed afterwards, therefore restores nothing - and
+    every workspace then reports that its instrument was never processed, with
+    the products sitting in the archive the whole time.
+
+    Reading from the archive removes that assumption: the file is the source,
+    the extracted copy only a convenience.
+    """
+    if not project_file or not recorded:
+        return None
+    path = Path(str(project_file))
+    if not path.is_file() or not zipfile.is_zipfile(path):
+        return None
+    parts = [p for p in str(recorded).replace("\\", "/").split("/") if p not in ("", ".")]
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index] in PRODUCT_DIRECTORIES:
+            name = BUNDLE_PREFIX + "/".join(parts[index:])
+            try:
+                with zipfile.ZipFile(path) as archive:
+                    return archive.read(name)
+            except (KeyError, OSError, zipfile.BadZipFile):
+                return None
+    return None
