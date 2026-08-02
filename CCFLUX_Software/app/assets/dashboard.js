@@ -1335,8 +1335,10 @@
   // beforeProcessing turns the dialog into the settings step of a processing
   // run: it resolves true when the operator saves and wants to go ahead, false
   // when they back out, so the caller can wait for the answer.
-  function openSifConfiguration(options = {}) {
-    const beforeProcessing = Boolean(options.beforeProcessing);
+  function openSifConfiguration(dialogOptions = {}) {
+    // Named apart from the SIF options below: one is how the dialog behaves,
+    // the other is the instrument configuration it edits.
+    const beforeProcessing = Boolean(dialogOptions.beforeProcessing);
     let settle = () => {};
     const answered = new Promise(resolve => { settle = resolve; });
     const options = latestScanState.sif_options || {};
