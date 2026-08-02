@@ -205,9 +205,59 @@ def test_only_the_control_that_drives_the_view_is_shown():
 
 
 def test_hiding_a_toolbar_label_actually_hides_it():
-    """`.toolbar label` sets display:flex, which outranks the browser's
-    [hidden]{display:none}; without an explicit rule the swap does nothing."""
-    assert ".toolbar label[hidden]{display:none}" in HTML
+    """The label sets display:flex, which outranks the browser's
+    [hidden]{display:none}. The first attempt named `.toolbar`, and the bar is
+    `.control-bar`, so the rule matched nothing and both controls stayed on
+    screen. The selector is therefore checked against the markup, not asserted
+    as a fixed string."""
+    bar = re.search(r'<div class="([a-z-]+)">\s*\n\s*<label>Product', HTML)
+    assert bar, "the control bar was not found"
+
+    assert f".{bar.group(1)} label[hidden]{{display:none}}" in HTML
+
+
+def test_the_map_fills_the_screen_when_it_is_full_screen():
+    """#sifMap carries a clamped height, so the card went full screen and the
+    map inside it stayed its windowed size with black beneath."""
+    assert ":fullscreen #sifMap{height:100%!important}" in HTML
+    assert ":fullscreen .map-shell{flex:1;min-height:0}" in HTML
+    assert ":fullscreen{display:flex;flex-direction:column}" in HTML
+
+
+PALETTES = ("viridis", "plasma", "Purples", "Blues", "Greens", "Oranges",
+            "Reds", "spring", "summer", "autumn")
+
+
+@pytest.mark.parametrize("name", PALETTES)
+def test_every_requested_palette_is_offered(name):
+    assert f"{name}:" in SCRIPT or f"'{name}'" in SCRIPT
+
+
+def test_the_palette_control_is_in_the_toolbar_on_the_map_view():
+    assert 'id="paletteSelect"' in HTML
+    label = next(line for line in HTML.splitlines() if "paletteSelect" in line)
+    assert 'data-toolbar-for="map"' in label
+
+
+def test_the_variable_control_is_not_shown_on_the_map_view():
+    label = next(line for line in HTML.splitlines() if 'id="variableSelect"' in line)
+    assert 'data-toolbar-for="plots"' in label
+
+
+def test_the_legend_follows_the_chosen_palette():
+    """A map drawn in one scale with a legend drawn in another misreads."""
+    assert "paletteGradient" in SCRIPT
+    assert "swatch.style.background = paletteGradient(palette)" in SCRIPT
+
+
+def test_markers_follow_the_chosen_palette():
+    assert "paletteColour(ratio, palette)" in SCRIPT
+
+
+def test_the_palette_travels_to_the_new_tab():
+    opener = SCRIPT[SCRIPT.index("mapNewTabBtn"):]
+    opener = opener[: opener.index("};")]
+    assert "palette: paletteName()" in opener
 
 
 def test_the_map_can_be_opened_on_its_own():

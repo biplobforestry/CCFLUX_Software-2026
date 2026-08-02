@@ -235,6 +235,7 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
       legend.addTo(map);
     }
     pointLayer.clearLayers();
+    const palette = paletteName();
     const points = [];
     const values = mode.variables[variable] || [];
     const finite = values.filter(value => Number.isFinite(value));
@@ -244,7 +245,7 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
       const lat = Number(mode.latitude[i]), lon = Number(mode.longitude[i]), value = Number(values[i]);
       if (![lat, lon, value].every(Number.isFinite)) continue;
       const ratio = high > low ? (value - low) / (high - low) : 0.5;
-      const color = viridis(ratio);
+      const color = paletteColour(ratio, palette);
       L.circleMarker([lat, lon], {radius: 4.5, color: '#7a1020', weight: 1, fillColor: color, fillOpacity: .9})
         .bindPopup(`<strong>${escapeHtml(variable)}</strong>: ${value.toPrecision(6)}<br>Lat: ${lat.toFixed(6)}<br>Lon: ${lon.toFixed(6)}<br>Altitude: ${formatNumber(mode.altitude_m[i])} m<br>UTC: ${escapeHtml(mode.time[i] || '—')}`)
         .addTo(pointLayer);
@@ -258,17 +259,62 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
     if (!points.length && note) {
       note.textContent = `${variable} has no value with a position in this product — nothing to map.`;
     }
+    const swatch = document.querySelector('.map-legend .gradient');
+    if (swatch) swatch.style.background = paletteGradient(palette);
     document.getElementById('mapLegendName').textContent = variable;
     document.getElementById('mapLegendMin').textContent = formatNumber(low);
     document.getElementById('mapLegendMax').textContent = formatNumber(high);
     setTimeout(() => map.invalidateSize(), 40);
   }
-  function viridis(value) {
-    const stops = [[68,1,84],[49,104,142],[53,183,121],[253,231,37]];
+  // Colour scales, as stop lists interpolated the same way. The perceptual ones
+  // come first because they are the defensible default for a quantitative map:
+  // the sequential and the classic ramps are offered for figures that have to
+  // match an existing publication, not because they read equally well.
+  const PALETTES = {
+    viridis: [[68,1,84],[59,82,139],[33,145,140],[94,201,98],[253,231,37]],
+    plasma:  [[13,8,135],[126,3,168],[204,71,120],[248,149,64],[240,249,33]],
+    Purples: [[252,251,253],[188,189,220],[128,125,186],[84,39,143],[63,0,125]],
+    Blues:   [[247,251,255],[158,202,225],[66,146,198],[8,81,156],[8,48,107]],
+    Greens:  [[247,252,245],[161,217,155],[65,171,93],[0,109,44],[0,68,27]],
+    Oranges: [[255,245,235],[253,174,107],[241,105,19],[166,54,3],[127,39,4]],
+    Reds:    [[255,245,240],[252,146,114],[222,45,38],[165,15,21],[103,0,13]],
+    spring:  [[255,0,255],[255,255,0]],
+    summer:  [[0,128,102],[255,255,102]],
+    autumn:  [[255,0,0],[255,255,0]]
+  };
+  const DEFAULT_PALETTE = 'viridis';
+
+  function paletteName() {
+    const select = document.getElementById('paletteSelect');
+    return (select && PALETTES[select.value]) ? select.value : DEFAULT_PALETTE;
+  }
+
+  function paletteColour(value, name = paletteName()) {
+    const stops = PALETTES[name] || PALETTES[DEFAULT_PALETTE];
+    // Clamped just below 1 so the top of the range never indexes past the end.
     const scaled = Math.max(0, Math.min(.999, value)) * (stops.length - 1);
     const index = Math.floor(scaled), amount = scaled - index;
     const rgb = stops[index].map((part, channel) => Math.round(part + (stops[index + 1][channel] - part) * amount));
     return `rgb(${rgb.join(',')})`;
+  }
+
+  function paletteGradient(name = paletteName()) {
+    const stops = PALETTES[name] || PALETTES[DEFAULT_PALETTE];
+    return `linear-gradient(90deg,${stops.map(rgb => `rgb(${rgb.join(',')})`).join(',')})`;
+  }
+
+  function setPalettes() {
+    const select = document.getElementById('paletteSelect');
+    if (!select || select.options.length) return;
+    const requested = new URLSearchParams(location.search).get('palette');
+    select.innerHTML = Object.keys(PALETTES)
+      .map(name => `<option value="${name}">${name}</option>`).join('');
+    select.value = PALETTES[requested] ? requested : DEFAULT_PALETTE;
+  }
+
+  // Kept so anything still calling it gets the chosen scale, not a fixed one.
+  function viridis(value) {
+    return paletteColour(value);
   }
   const VIEWS = ['overview', 'timeseries', 'map'];
   function routeView() {
@@ -370,6 +416,11 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
     const mode = selectedMode();
     if (mode) renderMap(mode, document.getElementById('mapVariableSelect').value);
   };
+  setPalettes();
+  document.getElementById('paletteSelect').onchange = () => {
+    const mode = selectedMode();
+    if (mode) renderMap(mode, document.getElementById('mapVariableSelect').value);
+  };
   document.getElementById('resetMapBtn').onclick = () => { if (map && initialBounds) map.fitBounds(initialBounds); };
   // One index on its own, in its own tab: the product and the index travel in
   // the URL so the new tab opens on exactly what was being looked at, and can
@@ -377,7 +428,8 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
   document.getElementById('mapNewTabBtn').onclick = () => {
     const parameters = new URLSearchParams({
       mode: document.getElementById('modeSelect').value,
-      index: document.getElementById('mapVariableSelect').value
+      index: document.getElementById('mapVariableSelect').value,
+      palette: paletteName()
     });
     window.open(`/sif/map?${parameters}`, '_blank', 'noopener');
   };

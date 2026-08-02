@@ -10,7 +10,18 @@
     /* .toolbar label sets display:flex, which outranks the browser's
        [hidden]{display:none}. Without this the hidden control stays on
        screen and the swap does nothing. */
-    .toolbar label[hidden]{display:none}
+    /* .control-bar label sets display:flex, which outranks the browser's
+       [hidden]{display:none}. Named for the class the bar actually has -
+       the first attempt said .toolbar and silently matched nothing. */
+    .control-bar label[hidden]{display:none}
+    /* The card fills the screen; the map fills the card. A fixed height
+       here left the map at its windowed size with black beneath it. */
+    :fullscreen{display:flex;flex-direction:column}
+    :fullscreen .map-shell{flex:1;min-height:0}
+    :fullscreen #sifMap{height:100%!important}
+    :-webkit-full-screen{display:flex;flex-direction:column}
+    :-webkit-full-screen .map-shell{flex:1;min-height:0}
+    :-webkit-full-screen #sifMap{height:100%!important}
     .control-bar{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-bottom:14px;padding:12px;border:1px solid var(--line);border-radius:11px;background:var(--panel)}
     .control-bar label{display:flex;align-items:center;gap:7px;color:var(--muted);font-weight:700}.control-bar select{min-width:150px}
     #sifMap{height:clamp(520px,68vh,840px);background:#cbd5df}.map-shell{position:relative}.map-reset{position:absolute;z-index:800;right:12px;top:12px}
@@ -48,6 +59,7 @@
       <label>Product <select id="modeSelect"><option value="FULL">FULL / FLOX</option><option value="FLUO">FLUO</option></select></label>
       <label data-toolbar-for="plots">Variable <select id="variableSelect"></select></label>
       <label data-toolbar-for="map">Index <select id="mapVariableSelect"></select></label>
+      <label data-toolbar-for="map">Colours <select id="paletteSelect"></select></label>
       <button class="btn primary" id="applyBtn">Update plots</button>
       <span class="spacer"></span><span id="selectionNote">Waiting for products</span>
     </div>
