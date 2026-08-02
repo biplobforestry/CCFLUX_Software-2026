@@ -61,16 +61,25 @@
     const values=points.map(point=>Number(point[metric])),low=quantile(values,.02),highCandidate=quantile(values,.98),high=highCandidate>low?highCandidate:low+1;
     const step=Math.max(1,Math.ceil(points.length/4000)),shown=points.filter((_,index)=>index%step===0),renderer=L.canvas({padding:.5,tolerance:8});
     const route=L.polyline(shown.map(point=>[point.latitude,point.longitude]),{renderer,color:'#17212b',weight:2,opacity:.58,interactive:false}).addTo(map);mapLayers.push(route);
-    shown.forEach(point=>{
+    // Popup text is built when a marker is opened, not for all of them up
+    // front, and the markers join the map as one layer instead of thousands of
+    // separate insertions. Both were pure cost: nobody reads 4000 popups.
+    const popup=point=>{
       const value=Number(point[metric]);
-      const marker=L.circleMarker([point.latitude,point.longitude],{renderer,radius:4,color:'#071827',weight:.45,fillColor:color(value,low,high),fillOpacity:.92});
-      marker.bindPopup(`<strong>FLIR frame ${point.frame_id}</strong><br>${point.timestamp_utc}<br>Latitude: ${Number(point.latitude).toFixed(6)}<br>Longitude: ${Number(point.longitude).toFixed(6)}<br>Altitude: ${finite(point.altitude_m)?Number(point.altitude_m).toFixed(2)+' m':'n/a'}<br>${metricLabels[metric]}: ${value.toFixed(3)}<br>Mean: ${finite(point.temperature_mean_c)?Number(point.temperature_mean_c).toFixed(3)+' °C':'n/a'}<br>Range: ${finite(point.temperature_min_c)&&finite(point.temperature_max_c)?Number(point.temperature_min_c).toFixed(3)+'–'+Number(point.temperature_max_c).toFixed(3)+' °C':'n/a'}<br>Noseboom time difference: ${Number(point.time_delta_seconds).toFixed(3)} s`);
-      marker.addTo(map);mapLayers.push(marker);
-    });
+      return `<strong>FLIR frame ${point.frame_id}</strong><br>${point.timestamp_utc}<br>Latitude: ${Number(point.latitude).toFixed(6)}<br>Longitude: ${Number(point.longitude).toFixed(6)}<br>Altitude: ${finite(point.altitude_m)?Number(point.altitude_m).toFixed(2)+' m':'n/a'}<br>${metricLabels[metric]}: ${value.toFixed(3)}<br>Mean: ${finite(point.temperature_mean_c)?Number(point.temperature_mean_c).toFixed(3)+' °C':'n/a'}<br>Range: ${finite(point.temperature_min_c)&&finite(point.temperature_max_c)?Number(point.temperature_min_c).toFixed(3)+'–'+Number(point.temperature_max_c).toFixed(3)+' °C':'n/a'}<br>Noseboom time difference: ${finite(point.time_delta_seconds)?Number(point.time_delta_seconds).toFixed(3)+' s':'n/a'}`;
+    };
+    const markers=shown.map(point=>L.circleMarker([point.latitude,point.longitude],
+      {renderer,radius:4,color:'#071827',weight:.45,fillColor:color(Number(point[metric]),low,high),fillOpacity:.92}
+    ).bindPopup(()=>popup(point)));
+    const group=L.layerGroup(markers).addTo(map);mapLayers.push(group);
     mapBounds=L.latLngBounds(shown.map(point=>[point.latitude,point.longitude]));
     if(mapBounds.isValid())map.fitBounds(mapBounds,{padding:[30,30],maxZoom:17});
     $('legendTitle').textContent=metricLabels[metric];$('legendLow').textContent=`${low.toFixed(2)} °C`;$('legendHigh').textContent=`${high.toFixed(2)} °C`;$('mapLegend').hidden=false;
-    $('mapNote').textContent=`${points.length.toLocaleString()} georeferenced frames · displaying ${shown.length.toLocaleString()} interactive points`;
+    // Naming the true frame count, because what is drawn is a reduced view of
+    // it and the reader should not mistake one for the other.
+    const total=Number(payload.map_points_total)||points.length;
+    const reduced=total>points.length?` (reduced from ${total.toLocaleString()} for display; every frame is in temperature_frames.csv)`:'';
+    $('mapNote').textContent=`${total.toLocaleString()} georeferenced frames${reduced} · displaying ${shown.length.toLocaleString()} interactive points`;
   }
   function renderGallery(){
     const thumbnails=payload.thumbnails||[];
@@ -82,6 +91,22 @@
     document.querySelectorAll('[data-view]').forEach(link=>link.classList.toggle('active',link.dataset.view===view));
     if(push)history.pushState({view},'',`/flir/${view==='temperature'?'temperature-map':view}`);
     setTimeout(()=>{document.querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));if(view==='temperature'&&map){map.invalidateSize(false);if(mapBounds?.isValid())map.fitBounds(mapBounds,{padding:[30,30],maxZoom:17});}},80);
+  }
+  // Lets the browser paint before the next stage, so progress is visible and
+  // the window stays answerable instead of appearing frozen.
+  const repaint=()=>new Promise(done=>requestAnimationFrame(()=>setTimeout(done,0)));
+  async function drawEverything(){
+    const stages=[
+      ['summary',renderSummary],['acquisition',renderAcquisition],
+      ['temperature plots',renderTemperaturePlots],['gallery',renderGallery],
+      ['map',renderMap]
+    ];
+    for(const [name,draw] of stages){
+      $('mapNote').textContent=`Drawing ${name}…`;
+      await repaint();
+      try{draw();}
+      catch(error){$('statusText').textContent=`FLIR ${name} could not be drawn: ${error.message}`;}
+    }
   }
   let flirRetry=null;
   async function load(){
@@ -99,7 +124,13 @@
       $('flightName').textContent=response.flight_id||'No project';
       if(!response.ready){const message=response.message||response.processing_step||'FLIR processing has not run yet';$('statusText').textContent=message;$('summaryGrid').innerHTML=summaryCard('FLIR workspace','Not ready',message);return;}
       payload=response.data;$('statusDot').classList.add('ready');$('statusText').textContent=response.temperature_ready?'FLIR temperature products and Noseboom map loaded':'FLIR acquisition products loaded · temperature and georeferencing are still running';
-      renderSummary();renderAcquisition();renderTemperaturePlots();renderGallery();renderMap();showView(pathView(),false);
+      // Drawing happens after the overlay is down and with a repaint between
+      // each stage. Done in one synchronous run, the browser cannot repaint at
+      // all, so the page stayed behind "Preparing FLIR workspace" for the whole
+      // of it and looked hung rather than busy.
+      $('busy').classList.remove('show');
+      await drawEverything();
+      showView(pathView(),false);
       if(!response.temperature_ready){flirRetry=setTimeout(load,4000);}
     }catch(error){
       const busy=error.name==='AbortError';

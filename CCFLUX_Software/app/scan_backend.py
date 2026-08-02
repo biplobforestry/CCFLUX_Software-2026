@@ -23,6 +23,7 @@ from typing import Callable, Mapping, Sequence
 import pandas as pd
 from uuid import uuid4
 
+from core.browser_payload import decimate_for_view
 from core.configuration import load_detection_configuration
 from core.detector import InputCandidate
 from core.dashboard_time import (
@@ -6261,6 +6262,35 @@ class DashboardScanBackend:
         )
 
         context.report_progress(94, "Publishing the FLIR temperature workspace")
+        # A flight has far more frames than a plot has pixels or a map has
+        # useful markers. Sending every one made the page parse tens of
+        # megabytes and then build every trace and marker on the main thread,
+        # which it cannot interrupt - so it sat behind "Preparing FLIR
+        # workspace" with nothing moving. Bucketed decimation keeps the real
+        # envelope; temperature_frames.csv keeps every frame.
+        temperature_records, temperature_total = decimate_for_view(
+            [
+                {
+                    "frame_id": str(row.get("frame_index")),
+                    "timestamp_utc": row.get("timestamp_utc"),
+                    "temperature_min_c": _finite_or_none(row.get("temperature_c_min")),
+                    "temperature_max_c": _finite_or_none(row.get("temperature_c_max")),
+                    "temperature_mean_c": _finite_or_none(row.get("temperature_c_mean")),
+                    "temperature_median_c": _finite_or_none(row.get("temperature_c_median")),
+                    "temperature_std_c": _finite_or_none(row.get("temperature_c_std")),
+                    "valid_pixel_count": _integer_or_none(
+                        row.get("temperature_c_valid_pixel_count")
+                    ),
+                    "status": row.get("temperature_status"),
+                }
+                for row in rows
+            ],
+            extreme_fields=("temperature_min_c", "temperature_max_c"),
+        )
+        map_points, map_total = decimate_for_view(
+            georeferenced,
+            extreme_fields=("temperature_max_c",),
+        )
         with self._lock:
             browser_payload = dict(self._instruments["flir"].quicklook)
         browser_payload.update({
@@ -6285,23 +6315,10 @@ class DashboardScanBackend:
             ),
             "temperature_mode": mode,
             "quantitative": mode == CORRECTED and provenance == PROVENANCE_MEASURED,
-            "temperature_records": [
-                {
-                    "frame_id": str(row.get("frame_index")),
-                    "timestamp_utc": row.get("timestamp_utc"),
-                    "temperature_min_c": _finite_or_none(row.get("temperature_c_min")),
-                    "temperature_max_c": _finite_or_none(row.get("temperature_c_max")),
-                    "temperature_mean_c": _finite_or_none(row.get("temperature_c_mean")),
-                    "temperature_median_c": _finite_or_none(row.get("temperature_c_median")),
-                    "temperature_std_c": _finite_or_none(row.get("temperature_c_std")),
-                    "valid_pixel_count": _integer_or_none(
-                        row.get("temperature_c_valid_pixel_count")
-                    ),
-                    "status": row.get("temperature_status"),
-                }
-                for row in rows
-            ],
-            "map_points": georeferenced,
+            "temperature_records": temperature_records,
+            "temperature_records_total": temperature_total,
+            "map_points": map_points,
+            "map_points_total": map_total,
             "processed_temperature_frames": len(rows),
             "georeferenced_temperature_frames": matched,
             "matching_method": (
