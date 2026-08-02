@@ -220,6 +220,53 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
     return select.value || names[0];
   }
 
+
+  // Ticks are formatted from the range they span, not each value on its own, so
+  // the column reads as one scale: every label carries the same precision, and
+  // an exponent is used only when a fixed representation would be unreadable.
+  function tickFormatter(low, high) {
+    const span = Math.abs(high - low);
+    const largest = Math.max(Math.abs(low), Math.abs(high));
+    if (span === 0) return value => Number(value).toPrecision(3);
+    if (largest >= 1e5 || (largest > 0 && largest < 1e-3)) {
+      // Real superscripts: "4.39 × 10⁻⁵" is a number, "4.39 × 10^-5" is source.
+      const superscripts = {'0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹','-':'⁻'};
+      return value => {
+        const [mantissa, exponent] = Number(value).toExponential(2).split('e');
+        const digits = String(Number(exponent)).split('').map(c => superscripts[c] || c).join('');
+        return `${mantissa} × 10${digits}`;
+      };
+    }
+    const decimals = Math.min(6, Math.max(0, 2 - Math.floor(Math.log10(span))));
+    return value => Number(value).toFixed(decimals);
+  }
+
+  const LEGEND_TICKS = 6;
+
+  function renderLegend(variable, low, high, palette, sampleCount) {
+    const title = document.getElementById('mapLegendName');
+    const ramp = document.getElementById('mapLegendRamp');
+    const ticks = document.getElementById('mapLegendTicks');
+    const note = document.getElementById('mapLegendNote');
+    if (!title || !ramp || !ticks) return;
+    title.textContent = variable;
+    // to top: the largest value sits at the top of the bar, as on a figure axis.
+    ramp.style.background = paletteGradient(palette).replace('90deg', 'to top');
+    const format = tickFormatter(low, high);
+    const rows = [];
+    for (let step = 0; step < LEGEND_TICKS; step += 1) {
+      const fraction = step / (LEGEND_TICKS - 1);
+      const value = high - (high - low) * fraction;
+      rows.push(`<span class="tick" style="top:${(fraction * 100).toFixed(4)}%">${escapeHtml(format(value))}</span>`);
+    }
+    ticks.innerHTML = rows.join('');
+    if (note) {
+      note.textContent = Number.isFinite(sampleCount)
+        ? `${sampleCount.toLocaleString()} spectra`
+        : '';
+    }
+  }
+
   function renderMap(mode, variable) {
     if (!map) {
       map = L.map('sifMap', {preferCanvas: true});
@@ -229,7 +276,13 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
       legend = L.control({position: 'bottomright'});
       legend.onAdd = () => {
         const div = L.DomUtil.create('div', 'map-legend');
-        div.innerHTML = '<strong id="mapLegendName">Variable</strong><div class="gradient"></div><span id="mapLegendMin">—</span><span id="mapLegendMax" style="float:right">—</span>';
+        div.innerHTML = '<strong class="legend-title" id="mapLegendName">Variable</strong>'
+          + '<div class="colorbar"><div class="ramp" id="mapLegendRamp"></div>'
+          + '<div class="ticks" id="mapLegendTicks"></div></div>'
+          + '<span class="legend-note" id="mapLegendNote"></span>';
+        // Dragging or scrolling on the bar must not pan or zoom the map.
+        L.DomEvent.disableClickPropagation(div);
+        L.DomEvent.disableScrollPropagation(div);
         return div;
       };
       legend.addTo(map);
@@ -259,11 +312,7 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
     if (!points.length && note) {
       note.textContent = `${variable} has no value with a position in this product — nothing to map.`;
     }
-    const swatch = document.querySelector('.map-legend .gradient');
-    if (swatch) swatch.style.background = paletteGradient(palette);
-    document.getElementById('mapLegendName').textContent = variable;
-    document.getElementById('mapLegendMin').textContent = formatNumber(low);
-    document.getElementById('mapLegendMax').textContent = formatNumber(high);
+    renderLegend(variable, low, high, palette, finite.length);
     setTimeout(() => map.invalidateSize(), 40);
   }
   // Colour scales, as stop lists interpolated the same way. The perceptual ones
@@ -452,15 +501,4 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
   addEventListener('popstate', routeView);
   load();
 
-  // Stamps the running build into the footer. A version number alone cannot
-  // answer "am I running the code I just pulled?" - it only changes at a
-  // release, so a fetch that was never merged looks identical to an update.
-  fetch('/api/build', {cache: 'no-store'})
-    .then(response => response.json())
-    .then(info => {
-      document.querySelectorAll('.app-version').forEach(node => {
-        node.textContent = `Version ${info.version} · build ${info.build}`;
-      });
-    })
-    .catch(() => {});
 })();

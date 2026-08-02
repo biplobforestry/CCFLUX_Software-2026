@@ -28,7 +28,19 @@
     .reference{position:fixed;inset:0;z-index:1300;background:#020812d9;display:none;place-items:center;padding:20px}.reference.show{display:grid}
     .reference-card{width:min(980px,96vw);max-height:88vh;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#0d1d2c;padding:20px}
     .reference-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.reference table{width:100%;border-collapse:collapse;margin-top:12px}.reference th,.reference td{border:1px solid #294b66;padding:8px;text-align:left}.reference th{background:#15364f;color:var(--cyan)}
-    .manual-copy{white-space:pre-wrap;color:#c7dbea}.map-legend{background:#0a1928eF;color:white;padding:9px 11px;border-radius:8px;border:1px solid #45677e}.gradient{height:10px;margin:5px 0;background:linear-gradient(90deg,#440154,#31688e,#35b779,#fde725)}
+    .manual-copy{white-space:pre-wrap;color:#c7dbea}/* A vertical colour bar, read like a figure's: value increases upward,
+       ticks are labelled, and the type is large enough to read at a glance.
+       The previous one was a 10px horizontal strip with the range crammed
+       into two unspaced numbers. */
+    .map-legend{background:#0a1928f2;color:white;padding:12px 14px;border-radius:10px;border:1px solid #45677e;box-shadow:0 8px 24px #0007}
+    .map-legend .legend-title{display:block;font-size:1rem;font-weight:800;margin-bottom:9px;letter-spacing:.02em;white-space:nowrap}
+    .map-legend .colorbar{display:flex;gap:9px;height:clamp(220px,42vh,460px)}
+    .map-legend .ramp{width:26px;border-radius:4px;border:1px solid #7d9db4;flex:0 0 auto}
+    .map-legend .ticks{position:relative;flex:1 1 auto;min-width:74px;font-variant-numeric:tabular-nums}
+    .map-legend .tick{position:absolute;left:0;transform:translateY(-50%);white-space:nowrap;font-size:.86rem;line-height:1;color:#eaf4fb}
+    .map-legend .tick::before{content:'';position:absolute;left:-9px;top:50%;width:6px;height:1px;background:#9ab8cc}
+    .map-legend .legend-note{display:block;margin-top:8px;font-size:.76rem;color:#a9c4d6}
+
     .sif-progress{height:12px;overflow:hidden;margin-top:16px;border-radius:999px;background:#173247}.sif-progress span{display:block;height:100%;width:0;background:linear-gradient(90deg,#16bed9,#63ddb0);transition:width .35s ease}.busy-card .progress-value{display:block;margin-top:8px;color:#79e8dc;font-weight:800}
   </style>
 </head>

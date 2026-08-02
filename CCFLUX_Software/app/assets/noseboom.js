@@ -300,15 +300,4 @@
   byId('logBtn').onclick=async()=>{const panel=byId('logPanel');panel.classList.toggle('show');if(!panel.classList.contains('show'))return;try{const result=await api('/api/logs');panel.innerHTML=(result.records||[]).map(record=>`${escapeHtml(record.timestamp)} [${escapeHtml(record.severity)}] ${escapeHtml(record.message)}`).join('<br>')||'No log entries.';panel.scrollTop=panel.scrollHeight;}catch(error){panel.textContent=error.message;}};
   refresh();
 
-  // Stamps the running build into the footer. A version number alone cannot
-  // answer "am I running the code I just pulled?" - it only changes at a
-  // release, so a fetch that was never merged looks identical to an update.
-  fetch('/api/build', {cache: 'no-store'})
-    .then(response => response.json())
-    .then(info => {
-      document.querySelectorAll('.app-version').forEach(node => {
-        node.textContent = `Version ${info.version} · build ${info.build}`;
-      });
-    })
-    .catch(() => {});
 })();

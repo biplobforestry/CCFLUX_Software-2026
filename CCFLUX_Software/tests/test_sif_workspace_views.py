@@ -84,8 +84,10 @@ def test_the_map_has_its_own_index_selector():
 
 def test_no_element_the_script_needs_is_missing():
     referenced = set(re.findall(r"getElementById\('([A-Za-z0-9_]+)'\)", SCRIPT))
-    # The map legend builds these itself, inside the Leaflet control.
-    runtime_built = {"mapLegendName", "mapLegendMin", "mapLegendMax"}
+    # The colour bar builds these itself, inside the Leaflet control.
+    runtime_built = {
+        "mapLegendName", "mapLegendRamp", "mapLegendTicks", "mapLegendNote",
+    }
     missing = {name for name in referenced - runtime_built if f'id="{name}"' not in HTML}
 
     assert not missing, f"sif.js reaches for ids the page does not have: {missing}"
@@ -247,7 +249,7 @@ def test_the_variable_control_is_not_shown_on_the_map_view():
 def test_the_legend_follows_the_chosen_palette():
     """A map drawn in one scale with a legend drawn in another misreads."""
     assert "paletteGradient" in SCRIPT
-    assert "swatch.style.background = paletteGradient(palette)" in SCRIPT
+    assert "ramp.style.background = paletteGradient(palette)" in SCRIPT
 
 
 def test_markers_follow_the_chosen_palette():
@@ -290,3 +292,49 @@ def test_the_map_has_a_full_screen_control():
     # Entering and leaving both change the container size under Leaflet.
     assert "fullscreenchange" in SCRIPT
     assert "invalidateSize" in SCRIPT
+
+
+# ------------------------------------------------------------ the colour bar
+def test_the_colour_bar_is_vertical_and_large():
+    """It was a 10px horizontal strip with the range crammed into two unspaced
+    numbers, which on a real range read as "-7.22387.492"."""
+    assert ".map-legend .colorbar{display:flex;gap:9px;height:clamp(220px,42vh,460px)}" in HTML
+    assert ".map-legend .ramp{width:26px" in HTML
+    assert "to top" in SCRIPT, "the largest value belongs at the top, as on an axis"
+    assert ".gradient{height:10px" not in HTML, "the old strip is gone"
+
+
+def test_the_bar_carries_labelled_ticks():
+    assert 'id="mapLegendTicks"' in SCRIPT
+    assert "LEGEND_TICKS = 6" in SCRIPT
+    assert ".map-legend .tick{position:absolute" in HTML
+
+
+def test_the_bar_does_not_pan_the_map_when_touched():
+    assert "L.DomEvent.disableClickPropagation" in SCRIPT
+    assert "L.DomEvent.disableScrollPropagation" in SCRIPT
+
+
+def test_tick_precision_is_taken_from_the_range_not_each_value():
+    """One scale, one precision: labels formatted independently give a column
+    with different decimal counts, which does not read as a scale."""
+    body = SCRIPT[SCRIPT.index("function tickFormatter("):]
+    body = body[: body.index("\n  }")]
+
+    assert "Math.abs(high - low)" in body
+    assert "toFixed(decimals)" in body
+
+
+def test_an_exponent_is_typeset_not_written_as_source():
+    """L800 spans 3.5e-7 to 4.4e-5; "4.39 × 10^-5" is source, not a number."""
+    assert "'-':'⁻'" in SCRIPT
+    assert "× 10${digits}" in SCRIPT
+
+
+def test_the_build_stamp_is_not_shown_in_the_interface():
+    """Asked for after it had served its purpose. The endpoint stays, so a
+    build can still be confirmed without putting a digest in every footer."""
+    for script in sorted(ASSETS.glob("*.js")):
+        assert "/api/build" not in script.read_text(encoding="utf-8"), script.name
+    server = (ROOT / "app" / "server.py").read_text(encoding="utf-8")
+    assert '"/api/build"' in server, "the endpoint itself must remain"
