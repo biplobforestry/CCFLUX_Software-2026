@@ -38,7 +38,6 @@
     <nav class="nav-tabs">
       <a class="btn active" data-view="overview" href="/sif/overview">Overview</a>
       <a class="btn" data-view="timeseries" href="/sif/timeseries">Time series</a>
-      <a class="btn" data-view="spectra" href="/sif/spectra">Spectra</a>
       <a class="btn" data-view="map" href="/sif/map">Map view</a>
     </nav>
     <div class="control-bar">
@@ -50,11 +49,9 @@
     <section class="summary-grid" id="summaryGrid"></section>
     <section class="chart-grid">
       <article class="chart-card wide" data-section="overview"><div class="card-head"><h2>Selected SIF/FLOX variable overview</h2><button class="btn" data-fullscreen="overviewPlot">Full screen</button></div><div class="plot" id="overviewPlot"></div></article>
-      <article class="chart-card" data-section="overview"><div class="card-head"><h2>Distribution</h2><button class="btn" data-fullscreen="histogramPlot">Full screen</button></div><div class="plot" id="histogramPlot"></div></article>
-      <article class="chart-card" data-section="overview"><div class="card-head"><h2>Altitude relationship</h2><button class="btn" data-fullscreen="altitudePlot">Full screen</button></div><div class="plot" id="altitudePlot"></div></article>
+      <article class="chart-card wide" data-section="overview"><div class="card-head"><h2>Distribution and frequency curve</h2><button class="btn" data-fullscreen="histogramPlot">Full screen</button></div><div class="plot" id="histogramPlot"></div></article>
       <article class="chart-card wide" data-section="timeseries"><div class="card-head"><h2>Variable time series</h2><button class="btn" data-fullscreen="timePlot">Full screen</button></div><div class="plot" id="timePlot"></div></article>
-      <article class="chart-card wide" data-section="spectra"><div class="card-head"><h2>Median incoming, reflected and reflectance spectra</h2><button class="btn" data-fullscreen="spectraPlot">Full screen</button></div><div class="plot" id="spectraPlot"></div></article>
-      <article class="chart-card wide" data-section="map"><div class="card-head"><h2>Georeferenced SIF / vegetation map</h2></div><div class="map-shell"><div id="sifMap"></div><button class="btn map-reset" id="resetMapBtn">Reset position</button></div></article>
+      <article class="chart-card wide" data-section="map"><div class="card-head"><h2>Georeferenced vegetation index map</h2><div class="toolbar"><label>Index <select id="mapVariableSelect"></select></label></div></div><div class="map-shell"><div id="sifMap"></div><button class="btn map-reset" id="resetMapBtn">Reset position</button></div></article>
     </section>
   </main>
   <div class="busy show" id="busy"><div class="busy-card"><div class="spinner"></div><h2 id="busyTitle">Preparing SIF / FLOX scientific workspace</h2><p id="busyMessage">Loading saved FULL and FLUO products from the active Flight Project.</p><div class="sif-progress" id="sifProgress"><span></span></div><span class="progress-value" id="sifProgressValue">Waiting…</span></div></div>

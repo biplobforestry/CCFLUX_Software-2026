@@ -49,7 +49,7 @@
 4. Raw files smaller than the configured threshold are ignored. The validated default is 100 KB.
 5. The global Main GUI Time Filter is applied in UTC after telemetry matching.
 6. Start Processing. This page follows telemetry preparation, FULL/FLUO calibration, vegetation indices, SIF iFLD, GIS, browser payload, and completion.
-7. Inspect time series, distributions, spectra, and the georeferenced map.
+7. Inspect the overview, its distribution and frequency curve, the time series, and the georeferenced vegetation-index map.
 
 DEFAULT SCIENCE POLICY
 • FULL spectral shift correction: off
@@ -146,19 +146,65 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
     const time = finitePairs(mode.time || [], values);
     Plotly.react('overviewPlot', [{x: time.x, y: time.y, type: 'scattergl', mode: 'lines+markers', marker: {size: 4, color: '#008ec4'}, line: {width: 1.4, color: '#008ec4'}, name: variable}], layout('Capture time [UTC]', variable), config);
     Plotly.react('timePlot', [{x: time.x, y: time.y, type: 'scattergl', mode: 'lines', line: {width: 1.6, color: '#0b8f88'}, name: variable}], layout('Capture time [UTC]', variable), config);
-    Plotly.react('histogramPlot', [{x: values.filter(Number.isFinite), type: 'histogram', marker: {color: '#0b8f88'}, nbinsx: 35}], layout(variable, 'Number of spectra'), config);
-    const altitude = finitePairs(mode.altitude_m || [], values);
-    Plotly.react('altitudePlot', [{x: altitude.x, y: altitude.y, type: 'scattergl', mode: 'markers', marker: {size: 5, color: altitude.y, colorscale: 'Viridis', showscale: true}, name: variable}], layout('Altitude [m]', variable), config);
-    const spectra = mode.spectra || {};
-    Plotly.react('spectraPlot', [
-      {x: spectra.wavelength_nm, y: spectra.incoming, type: 'scatter', mode: 'lines', name: 'Incoming radiance', line: {color: '#1261a0'}},
-      {x: spectra.wavelength_nm, y: spectra.reflected, type: 'scatter', mode: 'lines', name: 'Reflected radiance', line: {color: '#d75d18'}},
-      {x: spectra.wavelength_nm, y: spectra.reflectance, type: 'scatter', mode: 'lines', name: 'Reflectance', yaxis: 'y2', line: {color: '#18864b'}}
-    ], {...layout('Wavelength [nm]', 'Radiance [W m⁻² nm⁻¹ sr⁻¹]'), yaxis2: {title: 'Reflectance [-]', overlaying: 'y', side: 'right', showgrid: false}}, config);
+    renderDistribution(values, variable);
     document.getElementById('selectionNote').textContent = `${mode.row_count.toLocaleString()} ${document.getElementById('modeSelect').value} spectra · ${variable}`;
-    renderMap(mode, variable);
+    renderMap(mode, mapVariable(mode));
     renderSummary();
   }
+  // The frequency curve is a frequency polygon: the same counts as the bars,
+  // joined at the bin centres. It needs no bandwidth chosen for it, so it
+  // states the distribution the histogram already shows rather than a smoothed
+  // reinterpretation of it.
+  function renderDistribution(values, variable) {
+    const finite = values.filter(Number.isFinite);
+    const bins = 35;
+    let traces = [];
+    if (finite.length) {
+      const low = Math.min(...finite), high = Math.max(...finite);
+      const width = (high - low) / bins || 1;
+      const counts = new Array(bins).fill(0);
+      finite.forEach(value => {
+        const index = Math.min(bins - 1, Math.floor((value - low) / width));
+        counts[index] += 1;
+      });
+      const centres = counts.map((_, index) => low + width * (index + 0.5));
+      traces = [
+        {x: finite, type: 'histogram', name: 'Spectra per bin', marker: {color: '#0b8f88'},
+         xbins: {start: low, end: high, size: width}, opacity: .82},
+        {x: centres, y: counts, type: 'scatter', mode: 'lines+markers',
+         name: 'Frequency curve', line: {color: '#e6a11a', width: 2.4, shape: 'spline', smoothing: 0.6},
+         marker: {size: 5, color: '#e6a11a'}}
+      ];
+    }
+    Plotly.react('histogramPlot', traces, layout(variable, 'Number of spectra'), config);
+  }
+
+  // The map answers a vegetation question, so it offers vegetation indices
+  // rather than every column the retrieval produced.
+  const INDEX_NAMES = vegetationIndices
+    .map(row => row[0])
+    .filter(name => !/\s/.test(name));
+
+  function indexVariables(mode) {
+    const available = Object.keys(mode?.variables || {});
+    const indices = available.filter(name => INDEX_NAMES.includes(name));
+    // A custom index list would match nothing; showing everything is better
+    // than showing an empty map with no explanation.
+    return indices.length ? indices : available;
+  }
+
+  function mapVariable(mode) {
+    const select = document.getElementById('mapVariableSelect');
+    const names = indexVariables(mode);
+    const current = select.value;
+    if (select.dataset.names !== names.join(' ')) {
+      select.dataset.names = names.join(' ');
+      select.innerHTML = names.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+      select.value = names.includes(current) ? current : (names.includes('NDVI') ? 'NDVI' : names[0] || '');
+    }
+    return select.value || names[0];
+  }
+
   function renderMap(mode, variable) {
     if (!map) {
       map = L.map('sifMap', {preferCanvas: true});
@@ -205,8 +251,12 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
     const rgb = stops[index].map((part, channel) => Math.round(part + (stops[index + 1][channel] - part) * amount));
     return `rgb(${rgb.join(',')})`;
   }
+  const VIEWS = ['overview', 'timeseries', 'map'];
   function routeView() {
-    const view = location.pathname.split('/').filter(Boolean)[1] || 'overview';
+    const requested = location.pathname.split('/').filter(Boolean)[1] || 'overview';
+    // A view that no longer exists - /sif/spectra, from a bookmark or the
+    // browser's history - would match no card and leave the page blank.
+    const view = VIEWS.includes(requested) ? requested : 'overview';
     document.querySelectorAll('[data-view]').forEach(link => link.classList.toggle('active', link.dataset.view === view));
     document.querySelectorAll('[data-section]').forEach(card => card.hidden = card.dataset.section !== view && !(view === 'overview' && card.dataset.section === 'overview'));
     if (view === 'map' && map) setTimeout(() => map.invalidateSize(), 50);
@@ -289,6 +339,12 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
   document.getElementById('applyBtn').onclick = renderPlots;
   document.getElementById('modeSelect').onchange = () => { setVariables(); renderPlots(); };
   document.getElementById('variableSelect').onchange = renderPlots;
+  // Redraws only the map: the index shown there is chosen independently of the
+  // variable the overview and time series are following.
+  document.getElementById('mapVariableSelect').onchange = () => {
+    const mode = selectedMode();
+    if (mode) renderMap(mode, document.getElementById('mapVariableSelect').value);
+  };
   document.getElementById('resetMapBtn').onclick = () => { if (map && initialBounds) map.fitBounds(initialBounds); };
   document.getElementById('variablesBtn').onclick = () => showReference('Variables', table(['Variable', 'Description'], Object.entries(variableDescriptions)));
   document.getElementById('indicesBtn').onclick = () => showReference('Vegetation Index', table(['Index', 'Description', 'Wavelength [nm]', 'Expression'], vegetationIndices));

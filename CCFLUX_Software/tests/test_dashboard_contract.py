@@ -316,15 +316,19 @@ def test_dashboard_and_server_expose_complete_sif_workspace():
     assert "openSifProgressWindow()" in dashboard_script
     for label in ("Variables", "Vegetation Index", "Manual", "Map view"):
         assert label in sif_html
+    # The altitude-relationship plot and the spectra panel were removed at the
+    # scientist's request: the first related two quantities with no expected
+    # relationship, and the second was not used. See
+    # test_sif_workspace_views.py, which holds them removed.
     for plot_id in (
         "overviewPlot",
         "histogramPlot",
-        "altitudePlot",
         "timePlot",
-        "spectraPlot",
         "sifMap",
     ):
         assert plot_id in sif_html
+    for removed in ("altitudePlot", "spectraPlot"):
+        assert removed not in sif_html
     assert "Reset position" in sif_html
     assert "/api/sif" in server
     assert "Gimbal + Noseboom" in sif_script
