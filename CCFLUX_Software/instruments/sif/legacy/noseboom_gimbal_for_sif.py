@@ -36,6 +36,35 @@ NOSEBOOM_DEMO_COLUMNS = [
     "INS_Filter_LLHPos_ElipsoidHeight_m",
 ]
 
+# A Noseboom export may name its columns with or without a leading 'NoseBoom_',
+# depending on the logger configuration. The prefix is removed as the header is
+# read, so the column names above match either kind of file.
+NOSEBOOM_COLUMN_PREFIX = "NoseBoom_"
+
+
+def normalize_column_name(column: str) -> str:
+    return str(column).removeprefix(NOSEBOOM_COLUMN_PREFIX)
+
+
+def normalize_noseboom_fieldnames(fieldnames, source: str) -> list[str]:
+    """Header without the prefix, refusing a file where two columns collide."""
+    names = list(fieldnames or [])
+    sources: dict[str, list[str]] = {}
+    for column in names:
+        sources.setdefault(normalize_column_name(column), []).append(str(column))
+    duplicates = {name: found for name, found in sources.items() if len(found) > 1}
+    if duplicates:
+        detail = "; ".join(
+            f"{name} (from {' and '.join(found)})"
+            for name, found in sorted(duplicates.items())
+        )
+        raise SystemExit(
+            f"Duplicate Noseboom column name(s) in {source} after removing the "
+            f"{NOSEBOOM_COLUMN_PREFIX!r} prefix: {detail}. "
+            "Keep only the prefixed or only the unprefixed copy of each column."
+        )
+    return [normalize_column_name(column) for column in names]
+
 
 def parse_float(value: str | None) -> float | None:
     if value is None:
@@ -280,6 +309,11 @@ def load_noseboom_positions(args: argparse.Namespace) -> list[tuple[datetime, fl
     samples: list[tuple[datetime, float, float, float]] = []
     with noseboom_path.open("r", newline="", encoding="utf-8-sig") as src:
         reader = csv.DictReader(src)
+        # Reassigned before the first row is read, so every row is keyed by the
+        # unprefixed name and the matching below is unchanged.
+        reader.fieldnames = normalize_noseboom_fieldnames(
+            reader.fieldnames, noseboom_path.name
+        )
         required = [args.noseboom_time_column, args.noseboom_lat_column, args.noseboom_lon_column, args.noseboom_alt_column]
         missing = [col for col in required if col not in (reader.fieldnames or [])]
         if missing:

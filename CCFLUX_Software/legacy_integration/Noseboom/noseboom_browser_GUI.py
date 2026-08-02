@@ -30,6 +30,38 @@ FIELDS={
  'wind_dir_deg':'WIND_dir_deg','air_temp_degC':'Airflow_Flow_OAT_degC','rel_humidity_pct':'Airflow_Flow_rel_humidity_',
  'pressure_hpa':'Airflow_Sensor_pstat_hPa'}
 
+# Some Noseboom exports carry every column behind a 'NoseBoom_' prefix and some
+# do not, depending on how the logger was configured. The names above are the
+# unprefixed form; the prefix is stripped on the way in so both files read
+# identically and no calculation below needs to know which kind it was given.
+NOSEBOOM_COLUMN_PREFIX='NoseBoom_'
+
+def normalize_column_name(column: str) -> str:
+    return str(column).removeprefix(NOSEBOOM_COLUMN_PREFIX)
+
+def normalized_column_map(columns):
+    """Original column name -> normalized name, refusing an ambiguous header.
+
+    A file holding both 'NoseBoom_WIND_vWind_x_m/s' and 'WIND_vWind_x_m/s'
+    collapses them onto one name, and there is no way to tell which of the two
+    the science should use. That is reported here, against the header, rather
+    than discovered after the rows have been read.
+    """
+    mapping={}; sources={}
+    for column in columns:
+        normalized=normalize_column_name(column)
+        sources.setdefault(normalized,[]).append(str(column))
+        mapping[column]=normalized
+    duplicates={name:found for name,found in sources.items() if len(found)>1}
+    if duplicates:
+        detail='; '.join(f"{name} (from {' and '.join(found)})" for name,found in sorted(duplicates.items()))
+        raise ValueError(
+            'Duplicate Noseboom column name(s) after removing the '
+            f'{NOSEBOOM_COLUMN_PREFIX!r} prefix: {detail}. '
+            'Keep only the prefixed or only the unprefixed copy of each column.'
+        )
+    return mapping
+
 def safe_name(s): return ''.join(c if c.isalnum() or c in '-_' else '_' for c in ((s or '').strip() or 'Flight'))
 def natural_key(p): return [int(x) if x.isdigit() else x.lower() for x in re.split(r'(\d+)', p.name)]
 def looks_like_noseboom(p): return 'noseboom' in re.sub(r'[\s_\-]+','',str(p).lower())
@@ -102,8 +134,12 @@ def detect_files(flight_root, flight_name):
     return DetectedData(files,files[0].parent,f'Detected {len(files)} CSV file(s) using {mode}. First folder: {files[0].parent}', base.name or Path(flight_root).name)
 
 def csv_usecols(path):
-    header=pd.read_csv(path,nrows=0,encoding='utf-8-sig'); available=set(header.columns)
-    cols=sorted({v for v in FIELDS.values() if v in available}|{k for k in FIELDS if k in available})
+    header=pd.read_csv(path,nrows=0,encoding='utf-8-sig')
+    mapping=normalized_column_map(header.columns)
+    wanted=set(FIELDS.values())|set(FIELDS)
+    # usecols must name the columns as the file spells them, so the original
+    # name is kept here and the prefix is dropped once the rows are in.
+    cols=sorted({original for original,normalized in mapping.items() if normalized in wanted})
     if not cols: raise ValueError(f'No required Noseboom columns found in {path.name}')
     return cols
 
@@ -125,6 +161,7 @@ def load_csv_files(files):
     total=max(sum(counts),1); loaded=0; chunks=[]
     for p in files:
         for raw in pd.read_csv(p,usecols=csv_usecols(p),encoding='utf-8-sig',low_memory=False,chunksize=CHUNKSIZE):
+            raw=raw.rename(columns=normalize_column_name)
             chunks.append(simplify(raw,p.name)); loaded+=len(raw); set_status(10+90*min(loaded/total,1),f'Loading rows {loaded:,}/{total:,}')
     data=pd.concat(chunks,ignore_index=True)
     data['time']=pd.to_datetime(data['time'],errors='coerce')

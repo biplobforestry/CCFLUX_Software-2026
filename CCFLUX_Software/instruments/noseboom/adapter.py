@@ -14,6 +14,7 @@ from typing import Any, Mapping, Sequence
 from core.detector import InputCandidate
 from core.enums import DetectionStatus, ProcessingStatus
 from core.logging_manager import LogLevel, ProcessingLogManager
+from core.noseboom_columns import normalize_columns
 from core.models import (
     FigureArtifact,
     InstrumentDescriptor,
@@ -436,8 +437,11 @@ class NoseboomAdapter(InstrumentBase):
 
 
 def _columns(path: Path) -> set[str]:
+    # Normalized here, so detection, metadata and validation all see the same
+    # unprefixed names whichever way the logger wrote the file.
     with Path(path).open("r", encoding="utf-8-sig", errors="replace", newline="") as stream:
-        return {value.strip() for value in next(csv.reader(stream), [])}
+        header = [value.strip() for value in next(csv.reader(stream), [])]
+    return set(normalize_columns(header, source=Path(path).name))
 
 
 def _datetime_option(value: Any) -> datetime | None:

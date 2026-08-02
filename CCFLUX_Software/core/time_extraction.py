@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from PIL import ExifTags, Image, UnidentifiedImageError
 
+from .noseboom_columns import normalize_columns
 from .time_manager import (
     GlobalTimeRangeResult,
     TimeRangeResult,
@@ -373,6 +374,7 @@ class TimestampExtractor:
                     ("Airflow_UTCcorr_Nanoseconds_ns", "unix_epoch_nanoseconds", True),
                     ("TIMESTAMP", None, True),
                 ),
+                normalize_names=True,
             )
         elif instrument_id == "miro":
             if path.suffix.casefold() != ".txt":
@@ -630,6 +632,7 @@ class TimestampExtractor:
         *,
         primary_columns: tuple[tuple[str, str | None, bool], ...],
         delimiter: str | None = None,
+        normalize_names: bool = False,
     ) -> None:
         with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as stream:
             first_line = stream.readline()
@@ -646,6 +649,10 @@ class TimestampExtractor:
                 accumulator.missing_timestamp_columns.append(path)
                 return
             header = [value.strip() for value in header]
+            if normalize_names:
+                # Renaming is one-to-one, so every column keeps its position and
+                # the fast single-column split below is unaffected.
+                header = normalize_columns(header, source=path.name)
             selected = next(
                 (
                     (header.index(column), column, hint, assume_utc)
