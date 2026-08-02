@@ -186,3 +186,57 @@ def test_distribution_and_index_behaviour(outcome, behaviour):
 
 def test_the_distribution_draws_bars_and_a_curve(outcome):
     assert outcome["traceCount"] == 2
+
+
+# --------------------------------------------------- toolbar and the map's tab
+def test_the_toolbar_holds_both_controls():
+    """Index moved up into the toolbar, where Variable was."""
+    assert 'data-toolbar-for="plots"' in HTML
+    assert 'data-toolbar-for="map"' in HTML
+    assert 'id="mapVariableSelect"' in HTML
+
+    toolbar = HTML[HTML.index('id="modeSelect"'):]
+    toolbar = toolbar[: toolbar.index("</div>")]
+    assert "mapVariableSelect" in toolbar, "the Index control belongs in the toolbar"
+
+
+def test_only_the_control_that_drives_the_view_is_shown():
+    assert "node.dataset.toolbarFor !== (view === 'map' ? 'map' : 'plots')" in SCRIPT
+
+
+def test_hiding_a_toolbar_label_actually_hides_it():
+    """`.toolbar label` sets display:flex, which outranks the browser's
+    [hidden]{display:none}; without an explicit rule the swap does nothing."""
+    assert ".toolbar label[hidden]{display:none}" in HTML
+
+
+def test_the_map_can_be_opened_on_its_own():
+    assert 'id="mapNewTabBtn"' in HTML
+    assert "window.open(`/sif/map?${parameters}`, '_blank', 'noopener')" in SCRIPT
+    # Both, so the new tab arrives on the same product as well as the same index.
+    opener = SCRIPT[SCRIPT.index("mapNewTabBtn"):]
+    opener = opener[: opener.index("};")]
+    assert "mode:" in opener and "index:" in opener
+
+
+def test_the_new_tab_arrives_on_the_index_it_was_opened_for():
+    assert "new URLSearchParams(location.search).get('index')" in SCRIPT
+    assert "new URLSearchParams(location.search).get('mode')" in SCRIPT
+
+
+def test_the_requested_index_does_not_override_a_later_choice():
+    """It is read where the list is built, which happens once - not on every
+    redraw, or picking another index in that tab would snap straight back."""
+    body = SCRIPT[SCRIPT.index("function mapVariable("):]
+    body = body[: body.index("\n  }")]
+    guard = body.index("if (select.dataset.names !== names.join(' '))")
+
+    assert body.index("get('index')") > guard
+
+
+def test_the_map_has_a_full_screen_control():
+    assert 'id="mapFullscreenBtn"' in HTML
+    assert "requestFullscreen" in SCRIPT
+    # Entering and leaving both change the container size under Leaflet.
+    assert "fullscreenchange" in SCRIPT
+    assert "invalidateSize" in SCRIPT

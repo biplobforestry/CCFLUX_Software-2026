@@ -110,7 +110,9 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
     const modes = Object.keys(payload.modes || {});
     select.innerHTML = modes.map(mode => `<option value="${mode}">${mode === 'FULL' ? 'FULL / FLOX' : mode}</option>`).join('');
     if (!modes.length) return;
-    const preferred = location.pathname.toLowerCase().includes('fluo') ? 'FLUO' : modes[0];
+    const requestedMode = new URLSearchParams(location.search).get('mode');
+    const preferred = modes.includes(requestedMode) ? requestedMode
+      : location.pathname.toLowerCase().includes('fluo') ? 'FLUO' : modes[0];
     select.value = modes.includes(preferred) ? preferred : modes[0];
     setVariables();
   }
@@ -204,10 +206,16 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
     const select = document.getElementById('mapVariableSelect');
     const names = indexVariables(mode);
     const current = select.value;
-    if (select.dataset.names !== names.join(' ')) {
-      select.dataset.names = names.join(' ');
+    if (select.dataset.names !== names.join(' ')) {
+      select.dataset.names = names.join(' ');
       select.innerHTML = names.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
-      select.value = names.includes(current) ? current : (names.includes('NDVI') ? 'NDVI' : names[0] || '');
+      // ?index= is honoured once, when the list is first built: a tab opened
+      // for one index must arrive showing it, and must not then snap back to
+      // that index every time the operator picks another in the same tab.
+      const requested = new URLSearchParams(location.search).get('index');
+      select.value = names.includes(requested) ? requested
+        : names.includes(current) ? current
+          : names.includes('NDVI') ? 'NDVI' : names[0] || '';
     }
     return select.value || names[0];
   }
@@ -268,6 +276,12 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
     // A view that no longer exists - /sif/spectra, from a bookmark or the
     // browser's history - would match no card and leave the page blank.
     const view = VIEWS.includes(requested) ? requested : 'overview';
+    // One control at a time in the toolbar: Variable drives the overview and
+    // the time series, Index drives the map. Showing both invites changing the
+    // one that has no effect on what is currently on screen.
+    document.querySelectorAll('[data-toolbar-for]').forEach(node => {
+      node.hidden = node.dataset.toolbarFor !== (view === 'map' ? 'map' : 'plots');
+    });
     document.querySelectorAll('[data-view]').forEach(link => link.classList.toggle('active', link.dataset.view === view));
     document.querySelectorAll('[data-section]').forEach(card => card.hidden = card.dataset.section !== view && !(view === 'overview' && card.dataset.section === 'overview'));
     if (view === 'map' && map) setTimeout(() => map.invalidateSize(), 50);
@@ -357,6 +371,26 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
     if (mode) renderMap(mode, document.getElementById('mapVariableSelect').value);
   };
   document.getElementById('resetMapBtn').onclick = () => { if (map && initialBounds) map.fitBounds(initialBounds); };
+  // One index on its own, in its own tab: the product and the index travel in
+  // the URL so the new tab opens on exactly what was being looked at, and can
+  // be kept open beside another index for comparison.
+  document.getElementById('mapNewTabBtn').onclick = () => {
+    const parameters = new URLSearchParams({
+      mode: document.getElementById('modeSelect').value,
+      index: document.getElementById('mapVariableSelect').value
+    });
+    window.open(`/sif/map?${parameters}`, '_blank', 'noopener');
+  };
+  document.getElementById('mapFullscreenBtn').onclick = () => {
+    const shell = document.querySelector('[data-section="map"]');
+    if (!document.fullscreenElement) {
+      shell?.requestFullscreen?.().then(() => setTimeout(() => map?.invalidateSize(), 120));
+    } else {
+      document.exitFullscreen();
+    }
+  };
+  // Leaving full screen changes the container size just as entering it does.
+  addEventListener('fullscreenchange', () => setTimeout(() => map?.invalidateSize(), 120));
   document.getElementById('variablesBtn').onclick = () => showReference('Variables', table(['Variable', 'Description'], Object.entries(variableDescriptions)));
   document.getElementById('indicesBtn').onclick = () => showReference('Vegetation Index', table(['Index', 'Description', 'Wavelength [nm]', 'Expression'], vegetationIndices));
   document.getElementById('manualBtn').onclick = () => showReference('SIF / FLOX User Manual', `<div class="manual-copy">${escapeHtml(manual)}</div>`);

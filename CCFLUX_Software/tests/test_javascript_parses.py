@@ -83,3 +83,26 @@ def test_the_declaration_that_broke_the_interface_is_gone():
 
     assert "function openSifConfiguration(options" not in source
     assert "function openSifConfiguration(dialogOptions" in source
+
+
+def test_no_source_file_contains_a_control_byte():
+    """A NUL reached app/assets/sif.js through a scripted edit and shipped in
+    three commits. JavaScript accepts it inside a string literal, so it parsed,
+    ran, and quietly used a NUL where a space was written -
+    `names.join('\\0')`. Nothing looked wrong until the byte was printed.
+    """
+    root = Path(__file__).resolve().parents[1]
+    suspect = []
+    for folder in ("app", "core", "instruments", "tests"):
+        for path in sorted((root / folder).rglob("*")):
+            if not path.is_file() or path.suffix not in {".py", ".js", ".html", ".css"}:
+                continue
+            if "__pycache__" in path.parts:
+                continue
+            data = path.read_bytes()
+            # Tab, newline and carriage return are the legitimate ones.
+            found = {byte for byte in data if byte < 0x20 and byte not in (0x09, 0x0A, 0x0D)}
+            if found:
+                suspect.append(f"{path.relative_to(root)}: {sorted(hex(b) for b in found)}")
+
+    assert not suspect, "control bytes in source: " + "; ".join(suspect)
