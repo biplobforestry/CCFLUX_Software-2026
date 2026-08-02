@@ -246,6 +246,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             )
         elif path == "/api/noseboom/export":
             self._send_file(self.server.backend.noseboom_export_file(), download=True)
+        elif path == "/api/noseboom/data-export/progress":
+            # Polled while the download request itself is still streaming.
+            self._send_json(
+                HTTPStatus.OK,
+                self.server.backend.noseboom_data_export_progress(),
+            )
         elif path == "/api/noseboom/statistics/export/progress":
             self._send_json(
                 HTTPStatus.OK,

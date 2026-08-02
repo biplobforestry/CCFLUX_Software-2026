@@ -279,7 +279,94 @@
 
   function openDownload(){byId('downloadModal').classList.add('show');}
   function closeDownload(){byId('downloadModal').classList.remove('show');}
-  async function startDataDownload(){const frequency_hz=Number(byId('downloadFrequency').value),format=byId('downloadFormat').value;closeDownload();showBusy('Preparing Noseboom download',`Reading the selected original interval and producing ${frequency_hz} Hz ${format.toUpperCase()} output.`);try{const response=await fetch('/api/noseboom/data-export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({frequency_hz,format})});if(!response.ok){let message=`Download failed (${response.status})`;try{message=(await response.json()).error||message;}catch(_){}throw new Error(message);}const blob=await response.blob(),disposition=response.headers.get('Content-Disposition')||'',match=disposition.match(/filename="?([^";]+)"?/i),name=match?match[1]:`noseboom_${frequency_hz}Hz.${format}`,url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=name;document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);log(`Noseboom data downloaded: ${name}`);}catch(error){window.alert(error.message);log(`Noseboom data download failed: ${error.message}`);}finally{hideBusy();}}
+  // Original resolution writes the recorded rows, which only the full variable
+  // set offers; the limited set is a resampled table by definition.
+  function syncDownloadOptions(){
+    const full=byId('downloadVariables').value==='full';
+    const original=byId('downloadFrequency').querySelector('option[value="original"]');
+    original.disabled=!full;
+    if(!full&&byId('downloadFrequency').value==='original')byId('downloadFrequency').value='1';
+    byId('downloadVariablesNote').textContent=full
+      ?'Full writes every recorded column, plus EVENT and Flight ID. CSV or text only.'
+      :'Limited writes the 14 columns shown on this page.';
+  }
+
+  let downloadPolling=false;
+  function showDownloadProgress(){
+    byId('downloadProgressStep').textContent='Starting…';
+    byId('downloadProgressPercent').textContent='0%';
+    byId('downloadProgressPercent').classList.remove('done');
+    byId('downloadProgressFill').style.width='0%';
+    byId('downloadProgressDetail').textContent='';
+    byId('downloadProgressClose').hidden=true;
+    byId('downloadProgressModal').classList.add('show');
+  }
+  function setDownloadProgress(percent,step){
+    const value=Math.max(0,Math.min(100,Number(percent)||0));
+    byId('downloadProgressFill').style.width=`${value}%`;
+    byId('downloadProgressPercent').textContent=`${value.toFixed(0)}%`;
+    if(step)byId('downloadProgressStep').textContent=step;
+  }
+  async function pollDownloadProgress(){
+    // The download request is still streaming on another connection; this reads
+    // the state it publishes as it writes.
+    while(downloadPolling){
+      await new Promise(resolve=>setTimeout(resolve,300));
+      if(!downloadPolling)return;
+      try{
+        const state=await api('/api/noseboom/data-export/progress');
+        setDownloadProgress(state.percent,state.step);
+      }catch(_){/* a missed poll must not stop the download */}
+    }
+  }
+
+  async function startDataDownload(){
+    const variables=byId('downloadVariables').value;
+    const raw=byId('downloadFrequency').value;
+    const frequency_hz=raw==='original'?'original':Number(raw);
+    const format=byId('downloadFormat').value;
+    closeDownload();
+    showDownloadProgress();
+    downloadPolling=true;
+    pollDownloadProgress();
+    try{
+      const response=await fetch('/api/noseboom/data-export',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({variables,frequency_hz,format})
+      });
+      if(!response.ok){
+        let message=`Download failed (${response.status})`;
+        try{message=(await response.json()).error||message;}catch(_){}
+        throw new Error(message);
+      }
+      const blob=await response.blob();
+      const disposition=response.headers.get('Content-Disposition')||'';
+      const match=disposition.match(/filename="?([^";]+)"?/i);
+      const label=raw==='original'?'original':`${frequency_hz}Hz`;
+      const name=match?match[1]:`noseboom_${variables}_${label}.${format}`;
+      downloadPolling=false;
+      const url=URL.createObjectURL(blob),link=document.createElement('a');
+      link.href=url;link.download=name;document.body.appendChild(link);link.click();link.remove();
+      setTimeout(()=>URL.revokeObjectURL(url),1000);
+      let state={};
+      try{state=await api('/api/noseboom/data-export/progress');}catch(_){}
+      setDownloadProgress(100,'Download complete');
+      byId('downloadProgressPercent').classList.add('done');
+      byId('downloadProgressDetail').textContent=state.rows
+        ? `${Number(state.rows).toLocaleString()} rows · ${state.columns} columns · ${name}`
+        : name;
+      byId('downloadProgressClose').hidden=false;
+      log(`Noseboom data downloaded: ${name}`);
+    }catch(error){
+      downloadPolling=false;
+      byId('downloadProgressStep').textContent=`Download failed: ${error.message}`;
+      byId('downloadProgressDetail').textContent='';
+      byId('downloadProgressClose').hidden=false;
+      log(`Noseboom data download failed: ${error.message}`);
+    }finally{
+      downloadPolling=false;
+    }
+  }
 
   function openExport(){byId('exportResults').innerHTML='';byId('exportModal').classList.add('show');}
   function closeExport(){byId('exportModal').classList.remove('show');}
@@ -294,7 +381,7 @@
   document.querySelectorAll('[data-stat]').forEach(button=>{button.addEventListener('click',event=>activateLinkedView(event,()=>renderStats(button.dataset.stat)));button.addEventListener('contextmenu',event=>showViewMenu(event,'stats',statRoutes[button.dataset.stat],false));});
   byId('resetMapBtn').onclick=()=>resetMap();byId('mapFullscreenBtn').onclick=()=>openFullscreen('map');byId('menuFullscreen').onclick=()=>openFullscreen(viewMenuContext.panel);byId('menuNewTab').onclick=()=>{closeViewMenu();window.open(viewMenuContext.path, '_blank', 'noopener');};byId('menuCurrentSettings').onclick=()=>showSettings(false);byId('menuChangeSettings').onclick=()=>showSettings(true);byId('settingsClose').onclick=closeSettings;byId('settingsModal').onclick=event=>{if(event.target===byId('settingsModal'))closeSettings();};
   byId('bufferInput').oninput=()=>resetMap(false);byId('lineWidthInput').onchange=async()=>{showBusy('Updating map','Rebuilding bounded route layers.');try{await makeLayers(points());showLayer(activeLayer,false,false);}finally{hideBusy();}};byId('colorScheme').onchange=byId('lineWidthInput').onchange;
-  byId('dataExportBtn').onclick=openDownload;byId('downloadClose').onclick=closeDownload;byId('downloadCancel').onclick=closeDownload;byId('downloadStart').onclick=startDataDownload;byId('statisticsExportBtn').onclick=openExport;byId('exportClose').onclick=closeExport;byId('exportCancel').onclick=closeExport;byId('exportStart').onclick=startStatisticsExport;
+  byId('dataExportBtn').onclick=openDownload;byId('downloadClose').onclick=closeDownload;byId('downloadCancel').onclick=closeDownload;byId('downloadStart').onclick=startDataDownload;byId('downloadVariables').onchange=syncDownloadOptions;byId('downloadProgressClose').onclick=()=>byId('downloadProgressModal').classList.remove('show');syncDownloadOptions();byId('statisticsExportBtn').onclick=openExport;byId('exportClose').onclick=closeExport;byId('exportCancel').onclick=closeExport;byId('exportStart').onclick=startStatisticsExport;
   document.addEventListener('click',event=>{if(!event.target.closest('#viewMenu'))closeViewMenu();});window.addEventListener('popstate',()=>{const view=viewFromPath();if(view.layer)showLayer(view.layer,false,false);if(view.stat)renderStats(view.stat,false);});window.addEventListener('fullscreenchange',()=>setTimeout(()=>{if(map)map.invalidateSize(false);document.querySelectorAll('#statsView .js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));},180));
   let resizeTimer=null;new ResizeObserver(()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>document.querySelectorAll('#statsView .js-plotly-plot').forEach(plot=>window.Plotly&&Plotly.Plots.resize(plot)),120);}).observe(byId('statsView'));
   byId('logBtn').onclick=async()=>{const panel=byId('logPanel');panel.classList.toggle('show');if(!panel.classList.contains('show'))return;try{const result=await api('/api/logs');panel.innerHTML=(result.records||[]).map(record=>`${escapeHtml(record.timestamp)} [${escapeHtml(record.severity)}] ${escapeHtml(record.message)}`).join('<br>')||'No log entries.';panel.scrollTop=panel.scrollHeight;}catch(error){panel.textContent=error.message;}};

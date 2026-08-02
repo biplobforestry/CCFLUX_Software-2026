@@ -24,6 +24,7 @@ import pandas as pd
 from uuid import uuid4
 
 from core.browser_payload import decimate_for_view
+from core.noseboom_full_export import export_full_table
 from core.configuration import load_detection_configuration
 from core.detector import InputCandidate
 from core.dashboard_time import (
@@ -676,6 +677,14 @@ class DashboardScanBackend:
         self._miro_rack_bridge: object | None = None
         self._hatchbox_view_lock = threading.RLock()
         self._sif_options = dict(DEFAULT_SIF_OPTIONS)
+        # A full-width download reads the whole flight file, which takes long
+        # enough that the operator needs to see it moving. The request itself
+        # streams the file back, so progress is published here and polled.
+        self._noseboom_export_progress: dict[str, object] = {
+            "running": False, "percent": 0.0, "step": "Idle",
+            "complete": False, "error": None, "rows": 0, "columns": 0,
+            "filename": None,
+        }
         # The remote-sensing interval is chosen against camera coverage and is
         # kept apart from the flight Time Filter, which the cameras no longer
         # take part in.
@@ -3214,6 +3223,16 @@ class DashboardScanBackend:
             "project_file": str(project_file),
         }
 
+    def noseboom_data_export_progress(self) -> dict[str, object]:
+        with self._lock:
+            return dict(self._noseboom_export_progress)
+
+    def _report_noseboom_export(self, percent: float, step: str) -> None:
+        with self._lock:
+            self._noseboom_export_progress.update(
+                {"running": True, "percent": round(float(percent), 1), "step": step}
+            )
+
     def export_noseboom_data(self, options: dict[str, object]) -> Path:
         """Create a user-selected scientific table without altering processed data."""
         from instruments.noseboom.legacy_bridge import LegacyNoseboomBridge
@@ -3221,9 +3240,30 @@ class DashboardScanBackend:
         format_name = str(options.get("format", "csv")).strip().casefold()
         if format_name not in {"csv", "xlsx", "txt"}:
             raise ValueError("Download format must be CSV, XLSX, or TXT")
-        frequency_hz = float(options.get("frequency_hz", 1.0))
-        if not 1.0 <= frequency_hz <= 100.0:
+        # "limited" is the fourteen plotted columns; "full" is the instrument's
+        # own record, every column it wrote.
+        variables = str(options.get("variables", "limited")).strip().casefold()
+        if variables not in {"limited", "full"}:
+            raise ValueError("Download variables must be 'limited' or 'full'")
+        raw_frequency = options.get("frequency_hz", 1.0)
+        original_resolution = (
+            raw_frequency in (None, "", "original")
+            or str(raw_frequency).strip().casefold() == "original"
+        )
+        if original_resolution and variables != "full":
+            raise ValueError(
+                "Original resolution is available for the full variable set. "
+                "Choose a frequency for the limited set."
+            )
+        frequency_hz = None if original_resolution else float(raw_frequency)
+        if frequency_hz is not None and not 1.0 <= frequency_hz <= 100.0:
             raise ValueError("Download frequency must be between 1 and 100 Hz")
+        with self._lock:
+            self._noseboom_export_progress.update({
+                "running": True, "percent": 0.0, "step": "Starting",
+                "complete": False, "error": None, "rows": 0, "columns": 0,
+                "filename": None,
+            })
         with self._lock:
             report = self._report
             project = self._flight_project
@@ -3239,23 +3279,73 @@ class DashboardScanBackend:
         ))
         if not paths:
             raise RuntimeError("No selected Noseboom source files are available")
-        bridge = LegacyNoseboomBridge()
-        data = bridge.load_csv_window(
-            paths,
-            int(selected_start.timestamp() * 1_000_000_000),
-            int(selected_end.timestamp() * 1_000_000_000),
-        )
-        source = bridge.module.make_export_source(data)
-        table = bridge.module.resample_export_data(source, frequency_hz)
         destination = project.flight_output_root / "exports" / "noseboom"
         destination.mkdir(parents=True, exist_ok=True)
         safe_flight = "".join(
             value if value.isalnum() or value in "-_" else "_"
             for value in (project.flight_id or "Flight")
         )
-        frequency_label = f"{frequency_hz:g}Hz".replace(".", "p")
+        frequency_label = (
+            "original" if frequency_hz is None
+            else f"{frequency_hz:g}Hz".replace(".", "p")
+        )
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        start_ns = int(selected_start.timestamp() * 1_000_000_000)
+        end_ns = int(selected_end.timestamp() * 1_000_000_000)
+
+        if variables == "full":
+            if format_name == "xlsx":
+                raise ValueError(
+                    "The full variable set is written as CSV or tab-delimited text. "
+                    "A flight can exceed the row limit of an Excel worksheet."
+                )
+            target = destination / (
+                f"{safe_flight}_noseboom_full_{frequency_label}_{stamp}.{format_name}"
+            )
+            try:
+                rows, columns = export_full_table(
+                    paths, target,
+                    start_ns=start_ns, end_ns=end_ns,
+                    flight_id=project.flight_id or "Flight",
+                    frequency_hz=frequency_hz,
+                    separator="\t" if format_name == "txt" else ",",
+                    progress=self._report_noseboom_export,
+                )
+            except Exception as exc:
+                with self._lock:
+                    self._noseboom_export_progress.update(
+                        {"running": False, "error": str(exc), "step": "Failed"}
+                    )
+                raise
+            with self._lock:
+                self._noseboom_export_progress.update({
+                    "running": False, "percent": 100.0, "step": "Download complete",
+                    "complete": True, "rows": rows, "columns": len(columns),
+                    "filename": target.name,
+                })
+            self.logger.log(
+                LogLevel.SUCCESS, "noseboom-export",
+                f"Noseboom full {format_name.upper()} download prepared at "
+                f"{frequency_label} ({rows:,} rows, {len(columns)} columns)",
+                instrument="noseboom", file_path=target,
+                processing_step="interactive-data-export",
+            )
+            self._persist_project_logs()
+            return target
+
+        bridge = LegacyNoseboomBridge()
+        self._report_noseboom_export(5.0, "Reading the selected interval")
+        data = bridge.load_csv_window(
+            paths, start_ns, end_ns,
+            progress=lambda percent, step: self._report_noseboom_export(
+                5.0 + 0.75 * percent, step
+            ),
+        )
+        self._report_noseboom_export(85.0, "Resampling the selected variables")
+        source = bridge.module.make_export_source(data)
+        table = bridge.module.resample_export_data(source, frequency_hz)
         target = destination / f"{safe_flight}_noseboom_{frequency_label}_{stamp}.{format_name}"
+        self._report_noseboom_export(95.0, f"Writing {len(table):,} rows")
         if format_name == "csv":
             table.to_csv(target, index=False, encoding="utf-8-sig")
         elif format_name == "txt":
@@ -3269,10 +3359,16 @@ class DashboardScanBackend:
                     "from this environment. Restart CC-FLUX with the launcher so it "
                     "can install the dependency, or download CSV or TXT instead."
                 ) from exc
+        with self._lock:
+            self._noseboom_export_progress.update({
+                "running": False, "percent": 100.0, "step": "Download complete",
+                "complete": True, "rows": int(len(table)),
+                "columns": int(len(table.columns)), "filename": target.name,
+            })
         self.logger.log(
             LogLevel.SUCCESS,
             "noseboom-export",
-            f"Noseboom {format_name.upper()} download prepared at {frequency_hz:g} Hz ({len(table):,} rows)",
+            f"Noseboom {format_name.upper()} download prepared at {frequency_label} ({len(table):,} rows)",
             instrument="noseboom",
             file_path=target,
             processing_step="interactive-data-export",
