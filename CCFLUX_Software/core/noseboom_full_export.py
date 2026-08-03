@@ -70,16 +70,48 @@ def _resample(frame: pd.DataFrame, frequency_hz: float) -> pd.DataFrame:
         return frame
     rule = f"{int(round(1e9 / float(frequency_hz)))}ns"
     grouped = frame.resample(rule)
-    numeric = frame.select_dtypes("number").columns
-    # Median for numbers, as the fourteen-column export uses; the first value for
-    # text, because an average of a label means nothing.
-    aggregated = grouped[list(numeric)].median()
+    numeric = [
+        column for column in frame.select_dtypes("number").columns
+        if column != TIME_COLUMN
+    ]
+    # Median for numbers, as the fourteen-column export uses.
+    aggregated = grouped[numeric].median() if numeric else pd.DataFrame(index=grouped.size().index)
+
+    # The timestamp is not a measurement to average. A nanosecond epoch needs 19
+    # digits and float64 holds about 16, so taking its median wrote
+    # 1.785736739495e+18 - the interval's midpoint, rounded, 64 ns from any row
+    # that existed. The first timestamp of the interval is kept instead, exactly,
+    # which is what the fourteen-column export does.
+    if TIME_COLUMN in frame.columns:
+        stamps = grouped[TIME_COLUMN].first()
+        aggregated[TIME_COLUMN] = stamps.astype("int64")
+
     for column in frame.columns:
-        if column in numeric:
+        if column in numeric or column == TIME_COLUMN:
             continue
-        aggregated[column] = grouped[column].first()
+        if column == EVENT_COLUMN:
+            # Every mark in the interval, not just the first. Taking the first
+            # discarded any second annotation in the same second, and an event
+            # mark is the one thing in the record that cannot be recovered by
+            # looking at a neighbouring row.
+            aggregated[column] = grouped[column].agg(_join_marks)
+        else:
+            aggregated[column] = grouped[column].first()
+
     aggregated = aggregated.loc[grouped.size() > 0]
     return aggregated[list(frame.columns)].reset_index(drop=True)
+
+
+def _join_marks(values) -> str:
+    """Distinct non-empty marks in one interval, in the order they occurred."""
+    seen: list[str] = []
+    for value in values:
+        text = "" if value is None else str(value).strip()
+        if not text or text.lower() == "nan":
+            continue
+        if text not in seen:
+            seen.append(text)
+    return " | ".join(seen)
 
 
 

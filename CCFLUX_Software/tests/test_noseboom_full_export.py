@@ -317,3 +317,95 @@ def test_the_page_provides_every_element_the_download_needs():
     missing = {name for name in used if f'id="{name}"' not in PAGE}
 
     assert not missing, f"the download flow reaches for ids the page lacks: {missing}"
+
+
+# ----------------------------------------------- event marks and the timestamp
+def _marked(tmp_path, marks, rows=300, hz=100):
+    start = 1_785_736_739_000_000_000
+    step = 1_000_000_000 // hz
+    path = tmp_path / "NoseBoom.csv"
+    pd.DataFrame({
+        TIME_COLUMN: [start + i * step for i in range(rows)],
+        "lat": [47.65] * rows,
+        EVENT_COLUMN: [marks.get(i, "") for i in range(rows)],
+    }).to_csv(path, index=False)
+    return path, start
+
+
+def test_two_marks_in_one_interval_both_survive(tmp_path):
+    """Taking the first discarded any second annotation in the same second, and
+    an event mark is the one thing in the record that cannot be recovered by
+    looking at a neighbouring row."""
+    source, start = _marked(tmp_path, {10: "MARK_A", 60: "MARK_B", 250: "MARK_C"})
+    target = tmp_path / "out.csv"
+
+    export_full_table([source], target, start_ns=0, end_ns=2**63 - 1,
+                      flight_id="F", frequency_hz=1.0)
+
+    written = _read(target)
+    found = set()
+    for cell in written[EVENT_COLUMN].fillna(""):
+        found |= {value.strip() for value in str(cell).split("|") if value.strip()}
+
+    assert found == {"MARK_A", "MARK_B", "MARK_C"}
+
+
+def test_marks_in_one_interval_are_joined_readably(tmp_path):
+    source, _ = _marked(tmp_path, {10: "MARK_A", 60: "MARK_B"})
+    target = tmp_path / "out.csv"
+
+    export_full_table([source], target, start_ns=0, end_ns=2**63 - 1,
+                      flight_id="F", frequency_hz=1.0)
+
+    first = str(_read(target)[EVENT_COLUMN].iloc[0])
+    assert first == "MARK_A | MARK_B"
+
+
+def test_a_repeated_mark_is_not_repeated_in_the_cell(tmp_path):
+    source, _ = _marked(tmp_path, {5: "SAME", 40: "SAME", 90: "SAME"})
+    target = tmp_path / "out.csv"
+
+    export_full_table([source], target, start_ns=0, end_ns=2**63 - 1,
+                      flight_id="F", frequency_hz=1.0)
+
+    assert str(_read(target)[EVENT_COLUMN].iloc[0]) == "SAME"
+
+
+def test_an_interval_with_no_mark_stays_empty(tmp_path):
+    source, _ = _marked(tmp_path, {250: "LATE"})
+    target = tmp_path / "out.csv"
+
+    export_full_table([source], target, start_ns=0, end_ns=2**63 - 1,
+                      flight_id="F", frequency_hz=1.0)
+
+    written = _read(target)[EVENT_COLUMN].fillna("")
+    assert str(written.iloc[0]).strip() == ""
+
+
+@pytest.mark.parametrize("hz", [None, 1.0, 10.0])
+def test_the_timestamp_is_written_exactly(tmp_path, hz):
+    """A nanosecond epoch needs 19 digits and float64 holds about 16. Taking the
+    median wrote 1.785736739495e+18 - the interval midpoint, rounded, 64 ns from
+    any row that ever existed."""
+    source, start = _marked(tmp_path, {})
+    target = tmp_path / "out.csv"
+
+    export_full_table([source], target, start_ns=0, end_ns=2**63 - 1,
+                      flight_id="F", frequency_hz=hz)
+
+    raw = pd.read_csv(source, dtype=str)[TIME_COLUMN]
+    written = pd.read_csv(target, encoding="utf-8-sig", dtype=str)[TIME_COLUMN]
+
+    assert all(value.isdigit() for value in written), "no exponent, no decimal point"
+    assert set(written) <= set(raw), "every timestamp is one that was recorded"
+
+
+def test_the_resampled_timestamp_is_the_first_of_its_interval(tmp_path):
+    source, start = _marked(tmp_path, {}, rows=300, hz=100)
+    target = tmp_path / "out.csv"
+
+    export_full_table([source], target, start_ns=0, end_ns=2**63 - 1,
+                      flight_id="F", frequency_hz=1.0)
+
+    written = pd.read_csv(target, encoding="utf-8-sig", dtype=str)[TIME_COLUMN]
+    assert int(written.iloc[0]) == start
