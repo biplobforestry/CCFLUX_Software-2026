@@ -677,6 +677,10 @@ class DashboardScanBackend:
         self._miro_rack_bridge: object | None = None
         self._hatchbox_view_lock = threading.RLock()
         self._sif_options = dict(DEFAULT_SIF_OPTIONS)
+        # What a loaded project restored, kept aside so the rescan that follows
+        # refreshes the link to the raw files without costing the results the
+        # operator opened the project to look at.
+        self._restored_products: dict[str, tuple] = {}
         # A full-width download reads the whole flight file, which takes long
         # enough that the operator needs to see it moving. The request itself
         # streams the file back, so progress is published here and polled.
@@ -2227,12 +2231,105 @@ class DashboardScanBackend:
             file_path=Path(project_file),
             processing_step="project-open",
         )
+        # A loaded project restores its products but not its link to the raw
+        # files: those paths were recorded on the machine that processed them,
+        # and anything reading source data - the Noseboom download, any
+        # reprocessing - refuses without a scan report. Rescanning on load is
+        # what makes a reopened project behave like a live one, so it is the
+        # default rather than something to remember.
+        with self._lock:
+            self._restored_products = {
+                name: (dict(state.quicklook), state.processing_status,
+                       list(state.output_files))
+                for name, state in self._instruments.items()
+                if state.quicklook
+            }
+        # Only when the saved scan could not be reused. A project whose raw
+        # files are still where it left them already has a usable scan report,
+        # and rescanning it can only replace good recorded detection with
+        # whatever this machine happens to find.
+        rescan = (
+            {"started": False, "reason": "The saved scan is still valid; "
+             "downloads and reprocessing are available.", "needed": False}
+            if opened.reused_saved_scan
+            else self._rescan_after_open(project)
+        )
         return {
             "cancelled": False,
             "project_file": str(project_file),
             "reused_saved_scan": opened.reused_saved_scan,
             "rescan_required": opened.rescan_required,
+            "auto_rescan": rescan,
             "state": self.snapshot(),
+        }
+
+
+    def _reapply_restored_products(self) -> None:
+        """Give a rescanned session back the products the project restored.
+
+        A scan re-detects instruments and knows nothing about results, so on its
+        own it leaves every workspace looking unprocessed - which is the state
+        the operator opened the project to get out of. Only an instrument the
+        scan left without a payload is restored, so a genuinely new result is
+        never overwritten by an older one.
+        """
+        if not self._restored_products:
+            return
+        restored = []
+        for name, (quicklook, status, files) in self._restored_products.items():
+            state = self._instruments.get(name)
+            if state is None or state.quicklook:
+                continue
+            state.quicklook = dict(quicklook)
+            state.processing_status = status
+            if files:
+                state.output_files = list(files)
+            restored.append(name)
+        if restored:
+            self._messages.append(
+                "Saved results kept for: " + ", ".join(sorted(restored)) + "."
+            )
+
+    def _rescan_after_open(self, project) -> dict[str, object]:
+        """Start a scan of the folders the project recorded, when they are there.
+
+        Reports what it decided rather than failing: a project opened away from
+        its raw data is still perfectly good for looking at results, and saying
+        which folder is missing is more use than refusing to open.
+        """
+        flight = project.flight_folder_path
+        camera = project.camera_folder_path
+        if not flight or not Path(flight).is_dir():
+            return {
+                "started": False,
+                "needed": True,
+                "reason": (
+                    f"The Flight Folder recorded in this project is not on this "
+                    f"computer: {flight}. Saved results are shown; select the "
+                    "Flight Folder and run Initial Check to process or download."
+                ),
+                "flight_folder": str(flight) if flight else None,
+            }
+        include_camera = bool(camera and Path(camera).is_dir())
+        try:
+            self.start_scan(
+                Path(flight),
+                camera_folder=Path(camera) if include_camera else None,
+                include_camera=include_camera,
+            )
+        except Exception as exc:
+            return {"started": False, "needed": True, "reason": str(exc),
+                    "flight_folder": str(flight)}
+        return {
+            "started": True,
+            "needed": True,
+            "flight_folder": str(flight),
+            "camera_folder": str(camera) if include_camera else None,
+            "camera_included": include_camera,
+            "reason": (
+                "Rescanning the recorded folders so downloads and reprocessing "
+                "are available."
+            ),
         }
 
     def noseboom_view(self) -> dict[str, object]:
@@ -4697,6 +4794,7 @@ class DashboardScanBackend:
                 self._messages.append(
                     f"Scan complete: {report.files_scanned} files inspected."
                 )
+                self._reapply_restored_products()
             else:
                 self._phase = "scanning_camera"
                 self._current_instrument = "Camera System"

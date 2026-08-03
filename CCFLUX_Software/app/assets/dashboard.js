@@ -480,7 +480,48 @@
     const rackStatus = result.miro_rack?.restored
       ? ' MIRO Rack data and saved plots restored.'
       : ` ${result.miro_rack?.reason || 'No saved MIRO Rack session.'}`;
-    showToast(`Project loaded: ${result.project_file}.${rackStatus}`);
+    // A loaded project restores its products but not its link to the raw files,
+    // so anything reading source data refuses until a scan has run. The rescan
+    // starts by itself; say that it is running, or why it could not.
+    const rescan = result.auto_rescan || {};
+    if (rescan.started) {
+      showToast(`Project loaded: ${result.project_file}.${rackStatus} Rescanning ${
+        rescan.camera_included ? 'flight and camera folders' : 'the Flight Folder'
+      } so downloads and reprocessing are available.`);
+      startPolling();
+    } else if (rescan.needed === false) {
+      // The saved scan is intact, so there is nothing to rescan and nothing to
+      // warn about; saying otherwise would send the operator looking for a
+      // problem that does not exist.
+      showToast(`Project loaded: ${result.project_file}.${rackStatus}`);
+    } else if (rescan.reason) {
+      showToast(`Project loaded: ${result.project_file}.${rackStatus}`);
+      openMissingSourcesDialog(rescan);
+    } else {
+      showToast(`Project loaded: ${result.project_file}.${rackStatus}`);
+    }
+  }
+
+  // Saved results are perfectly usable without the raw data; only processing
+  // and downloads need it. Say which folder is missing rather than letting the
+  // operator find out from a refusal three clicks later.
+  function openMissingSourcesDialog(rescan) {
+    modalTitle.textContent = 'Saved results loaded — raw data not found';
+    modalBody.innerHTML = `
+      <p>${escapeHtml(rescan.reason || 'The recorded source folders are not on this computer.')}</p>
+      <p class="muted">Maps, plots and saved products are available now. Selecting the
+      Flight Folder and running Initial Check re-links the raw files, which is what
+      downloading data and reprocessing need.</p>
+      <div class="modal-actions">
+        <button class="btn" id="missingSourcesClose">Continue with saved results</button>
+        <button class="btn primary" id="missingSourcesSelect">Select Flight Folder</button>
+      </div>`;
+    showModal();
+    document.getElementById('missingSourcesClose').onclick = () => closeModal();
+    document.getElementById('missingSourcesSelect').onclick = () => {
+      closeModal();
+      document.getElementById('openFolderBtn')?.click();
+    };
   }
 
   function showSavedProjectChoices(discovery) {
