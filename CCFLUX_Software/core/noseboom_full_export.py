@@ -32,6 +32,8 @@ from .text_encoding import detect_encoding
 # placed in time by.
 TIME_COLUMN = "Airflow_UTCcorr_Nanoseconds_ns"
 EVENT_COLUMN = "EVENT"
+# Kept for anything that still refers to it; the flight is now identified by
+# EVENT, so no separate column is written.
 FLIGHT_ID_COLUMN = "Flight ID"
 CHUNK_ROWS = 200_000
 
@@ -164,11 +166,14 @@ def export_full_table(
             f"The Noseboom files carry no {TIME_COLUMN} column, so rows cannot be "
             "placed in time. Check that the export is a Noseboom record."
         )
-    # EVENT is part of the instrument's record; Flight ID is added so a table
-    # separated from its project still says which flight it belongs to.
+    # EVENT names the flight. The logger writes the column but fills it with the
+    # literal string "EVENT" on every row, which identifies nothing; the flight
+    # id is what a row separated from its project needs in order to say where it
+    # came from. Any value already in the column is therefore replaced, not
+    # merged - see _resample, which no longer has marks to preserve.
     if EVENT_COLUMN not in columns:
         columns.append(EVENT_COLUMN)
-    written_columns = [FLIGHT_ID_COLUMN] + columns
+    written_columns = list(columns)
 
     total_rows = _count_rows(paths, report)
     rows_read = 0
@@ -203,6 +208,7 @@ def export_full_table(
                     if column not in chunk.columns:
                         chunk[column] = ""
                 chunk = chunk[columns]
+                chunk[EVENT_COLUMN] = flight_id
                 if frequency_hz:
                     numeric = chunk.drop(columns=[EVENT_COLUMN], errors="ignore").apply(
                         pd.to_numeric, errors="coerce"
@@ -211,7 +217,6 @@ def export_full_table(
                     chunk = _resample(numeric[columns], frequency_hz)
                     if chunk.empty:
                         continue
-                chunk.insert(0, FLIGHT_ID_COLUMN, flight_id)
                 chunk.to_csv(
                     sink, index=False, header=not header_written,
                     sep=separator, lineterminator="\n",

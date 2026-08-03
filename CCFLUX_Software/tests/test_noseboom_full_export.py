@@ -67,26 +67,40 @@ def test_every_column_is_written(tmp_path):
         assert name in written.columns
 
 
-def test_the_flight_id_is_the_first_column(tmp_path):
+def test_the_event_column_names_the_flight(tmp_path):
+    """The logger writes EVENT and fills it with the literal string "EVENT" on
+    every row, which identifies nothing. The flight id is what a row separated
+    from its project needs, so it is written there."""
     source, low, high = _source(tmp_path, rows=50)
     target = tmp_path / "full.csv"
 
     export_full_table([source], target, start_ns=low, end_ns=high, flight_id="Flight_2707")
 
     written = _read(target)
-    assert written.columns[0] == FLIGHT_ID_COLUMN
-    assert set(written[FLIGHT_ID_COLUMN]) == {"Flight_2707"}
+    assert set(written[EVENT_COLUMN]) == {"Flight_2707"}
 
 
-def test_the_event_column_is_present_and_preserved(tmp_path):
-    source, low, high = _source(tmp_path, rows=300)
+def test_no_duplicate_flight_column_is_written(tmp_path):
+    """EVENT carries the flight, so a second column saying the same thing is
+    noise in a table that already has 140 columns."""
+    source, low, high = _source(tmp_path, rows=20)
     target = tmp_path / "full.csv"
 
     export_full_table([source], target, start_ns=low, end_ns=high, flight_id="F")
 
+    assert FLIGHT_ID_COLUMN not in _read(target).columns
+
+
+def test_the_event_column_is_written_for_every_row(tmp_path):
+    """Whatever the logger put there is replaced: it wrote the literal "EVENT"."""
+    source, low, high = _source(tmp_path, rows=300)
+    target = tmp_path / "full.csv"
+
+    export_full_table([source], target, start_ns=low, end_ns=high, flight_id="Flight_2707")
+
     written = _read(target)
     assert EVENT_COLUMN in written.columns
-    assert (written[EVENT_COLUMN] == "MARK").sum() == 3, "the marks are kept, not blanked"
+    assert (written[EVENT_COLUMN] == "Flight_2707").all()
 
 
 def test_a_file_without_event_still_gets_the_column(tmp_path):
@@ -232,7 +246,7 @@ def test_tab_separated_output(tmp_path):
     )
 
     written = _read(target, sep="\t")
-    assert FLIGHT_ID_COLUMN in written.columns
+    assert EVENT_COLUMN in written.columns
     assert len(written) == 25
 
 
@@ -260,7 +274,9 @@ def test_the_written_file_is_valid_csv(tmp_path):
         rows = list(csv.reader(stream))
     header = rows[0]
     assert all(len(row) == len(header) for row in rows[1:])
-    assert FLIGHT_ID_COLUMN not in [cell for row in rows[1:] for cell in row]
+    assert EVENT_COLUMN not in [cell for row in rows[1:] for cell in row], (
+        "a header must not reappear part-way through a streamed file"
+    )
 
 
 # ------------------------------------------------------- the dialog and its API
@@ -332,54 +348,33 @@ def _marked(tmp_path, marks, rows=300, hz=100):
     return path, start
 
 
-def test_two_marks_in_one_interval_both_survive(tmp_path):
-    """Taking the first discarded any second annotation in the same second, and
-    an event mark is the one thing in the record that cannot be recovered by
-    looking at a neighbouring row."""
-    source, start = _marked(tmp_path, {10: "MARK_A", 60: "MARK_B", 250: "MARK_C"})
+def test_the_event_column_carries_the_flight_at_every_resolution(tmp_path):
+    """Set before any resampling, so an interval cannot dilute or drop it."""
+    source, _ = _marked(tmp_path, {10: "MARK_A", 60: "MARK_B", 250: "MARK_C"})
+
+    for hz in (None, 1.0, 10.0):
+        target = tmp_path / f"out_{hz}.csv"
+        export_full_table([source], target, start_ns=0, end_ns=2**63 - 1,
+                          flight_id="Flight_2707", frequency_hz=hz)
+
+        assert set(_read(target)[EVENT_COLUMN]) == {"Flight_2707"}, f"at {hz}"
+
+
+def test_what_the_logger_put_in_event_is_replaced(tmp_path):
+    """Deliberate, and worth stating: the column is an identifier here, not a
+    channel. A source that carried real annotations would lose them - the
+    operator's own export carries the literal string "EVENT" on every row, which
+    identifies nothing.
+    """
+    source, _ = _marked(tmp_path, {10: "TAKEOFF", 60: "LANDING"})
     target = tmp_path / "out.csv"
 
     export_full_table([source], target, start_ns=0, end_ns=2**63 - 1,
-                      flight_id="F", frequency_hz=1.0)
+                      flight_id="Flight_2707")
 
-    written = _read(target)
-    found = set()
-    for cell in written[EVENT_COLUMN].fillna(""):
-        found |= {value.strip() for value in str(cell).split("|") if value.strip()}
-
-    assert found == {"MARK_A", "MARK_B", "MARK_C"}
-
-
-def test_marks_in_one_interval_are_joined_readably(tmp_path):
-    source, _ = _marked(tmp_path, {10: "MARK_A", 60: "MARK_B"})
-    target = tmp_path / "out.csv"
-
-    export_full_table([source], target, start_ns=0, end_ns=2**63 - 1,
-                      flight_id="F", frequency_hz=1.0)
-
-    first = str(_read(target)[EVENT_COLUMN].iloc[0])
-    assert first == "MARK_A | MARK_B"
-
-
-def test_a_repeated_mark_is_not_repeated_in_the_cell(tmp_path):
-    source, _ = _marked(tmp_path, {5: "SAME", 40: "SAME", 90: "SAME"})
-    target = tmp_path / "out.csv"
-
-    export_full_table([source], target, start_ns=0, end_ns=2**63 - 1,
-                      flight_id="F", frequency_hz=1.0)
-
-    assert str(_read(target)[EVENT_COLUMN].iloc[0]) == "SAME"
-
-
-def test_an_interval_with_no_mark_stays_empty(tmp_path):
-    source, _ = _marked(tmp_path, {250: "LATE"})
-    target = tmp_path / "out.csv"
-
-    export_full_table([source], target, start_ns=0, end_ns=2**63 - 1,
-                      flight_id="F", frequency_hz=1.0)
-
-    written = _read(target)[EVENT_COLUMN].fillna("")
-    assert str(written.iloc[0]).strip() == ""
+    written = _read(target)[EVENT_COLUMN]
+    assert set(written) == {"Flight_2707"}
+    assert "TAKEOFF" not in set(written)
 
 
 @pytest.mark.parametrize("hz", [None, 1.0, 10.0])
