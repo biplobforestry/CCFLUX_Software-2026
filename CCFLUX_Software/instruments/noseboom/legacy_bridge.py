@@ -108,21 +108,34 @@ class LegacyNoseboomBridge:
         rows_examined = 0
         for path in file_list:
             usecols = module.csv_usecols(path)
-            time_column = (
-                module.FIELDS["time_ns"]
-                if module.FIELDS["time_ns"] in usecols
-                else "time_ns"
-            )
             for raw in module.pd.read_csv(
                 path,
                 usecols=usecols,
-                encoding="utf-8-sig",
+                encoding=module.detect_encoding(path),
                 low_memory=False,
                 chunksize=module.CHUNKSIZE,
             ):
+                # usecols names the columns as the file spells them, so a
+                # prefixed export gives back "NoseBoom_Airflow_UTCcorr_...".
+                # Dropping the prefix here is what the browser loader does, and
+                # it has to happen before anything looks a column up: the old
+                # test against usecols never matched a prefixed file, fell back
+                # to "time_ns", and failed with KeyError on a valid export.
+                raw = raw.rename(columns=module.normalize_column_name)
                 rows_examined += len(raw)
                 if cancelled and cancelled():
                     raise RuntimeError("Noseboom processing was cancelled")
+                time_column = (
+                    module.FIELDS["time_ns"]
+                    if module.FIELDS["time_ns"] in raw.columns
+                    else "time_ns"
+                )
+                if time_column not in raw.columns:
+                    raise ValueError(
+                        "The Noseboom file carries no "
+                        f"{module.FIELDS['time_ns']} column, so its rows cannot "
+                        f"be placed in time: {path.name}"
+                    )
                 values = module.pd.to_numeric(raw[time_column], errors="coerce")
                 finite = values.dropna()
                 if not finite.empty and float(finite.min()) > end_ns:

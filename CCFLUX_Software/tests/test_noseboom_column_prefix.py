@@ -173,3 +173,128 @@ def test_the_sif_preparation_refuses_a_mixed_header():
         module.normalize_noseboom_fieldnames(
             ["WIND_vWind_x_m/s", "NoseBoom_WIND_vWind_x_m/s"], "NoseBoom.csv"
         )
+
+
+# ------------------------------------------------------- detection sees it too
+def test_a_prefixed_export_is_recognised_as_noseboom(tmp_path):
+    """The prefix work reached the adapter, the loader and timestamp extraction,
+    and not the one step that decides the file is Noseboom at all. The detection
+    rule requires "Airflow_UTCcorr_Nanoseconds_ns"; a logger-prefixed export
+    spells it "NoseBoom_Airflow_UTCcorr_Nanoseconds_ns", so an 810 MB flight
+    export was reported as no Noseboom data found.
+    """
+    from core.scanner import _inspect_file
+
+    path = tmp_path / "NoseBoom_20260803_055900_to_065900_UTC.csv"
+    path.write_text(
+        "NoseBoom_Airflow_UTCcorr_Nanoseconds_ns,NoseBoom_WIND_dir_deg\n"
+        "1700000000000000000,182.4\n",
+        encoding="utf-8",
+    )
+
+    inspection = _inspect_file(path, 64 * 1024, 2, inspect_text=True, inspect_exif=False)
+
+    assert "Airflow_UTCcorr_Nanoseconds_ns" in inspection.columns, "the rule's name"
+    assert "NoseBoom_Airflow_UTCcorr_Nanoseconds_ns" in inspection.columns, (
+        "and the file's own, so anything expecting the raw name still matches"
+    )
+
+
+def test_an_unprefixed_export_is_unaffected(tmp_path):
+    from core.scanner import _inspect_file
+
+    path = tmp_path / "NoseBoom.csv"
+    path.write_text(
+        "Airflow_UTCcorr_Nanoseconds_ns,WIND_dir_deg\n1700000000000000000,182.4\n",
+        encoding="utf-8",
+    )
+
+    inspection = _inspect_file(path, 64 * 1024, 2, inspect_text=True, inspect_exif=False)
+
+    assert "Airflow_UTCcorr_Nanoseconds_ns" in inspection.columns
+
+
+def test_other_instruments_keep_their_column_names(tmp_path):
+    """Normalising every header is only safe because no other instrument uses
+    that prefix; this pins that the names they are detected by are untouched."""
+    from core.scanner import _inspect_file
+
+    path = tmp_path / "picarro.dat"
+    path.write_text("DATE,TIME,CO2_sync\n2026-07-27,05:19:39,412.5\n", encoding="utf-8")
+
+    inspection = _inspect_file(path, 64 * 1024, 2, inspect_text=True, inspect_exif=False)
+
+    assert {"DATE", "TIME", "CO2_sync"} <= inspection.columns
+
+
+def test_the_loader_reads_a_prefixed_file(tmp_path):
+    """The bridge chose its time column by testing FIELDS["time_ns"] against
+    usecols - and usecols names columns as the file spells them. A prefixed
+    export never matched, fell back to the literal "time_ns", and every read
+    died with KeyError: 'time_ns'. Processing failed and the limited download
+    failed; only the full export, which normalises for itself, worked.
+    """
+    from instruments.noseboom.legacy_bridge import LegacyNoseboomBridge
+
+    start = 1_700_000_000_000_000_000
+    rows = [
+        "NoseBoom_Airflow_UTCcorr_Nanoseconds_ns,NoseBoom_INS_Filter_LLHPos_Latitude_deg,"
+        "NoseBoom_INS_Filter_LLHPos_Longitude_deg,NoseBoom_INS_Filter_LLHPos_ElipsoidHeight_m,"
+        "NoseBoom_WIND_vWind_x_m/s,NoseBoom_WIND_vWind_y_m/s,NoseBoom_WIND_vWind_z_m/s,"
+        "NoseBoom_WIND_vWind_m/s,NoseBoom_WIND_dir_deg,NoseBoom_Airflow_Flow_OAT_degC,"
+        "NoseBoom_Airflow_Flow_rel_humidity_,NoseBoom_Airflow_Sensor_pstat_hPa"
+    ]
+    for index in range(200):
+        stamp = start + index * 10_000_000
+        rows.append(
+            f"{stamp},47.65,9.37,760.0,1.5,0.5,0.1,1.6,182.0,20.1,41.0,1001.2"
+        )
+    path = tmp_path / "NoseBoom_20260803_055900_to_065900_UTC.csv"
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    data = LegacyNoseboomBridge().load_csv_window(
+        [path], start, start + 200 * 10_000_000
+    )
+
+    assert len(data) == 200
+    assert "time_ns" in data.columns, "the simplified name the science works on"
+    assert data["lat"].notna().all()
+
+
+def test_an_unprefixed_file_loads_exactly_as_before(tmp_path):
+    from instruments.noseboom.legacy_bridge import LegacyNoseboomBridge
+
+    start = 1_700_000_000_000_000_000
+    rows = [
+        "Airflow_UTCcorr_Nanoseconds_ns,INS_Filter_LLHPos_Latitude_deg,"
+        "INS_Filter_LLHPos_Longitude_deg,INS_Filter_LLHPos_ElipsoidHeight_m,"
+        "WIND_vWind_x_m/s,WIND_vWind_y_m/s,WIND_vWind_z_m/s,WIND_vWind_m/s,"
+        "WIND_dir_deg,Airflow_Flow_OAT_degC,Airflow_Flow_rel_humidity_,"
+        "Airflow_Sensor_pstat_hPa"
+    ]
+    for index in range(50):
+        rows.append(
+            f"{start + index * 10_000_000},47.65,9.37,760.0,1.5,0.5,0.1,1.6,182.0,20.1,41.0,1001.2"
+        )
+    path = tmp_path / "NoseBoom.csv"
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    data = LegacyNoseboomBridge().load_csv_window(
+        [path], start, start + 50 * 10_000_000
+    )
+
+    assert len(data) == 50
+    assert data["lat"].notna().all()
+
+
+def test_a_file_without_the_time_column_says_so(tmp_path):
+    """Rather than KeyError on a name the operator never wrote."""
+    from instruments.noseboom.legacy_bridge import LegacyNoseboomBridge
+
+    path = tmp_path / "NoseBoom.csv"
+    path.write_text("WIND_dir_deg,Airflow_Flow_OAT_degC\n182.0,20.1\n", encoding="utf-8")
+
+    with pytest.raises(Exception) as failure:
+        LegacyNoseboomBridge().load_csv_window([path], 0, 1)
+
+    assert "time_ns" not in str(failure.value) or "Airflow_UTCcorr" in str(failure.value)

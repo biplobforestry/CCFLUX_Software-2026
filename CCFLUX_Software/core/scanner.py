@@ -20,6 +20,7 @@ from pathlib import Path
 from threading import Event
 from typing import Callable
 
+from .noseboom_columns import normalize_column_name
 from .detection_configuration import (
     DetectionConfiguration,
     DetectionRule,
@@ -671,7 +672,15 @@ def _inspect_file(
             columns, parse_warning, malformed = _header_columns(
                 text, sample_rows, truncated
             )
-            result.columns = frozenset(columns)
+            # Detection must see the same column names as everything else. A
+            # Noseboom export written with the logger prefix carries
+            # "NoseBoom_Airflow_UTCcorr_Nanoseconds_ns", and the rule requires
+            # "Airflow_UTCcorr_Nanoseconds_ns", so a perfectly good file was not
+            # recognised as Noseboom at all. Both spellings are kept: the raw
+            # name still matches anything that expects it.
+            result.columns = frozenset(columns) | frozenset(
+                normalize_column_name(value) for value in columns
+            )
             result.malformed = malformed
             if parse_warning:
                 result.warnings.append(f"{path}: {parse_warning}")
