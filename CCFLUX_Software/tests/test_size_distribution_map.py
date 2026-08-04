@@ -378,3 +378,13 @@ class TestMapLayout:
         source = (self.ASSETS / script).read_text(encoding="utf-8")
         assert "['mapResetBtn','mapResetTopBtn']" in source
         assert "$('mapUpdateBtn').onclick=()=>sizeMap.show()" in source
+
+
+def test_map_tiles_are_requested_with_cross_origin():
+    """Without it the tiles taint the canvas and toDataURL refuses to read the
+    map back: "Tainted canvases may not be exported." Every other map in the
+    software already sets it."""
+    assets = Path(__file__).resolve().parents[1] / "app" / "assets"
+    for name in ("size_map.js", "flir.js", "miro_rack_map.js"):
+        source = (assets / name).read_text(encoding="utf-8")
+        assert "crossOrigin" in source, name

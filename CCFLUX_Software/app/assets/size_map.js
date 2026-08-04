@@ -147,8 +147,11 @@ window.CCFLUX.createSizeMap = function createSizeMap(options) {
   function build() {
     if (built) return;
     map = L.map(ids.map, {preferCanvas: true, zoomControl: true});
+    // crossOrigin is what makes the export possible: a tile fetched without
+    // it taints the canvas, and toDataURL then refuses to read the map back.
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-      {maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'}).addTo(map);
+      {maxZoom: 19, attribution: '&copy; OpenStreetMap contributors',
+       updateWhenZooming: false, crossOrigin: true}).addTo(map);
     map.setView([50.9, 6.9], 9);
     built = true;
   }
