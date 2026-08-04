@@ -235,23 +235,41 @@ function ccfluxClampInterval(start, end, availableStart, availableEnd) {
 }
 function ccfluxFilterInside(values, bounds) {
   if (!values || !bounds) return false;
-  const ms = parseFilter(values.miro_start), me = parseFilter(values.miro_end);
-  const ps = parseFilter(values.picarro_start), pe = parseFilter(values.picarro_end);
-  return [ms, me, ps, pe].every(Number.isFinite)
-    && ms >= parseFilter(bounds.miro[0]) && me <= parseFilter(bounds.miro[1])
-    && ps >= parseFilter(bounds.picarro[0]) && pe <= parseFilter(bounds.picarro[1]);
+  // Only the instruments this flight actually has are checked. An absent one
+  // has no bounds to be inside of, and demanding them failed every check.
+  const within = (name, startKey, endKey) => {
+    const range = bounds[name];
+    if (!range) return true;
+    const low = parseFilter(values[startKey]), high = parseFilter(values[endKey]);
+    if (!Number.isFinite(low) || !Number.isFinite(high)) return false;
+    return low >= parseFilter(range[0]) && high <= parseFilter(range[1]);
+  };
+  if (!bounds.miro && !bounds.picarro) return false;
+  return within('miro', 'miro_start', 'miro_end')
+    && within('picarro', 'picarro_start', 'picarro_end');
 }
 function applyMainProjectTimeFilter(timeState) {
   if (!app?.meta || !timeState?.selected_analysis_start || !timeState?.selected_analysis_end) return '';
-  const miroRange = ccfluxClampInterval(timeState.selected_analysis_start, timeState.selected_analysis_end, app.meta.miro.start, app.meta.miro.end);
-  const picarroRange = ccfluxClampInterval(timeState.selected_analysis_start, timeState.selected_analysis_end, app.meta.picarro.start, app.meta.picarro.end);
-  if (!miroRange || !picarroRange) throw new Error('The main GUI Time Filter does not overlap both MIRO and Picarro data.');
+  // app.meta.<instrument> only exists once that instrument has been processed,
+  // so reading .start off it threw for a flight carrying only one of them.
+  const clampFor = name => {
+    const info = app.meta[name];
+    if (!info || !info.start || !info.end) return null;
+    return ccfluxClampInterval(timeState.selected_analysis_start, timeState.selected_analysis_end, info.start, info.end);
+  };
+  const miroRange = clampFor('miro');
+  const picarroRange = clampFor('picarro');
+  if (!miroRange && !picarroRange) throw new Error('The main GUI Time Filter does not overlap MIRO or Picarro data.');
   ccfluxMainBounds = {miro:miroRange, picarro:picarroRange};
   const mainKey = JSON.stringify(ccfluxMainBounds);
   if (!app.filtersApplied || !ccfluxFilterInside(app.filters, ccfluxMainBounds)) {
-    [miroStart.value, miroEnd.value] = miroRange;
-    [picarroStart.value, picarroEnd.value] = picarroRange;
-    app.filters = {miro_start:miroRange[0], miro_end:miroRange[1], picarro_start:picarroRange[0], picarro_end:picarroRange[1]};
+    // Destructuring a null range threw; only what exists is filled in.
+    if (miroRange) [miroStart.value, miroEnd.value] = miroRange;
+    if (picarroRange) [picarroStart.value, picarroEnd.value] = picarroRange;
+    app.filters = {
+      miro_start: miroRange ? miroRange[0] : '', miro_end: miroRange ? miroRange[1] : '',
+      picarro_start: picarroRange ? picarroRange[0] : '', picarro_end: picarroRange ? picarroRange[1] : ''
+    };
     app.filtersApplied = true;
     app.mismatchAccepted = true;
     ccfluxMainAnalysisKey = '';
@@ -266,7 +284,7 @@ function applyMainProjectTimeFilter(timeState) {
 }
 function openInvestigationTimeFilter() {
   if (!app?.loaded) {
-    alert('Process or load MIRO and Picarro data first.');
+    alert('Process or load MIRO or Picarro data first.');
     return;
   }
   let note = document.getElementById('ccfluxInvestigationNote');
@@ -276,15 +294,16 @@ function openInvestigationTimeFilter() {
     note.className = 'miro-note';
     filterDialog.querySelector('.dialog-grid').before(note);
   }
+  const describe = (label, range) => range ? `${label}: ${range[0]} to ${range[1]}` : `${label}: no data available`;
   note.textContent = ccfluxMainBounds
-    ? `Scientific investigation only. MIRO: ${ccfluxMainBounds.miro[0]} to ${ccfluxMainBounds.miro[1]}; Picarro: ${ccfluxMainBounds.picarro[0]} to ${ccfluxMainBounds.picarro[1]}. The main GUI Time Filter is unchanged.`
+    ? `Scientific investigation only. ${describe('MIRO', ccfluxMainBounds.miro)}; ${describe('Picarro', ccfluxMainBounds.picarro)}. The main GUI Time Filter is unchanged.`
     : 'Scientific investigation only. This filter never changes the main GUI Time Filter.';
   filterDialog.showModal();
 }
 function applyInvestigationTimeFilter() {
   const next = {miro_start:miroStart.value.trim(), miro_end:miroEnd.value.trim(), picarro_start:picarroStart.value.trim(), picarro_end:picarroEnd.value.trim()};
   if (!ccfluxFilterInside(next, ccfluxMainBounds)) {
-    alert('The investigation interval must remain inside the selected main GUI Time Filter for both instruments.');
+    alert('The investigation interval must remain inside the selected main GUI Time Filter for the available instruments.');
     return;
   }
   if (ccfluxLegacyApplyFilters) ccfluxLegacyApplyFilters();
@@ -627,11 +646,13 @@ function closeMapSync() {
         )
         project_saved = False
         with self.module.LOCK:
-            both_loaded = all(
+            # Whichever instruments this flight has. Requiring both meant a
+            # flight carrying only one never saved its MIRO Rack products.
+            any_loaded = any(
                 self.module.STORE.get(name) is not None
                 for name in ("miro", "picarro")
             )
-        if both_loaded:
+        if any_loaded:
             if progress_callback:
                 progress_callback(0.94, "Saving MIRO Rack project, please wait")
             with self._project_save_lock:
@@ -1244,6 +1265,14 @@ function closeMapSync() {
             "gases": {
                 "MIRO": list(MIRO_MAP_GASES),
                 "Picarro": list(PICARRO_MAP_GASES),
+            },
+            # One instrument can be absent from a flight, and the other is still
+            # worth mapping. Saying which produced layers lets the page offer
+            # only those and name the missing one, rather than presenting an
+            # instrument whose every layer is empty.
+            "available": {
+                instrument: bool(any(layers.values()))
+                for instrument, layers in map_layers.items()
             },
             "units": units,
             "flight_track": self._flight_track_records(navigation),

@@ -110,8 +110,25 @@
       const response = await fetch('/api/miro-rack/map/data', {cache:'no-store'});
       payload = await response.json();
       if (!response.ok) throw new Error(payload.error || 'Map data unavailable');
+      // A flight can carry one instrument and not the other. Offer only what
+      // produced layers, and name the missing one rather than presenting an
+      // instrument whose every gas is empty.
+      const availability = payload.available || {};
+      const present = ['MIRO','Picarro'].filter(name =>
+        availability[name] !== undefined
+          ? availability[name]
+          : Object.values((payload.layers || {})[name] || {}).some(rows => (rows || []).length)
+      );
+      const absent = ['MIRO','Picarro'].filter(name => !present.includes(name));
       selections.forEach((selection,index) => {
-        if (index === 1) selection.querySelector('.instrument').value = 'Picarro';
+        const instrument = selection.querySelector('.instrument');
+        [...instrument.options].forEach(option => {
+          if (!present.includes(option.value)) option.disabled = true;
+        });
+        if (present.length) {
+          // Second selector defaults to the other instrument when there is one.
+          instrument.value = present[Math.min(index, present.length - 1)];
+        }
         gasOptions(selection);
         selection.querySelector('.instrument').addEventListener('change', () => {
           gasOptions(selection);
@@ -123,6 +140,13 @@
         selection.querySelector('.layer-width').addEventListener('input', () => requestUpdate('Applying an individual track width'));
         selection.querySelector('.layer-offset').addEventListener('input', () => requestUpdate('Applying an individual lateral track offset'));
       });
+      if (absent.length) {
+        const note = document.getElementById('message');
+        const message = absent.map(name => `${name}: no data available`).join(' · ');
+        if (note) note.textContent = present.length
+          ? `${message}. Showing ${present.join(' and ')}.`
+          : message;
+      }
       map = L.map('map', {zoomControl:true, preferCanvas:true}).setView([47.6,9.3],10);
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom:19, attribution:'&copy; OpenStreetMap contributors', updateWhenZooming:false,
