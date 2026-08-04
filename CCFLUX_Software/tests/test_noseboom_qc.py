@@ -248,6 +248,17 @@ class TestWorkspaceSection:
         altitude = self.markup.index('data-stat="alt"')
         assert frequency < qc < altitude
 
+    def test_the_panel_hides_under_every_other_view(self):
+        """`display` on the class beat the browser's [hidden], so the panel
+        showed beneath the histogram, frequency, altitude and spectra views."""
+        assert ".qc-grid{display:none;" in self.markup
+        assert ".qc-grid:not([hidden]){display:flex}" in self.markup
+        assert "byId('qcView').hidden=true; byId('statsView').hidden=false;" in self.script
+
+    def test_the_tab_is_named_quality_check(self):
+        assert ">Quality Check</a>" in self.markup
+        assert "Quality control" not in self.markup
+
     def test_the_section_has_three_rows(self):
         rows = re.findall(r'<div class="qc-row (one|two)">', self.markup)
         assert rows == ["one", "two", "two"]

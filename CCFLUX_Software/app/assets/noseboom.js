@@ -179,7 +179,7 @@
   }
   function percentile(values, percent) { const sorted=values.filter(Number.isFinite).sort((a,b)=>a-b); if(!sorted.length)return null; const position=(sorted.length-1)*percent/100, lower=Math.floor(position), upper=Math.ceil(position); return sorted[lower]+(sorted[upper]-sorted[lower])*(position-lower); }
   function frequencyDistribution(values, bins=48) { const clean=values.filter(Number.isFinite); if(clean.length<2)return {centers:[],curve:[],start:0,end:1,size:1}; let start=Math.min(...clean),end=Math.max(...clean); if(start===end){start-=.5;end+=.5;} const size=(end-start)/bins,counts=Array(bins).fill(0); clean.forEach(value=>{const index=Math.min(bins-1,Math.max(0,Math.floor((value-start)/size)));counts[index]+=1;}); const sigma=1.35,radius=4,kernel=[]; for(let offset=-radius;offset<=radius;offset+=1)kernel.push(Math.exp(-.5*(offset/sigma)**2)); const scale=kernel.reduce((a,b)=>a+b,0); const curve=counts.map((_,index)=>kernel.reduce((sum,weight,k)=>sum+weight*(counts[index+k-radius]||0),0)/scale); return {centers:counts.map((_,index)=>start+(index+.5)*size),curve,start,end,size}; }
-  // --- Quality control -----------------------------------------------------
+  // --- Quality Check -----------------------------------------------------
   // The checks follow the campaign evaluation script: the flow-uncertainty
   // limit test, wind direction against heading and ground track, the vertical
   // wind, and wind speed and direction against the nearest airport's METAR
@@ -275,7 +275,7 @@
     if (!qcPayload) {
       const response = await api('/api/noseboom/qc');
       if (!response.ready) {
-        byId('qcNote').textContent = response.message || 'Quality control data are not available.';
+        byId('qcNote').textContent = response.message || 'Quality Check data are not available.';
         QC_PLOTS.forEach(id => Plotly.purge(id));
         return;
       }
@@ -306,7 +306,7 @@
     if(kind==='qc'){
       document.querySelectorAll('[data-stat]').forEach(button=>button.classList.toggle('active',button.dataset.stat===kind));
       if(shouldUpdateUrl)updateViewUrl(statRoutes[kind]);
-      if(manageBusy)showBusy('Preparing quality control','Reading the stored Noseboom checks.');
+      if(manageBusy)showBusy('Preparing Quality Check','Reading the stored Noseboom checks.');
       try{ await renderQualityControl(); } finally { if(manageBusy)hideBusy(); }
       return;
     }

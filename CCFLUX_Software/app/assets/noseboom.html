@@ -29,7 +29,10 @@
     .app-version{opacity:.85;font-weight:600;letter-spacing:.02em}
   </style>
   <style>
-    .qc-grid{display:flex;flex-direction:column;gap:14px;min-height:0}
+    /* display on a class beats the browser's [hidden]{display:none},
+       so the panel showed under every other view. */
+    .qc-grid{display:none;flex-direction:column;gap:14px;min-height:0}
+    .qc-grid:not([hidden]){display:flex}
     .qc-row{display:grid;gap:14px;min-height:0}
     .qc-row.one{grid-template-columns:1fr}
     .qc-row.two{grid-template-columns:repeat(2,minmax(0,1fr))}
@@ -54,7 +57,7 @@
       <div class="map-shell"><div id="map" class="map" role="application" aria-label="Interactive Noseboom flight map"></div><div class="map-message" id="mapMessage">Waiting for processed Noseboom data…</div><div class="map-info" id="mapInfo">No route loaded</div><div class="map-legend" id="windLegend" hidden><strong>Wind speed [m/s]</strong><div class="gradient" id="legendGradient"></div><div class="legend-values"><span id="windMin">0</span><span id="windMax">0</span></div></div></div>
     </section>
     <section class="card" id="statsCard">
-      <div class="card-head"><h2>Statistical overview</h2><a class="btn active" data-stat="hist" href="/noseboom/statistics/histogram">Histogram</a><a class="btn" data-stat="freq" href="/noseboom/statistics/frequency">Frequency</a><a class="btn" data-stat="qc" href="/noseboom/statistics/qc">Quality control</a><a class="btn" data-stat="alt" href="/noseboom/statistics/altitude-profile">Altitude profile</a><a class="btn" data-stat="spectra" href="/noseboom/statistics/wind-spectra">Wind spectra</a><span class="head-spacer"></span><button class="btn primary" id="statisticsExportBtn">Export</button></div>
+      <div class="card-head"><h2>Statistical overview</h2><a class="btn active" data-stat="hist" href="/noseboom/statistics/histogram">Histogram</a><a class="btn" data-stat="freq" href="/noseboom/statistics/frequency">Frequency</a><a class="btn" data-stat="qc" href="/noseboom/statistics/qc">Quality Check</a><a class="btn" data-stat="alt" href="/noseboom/statistics/altitude-profile">Altitude profile</a><a class="btn" data-stat="spectra" href="/noseboom/statistics/wind-spectra">Wind spectra</a><span class="head-spacer"></span><button class="btn primary" id="statisticsExportBtn">Export</button></div>
       <div class="stats-body"><div class="chart" id="statsView" aria-live="polite"></div><div class="qc-grid" id="qcView" hidden><div class="qc-row one"><div class="qc-plot" id="qcFlow"></div></div><div class="qc-row two"><div class="qc-plot" id="qcDirection"></div><div class="qc-plot" id="qcVertical"></div></div><div class="qc-row two"><div class="qc-plot" id="qcWindSpeed"></div><div class="qc-plot" id="qcWindDirection"></div></div><p class="qc-note" id="qcNote"></p></div></div><div class="log-panel" id="logPanel"></div>
     </section>
   </main>
