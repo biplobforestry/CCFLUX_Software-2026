@@ -300,9 +300,13 @@ def save_project_worker(filename, ui_state):
         raise FileNotFoundError(f"Project folder does not exist: {path.parent}")
     with LOCK:
         mdata, pdata, meta, results = STORE["miro"], STORE["picarro"], STORE["meta"], STORE["results"]
-    if mdata is None or pdata is None or meta is None:
-        raise RuntimeError("Load MIRO and Picarro data before saving a project.")
-    estimated = int(mdata.memory_usage(deep=True).sum() + pdata.memory_usage(deep=True).sum())
+    # A flight can carry one of the two analyzers. Requiring both meant such a
+    # flight saved no project at all, so its analysis was gone on reopening.
+    present = {name: frame for name, frame in (("miro", mdata), ("picarro", pdata))
+               if frame is not None}
+    if not present or meta is None:
+        raise RuntimeError("Load MIRO or Picarro data before saving a project.")
+    estimated = int(sum(frame.memory_usage(deep=True).sum() for frame in present.values()))
     try:
         free_space = shutil.disk_usage(path.parent).free
     except OSError as exc:
@@ -333,9 +337,11 @@ def save_project_worker(filename, ui_state):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with pd.HDFStore(temp, mode="w", complevel=5, complib="blosc:zstd") as store:
-                store.put("miro", mdata, format="fixed")
+                if mdata is not None:
+                    store.put("miro", mdata, format="fixed")
                 set_job(.42, "Project: saving Picarro data")
-                store.put("picarro", pdata, format="fixed")
+                if pdata is not None:
+                    store.put("picarro", pdata, format="fixed")
                 set_job(.82, "Project: saving settings and analysis")
                 store.put("project", pd.DataFrame({"json": [json.dumps(project_info, allow_nan=True)]}), format="fixed")
                 store.put("logs", pd.DataFrame({"json": [json.dumps(logs_snapshot, ensure_ascii=False)]}), format="fixed")
@@ -361,16 +367,17 @@ def load_project_worker(filename):
         warnings.simplefilter("ignore")
         with pd.HDFStore(path, mode="r") as store:
             keys = set(store.keys())
-            required = {"/miro", "/picarro", "/project"}
-            if not required.issubset(keys):
+            # A project saved from a flight carrying one analyzer holds only
+            # that one; either alone is a complete record of what was flown.
+            if "/project" not in keys or not keys & {"/miro", "/picarro"}:
                 raise ValueError("This HDF file is not a complete Trace Gas Measurement project.")
             info = json.loads(str(store["project"].iloc[0]["json"]))
             if int(info.get("version", 0)) != PROJECT_VERSION:
                 raise ValueError(f"Unsupported project version: {info.get('version')}")
             set_job(.25, "Project: loading MIRO data")
-            mdata = _sorted_unique(store["miro"], "MIRO")
+            mdata = _sorted_unique(store["miro"], "MIRO") if "/miro" in keys else None
             set_job(.55, "Project: loading Picarro data")
-            pdata = _sorted_unique(store["picarro"], "Picarro")
+            pdata = _sorted_unique(store["picarro"], "Picarro") if "/picarro" in keys else None
             set_job(.82, "Project: restoring analysis and controls")
             results = json.loads(str(store["results"].iloc[0]["json"])) if "/results" in keys else None
             saved_logs = json.loads(str(store["logs"].iloc[0]["json"])) if "/logs" in keys else []
@@ -378,6 +385,8 @@ def load_project_worker(filename):
     meta = info.get("meta") or {}
     meta.setdefault("paths", info.get("paths", {}))
     for name, data in (("miro", mdata), ("picarro", pdata)):
+        if data is None:
+            continue
         instrument = meta.setdefault(name, {})
         instrument.update({"rows": len(data), "start": data.timestamp.min().isoformat(), "end": data.timestamp.max().isoformat(), "sorted": True})
     with LOCK:

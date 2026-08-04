@@ -22,7 +22,8 @@
   const nextFrame = () => new Promise(resolve => requestAnimationFrame(resolve));
   const canonicalGas = value => String(value).replace(/\s+(wet|dry|raw|sync)$/i,'').trim().toUpperCase();
   const unitFor = item => String(payload.units?.[item.instrument]?.[item.gas] || 'unknown unit');
-  const groupKey = item => `${canonicalGas(item.gas)}|${unitFor(item)}|${item.palette}`;
+  const groupKey = item =>
+    `${canonicalGas(item.gas)}|${unitFor(item)}|${item.palette}|${item.logScale ? 'log' : 'linear'}`;
   const finite = value => Number.isFinite(Number(value));
   const clampNumber = (value, low, high, fallback) => {
     const parsed = Number(value);
@@ -49,8 +50,20 @@
   function paletteLabel(name) {
     return name === 'default' ? 'Default' : name;
   }
-  function color(value, low, high, palette) {
-    const position = Math.max(0, Math.min(1, (Number(value)-low)/Math.max(high-low,1e-12))) * (palette.length-1);
+  // A logarithmic scale needs a positive lower bound. A gas that reads zero or
+  // negative anywhere in the window is drawn linearly, and the legend says so,
+  // rather than the layer silently colouring from a clamped floor.
+  const logUsable = (low, high) => low > 0 && high > low;
+  function scalePosition(value, low, high, logScale) {
+    const number = Number(value);
+    if (logScale && logUsable(low, high)) {
+      const span = Math.log(high) - Math.log(low);
+      return Math.max(0, Math.min(1, (Math.log(Math.max(number, low)) - Math.log(low)) / span));
+    }
+    return Math.max(0, Math.min(1, (number-low)/Math.max(high-low,1e-12)));
+  }
+  function color(value, low, high, palette, logScale) {
+    const position = scalePosition(value, low, high, logScale) * (palette.length-1);
     const left = Math.floor(position), right = Math.min(palette.length-1,left+1), mix = position-left;
     const a = palette[left].match(/\w\w/g).map(v=>parseInt(v,16));
     const b = palette[right].match(/\w\w/g).map(v=>parseInt(v,16));
@@ -137,6 +150,10 @@
         selection.querySelector('.gas').addEventListener('change', () => requestUpdate('Changing trace-gas compound'));
         selection.querySelector('.enabled').addEventListener('change', () => requestUpdate('Updating selected map layers'));
         selection.querySelector('.palette').addEventListener('change', () => requestUpdate('Applying the selected colour scale'));
+        selection.querySelector('.logscale').addEventListener('change', event => requestUpdate(
+          event.target.checked
+            ? 'Colouring the layer on a logarithmic scale'
+            : 'Colouring the layer on a linear scale'));
         selection.querySelector('.layer-width').addEventListener('input', () => requestUpdate('Applying an individual track width'));
         selection.querySelector('.layer-offset').addEventListener('input', () => requestUpdate('Applying an individual lateral track offset'));
       });
@@ -177,7 +194,8 @@
       gas: selection.querySelector('.gas').value,
       width:clampNumber(selection.querySelector('.layer-width').value,1,16,5),
       offsetMetres:clampNumber(selection.querySelector('.layer-offset').value,-100,100,0),
-      palette:selection.querySelector('.palette').value || 'default'
+      palette:selection.querySelector('.palette').value || 'default',
+      logScale:selection.querySelector('.logscale').checked
     })).filter(item => item.enabled && item.gas);
   }
 
@@ -215,11 +233,12 @@
       let high = allValues[Math.ceil((allValues.length-1)*.98)];
       if (!(high > low)) high = low + Math.max(Math.abs(low)*.01,1e-9);
       const palette = paletteFor(members[0].palette,index);
-      groupStyles.set(group,{low,high,palette,index});
-      const [gasName,unit,paletteName] = group.split('|');
+      const [gasName,unit,paletteName,scaleKind] = group.split('|');
+      const logScale = scaleKind === 'log';
+      groupStyles.set(group,{low,high,palette,index,logScale});
       addLegend(gasName,unit,low,high,palette,
         members.map(item=>`${item.instrument}: ${item.gas}; ${item.width}px; ${item.offsetMetres}m`).join(' &middot; '),
-        paletteLabel(paletteName));
+        paletteLabel(paletteName), logScale);
     });
     const bounds = [];
     const canvasRenderer = L.canvas({padding:.5,tolerance:7});
@@ -236,7 +255,7 @@
         const a=shifted[index], b=shifted[index+1], value=(Number(a.value)+Number(b.value))/2;
         const tooltip = `<b>${item.instrument} &middot; ${item.gas}</b><br>${value.toPrecision(6)} ${unitFor(item)}<br>Width: ${item.width}px; visual offset: ${item.offsetMetres}m<br>${a.time}`;
         segments.push(L.polyline([[a.lat,a.lon],[b.lat,b.lon]],{
-          renderer:canvasRenderer,color:color(value,style.low,style.high,style.palette),weight:item.width,opacity:.9,lineCap:'round'
+          renderer:canvasRenderer,color:color(value,style.low,style.high,style.palette,style.logScale),weight:item.width,opacity:.9,lineCap:'round'
         }).bindTooltip(tooltip,{sticky:true}));
         if (index && index % 240 === 0) {
           byId('mapBusyMessage').textContent = `${item.instrument} ${item.gas}: ${index.toLocaleString()} of ${shifted.length.toLocaleString()} samples`;
@@ -331,7 +350,7 @@
     for (const [group,style] of groups) {
       const members = currentView.selected.filter(item=>groupKey(item)===group);
       if (!members.length) continue;
-      const [gasName,unit,paletteName] = group.split('|');
+      const [gasName,unit,paletteName,scaleKind] = group.split('|');
       const boxWidth=280, boxHeight=82, x=width-boxWidth-18;
       context.save(); context.globalAlpha=.94; context.fillStyle='#071827';
       context.beginPath(); context.roundRect(x,y,boxWidth,boxHeight,8); context.fill();
@@ -346,7 +365,7 @@
       context.fillText(style.low.toPrecision(4),x+12,y+72); context.textAlign='right';
       context.fillText(style.high.toPrecision(4),x+boxWidth-12,y+72);
       context.textAlign='center'; context.fillStyle='#42d8ff';
-      context.fillText(paletteLabel(paletteName),x+boxWidth/2,y+72);
+      context.fillText(`${paletteLabel(paletteName)} \u00b7 ${scaleKind === 'log' && logUsable(style.low,style.high) ? 'log' : 'linear'}`,x+boxWidth/2,y+72);
       context.restore(); y += boxHeight + 8;
     }
   }
@@ -385,7 +404,7 @@
         const a=shifted[index], b=shifted[index+1], value=(Number(a.value)+Number(b.value))/2;
         const first=map.latLngToContainerPoint([a.lat,a.lon]);
         const second=map.latLngToContainerPoint([b.lat,b.lon]);
-        context.strokeStyle=color(value,style.low,style.high,style.palette);
+        context.strokeStyle=color(value,style.low,style.high,style.palette,style.logScale);
         context.beginPath(); context.moveTo(first.x,headerHeight+first.y); context.lineTo(second.x,headerHeight+second.y); context.stroke();
       }
       await nextFrame();
@@ -454,13 +473,22 @@
     }
   }
 
-  function addLegend(group,unit,low,high,palette,detail,scaleName) {
+  function addLegend(group,unit,low,high,palette,detail,scaleName,logScale) {
     const element=document.createElement('div'); element.className='legend';
+    const mapping = !logScale ? 'linear'
+      : logUsable(low,high) ? 'logarithmic'
+      : 'linear (logarithmic needs a positive range)';
+    // A logarithmic ramp puts the midpoint at the geometric mean, not halfway
+    // between the ends, so the legend names it rather than leaving the reader
+    // to assume the bar is linear.
+    const middle = logScale && logUsable(low,high)
+      ? Math.exp((Math.log(low)+Math.log(high))/2)
+      : (low+high)/2;
     element.innerHTML=`<div class="legend-head"><span>${group}</span><span>${unit}</span></div>
       <div style="font-size:13px;color:#a9c8d5;margin-top:5px;line-height:1.35">${detail}</div>
-      <div class="legend-scale">Colour scale: ${scaleName}</div>
+      <div class="legend-scale">Colour scale: ${scaleName} &middot; ${mapping}</div>
       <div class="gradient" style="background:linear-gradient(90deg,${palette.join(',')})"></div>
-      <div class="range"><span>${low.toPrecision(4)}</span><span>${high.toPrecision(4)}</span></div>`;
+      <div class="range"><span>${low.toPrecision(4)}</span><span>${middle.toPrecision(4)}</span><span>${high.toPrecision(4)}</span></div>`;
     byId('legends').appendChild(element);
   }
   function resetMapPosition() {
