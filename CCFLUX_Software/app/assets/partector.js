@@ -16,7 +16,7 @@
   async function api(url){const response=await fetch(url,{cache:'no-store'});if(!response.ok)throw new Error(`Request failed (${response.status})`);return response.json();}
   function numberAxis(digits){const axis={separatethousands:true,exponentformat:'none',showexponent:'none',automargin:true};if(Number.isInteger(digits))axis.tickformat=`,.${digits}f`;return axis;}
   function layout(title,ytitle,extra={}){
-    const base={title:{text:title,x:.5,font:{size:18}},paper_bgcolor:'#f7fafc',plot_bgcolor:'#fff',font:{family:'Arial, sans-serif',size:14,color:'#172431'},margin:{l:96,r:50,t:68,b:76},xaxis:{title:'Recorded UTC',gridcolor:'#dce5ea',automargin:true},yaxis:{title:ytitle,gridcolor:'#dce5ea',...numberAxis()},legend:{orientation:'h',y:1.13,x:0},hovermode:'closest'};
+    const base={title:{text:title,x:.5,y:1,yanchor:'top',pad:{t:10},font:{size:18}},paper_bgcolor:'#f7fafc',plot_bgcolor:'#fff',font:{family:'Arial, sans-serif',size:14,color:'#172431'},margin:{l:96,r:50,t:96,b:76},xaxis:{title:'Recorded UTC',gridcolor:'#dce5ea',automargin:true},yaxis:{title:ytitle,gridcolor:'#dce5ea',...numberAxis()},legend:{orientation:'h',y:1.02,yanchor:'bottom',x:0},hovermode:'closest'};
     return {...base,...extra,xaxis:{...base.xaxis,...(extra.xaxis||{})},yaxis:{...base.yaxis,...(extra.yaxis||{})}};
   }
   function finiteExtent(values){const finite=(values||[]).map(Number).filter(Number.isFinite);return finite.length?[Math.min(...finite),Math.max(...finite)]:[0,1];}
@@ -50,12 +50,12 @@
   }
   function renderTime(){
     const key=$('timeMetric').value,[title,ytitle,digits]=labels[key];
-    Plotly.react('timePlot',sessionTraces(key,title,'#0072B2','Turbo',digits),layout(`${title} · QC-valid records · colour indicates measured value`,ytitle,{yaxis:{...numberAxis(digits),title:ytitle,gridcolor:'#dce5ea'},margin:{l:100,r:118,t:68,b:76}}),config);
+    Plotly.react('timePlot',sessionTraces(key,title,'#0072B2','Turbo',digits),layout(`${title} · QC-valid records · colour indicates measured value`,ytitle,{yaxis:{...numberAxis(digits),title:ytitle,gridcolor:'#dce5ea'},margin:{l:100,r:118,t:96,b:76}}),config);
   }
   function renderHeat(){
     const heat=payload.heatmap;
     const diameters=(heat.diameter_nm||[]).map(Number);
-    Plotly.react('heatPlot',[{type:'heatmap',x:heat.time,y:diameters,z:heat.z,colorscale:'Turbo',colorbar:{title:'dN/dlog₁₀(D)<br>[#/cm³]',tickformat:',.0f',separatethousands:true,exponentformat:'none'},hovertemplate:'UTC %{x}<br>Diameter %{y:.0f} nm<br>%{z:,.2f} #/cm³<extra></extra>'}],layout('Particle number size distribution','Particle diameter [nm]',{yaxis:{title:'Particle diameter [nm]',type:'log',tickmode:'array',tickvals:diameters,ticktext:diameters.map(value=>value.toLocaleString()),gridcolor:'#dce5ea',automargin:true},margin:{l:110,r:120,t:68,b:76}}),config);
+    Plotly.react('heatPlot',[{type:'heatmap',x:heat.time,y:diameters,z:heat.z,colorscale:'Turbo',colorbar:{title:'dN/dlog₁₀(D)<br>[#/cm³]',tickformat:',.0f',separatethousands:true,exponentformat:'none'},hovertemplate:'UTC %{x}<br>Diameter %{y:.0f} nm<br>%{z:,.2f} #/cm³<extra></extra>'}],layout('Particle number size distribution','Particle diameter [nm]',{yaxis:{title:'Particle diameter [nm]',type:'log',tickmode:'array',tickvals:diameters,ticktext:diameters.map(value=>value.toLocaleString()),gridcolor:'#dce5ea',automargin:true},margin:{l:110,r:120,t:96,b:76}}),config);
   }
   function renderBands(){
     const entries=[['n_10_30_cm3','10–30 nm','#0072B2'],['n_30_50_cm3','30–50 nm','#009E73'],['n_50_100_cm3','50–100 nm','#E69F00'],['n_100_300_cm3','100–300 nm','#D55E00']];
