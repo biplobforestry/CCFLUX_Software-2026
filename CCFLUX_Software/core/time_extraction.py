@@ -116,6 +116,7 @@ class _Accumulator:
     coverage_segments: list[tuple[datetime, datetime]] = field(default_factory=list)
     file_aware_min: datetime | None = None
     file_aware_max: datetime | None = None
+    unset_clock_images: int = 0
 
     def begin_file(self, path: Path) -> None:
         self._close_file_segment()
@@ -218,6 +219,10 @@ class _Accumulator:
     def result(self) -> TimeRangeResult:
         self._close_file_segment()
         warnings = list(self.warnings)
+        if self.unset_clock_images:
+            warnings.append(
+                _unset_clock_warning(self.unset_clock_images, bool(self.aware_min))
+            )
         if self.duplicates:
             warnings.append(f"{self.duplicates} duplicated timestamp(s) detected.")
         if self.missing:
@@ -543,7 +548,7 @@ class TimestampExtractor:
                 return
             if _is_unset_camera_clock(value):
                 accumulator.invalid += 1
-                accumulator.warnings.append(_UNSET_CLOCK_WARNING)
+                accumulator.unset_clock_images += 1
                 return
             accumulator.timestamp_columns.add("EXIF DateTimeOriginal")
             accumulator.observe(
@@ -571,7 +576,7 @@ class TimestampExtractor:
                         continue
                     if _is_unset_camera_clock(value):
                         accumulator.invalid += 1
-                        accumulator.warnings.append(_UNSET_CLOCK_WARNING)
+                        accumulator.unset_clock_images += 1
                         continue
                     accumulator.timestamp_columns.add("EXIF DateTimeOriginal")
                     accumulator.observe(
@@ -849,11 +854,26 @@ def _is_unset_camera_clock(value: str) -> bool:
     return False
 
 
-_UNSET_CLOCK_WARNING = (
-    "MicaSense EXIF acquisition times predate 2000, so the camera clock was "
-    "not set. The images cannot be placed on the flight timeline and are "
-    "processed without time filtering."
-)
+def _unset_clock_warning(count: int, any_placed: bool) -> str:
+    """Say how much of the delivery the unset clock actually cost.
+
+    The message used to speak for the whole instrument. On Flight_CCT0803 8
+    images out of thousands carried a boot-time stamp while the rest ran from
+    11:21 to 15:51, so reading that MicaSense could not be placed on the flight
+    timeline at all contradicted the coverage shown beside it.
+    """
+    images = f"{count} image(s)"
+    if any_placed:
+        return (
+            f"{images} carry an EXIF acquisition time before 2000, so the camera "
+            "clock was not set for them. They are excluded from the coverage; "
+            "the remaining images are placed on the flight timeline normally."
+        )
+    return (
+        f"Every MicaSense EXIF acquisition time read ({images}) predates 2000, "
+        "so the camera clock was not set. The images cannot be placed on the "
+        "flight timeline and are processed without time filtering."
+    )
 
 
 def _exif_original_datetime(source: Any) -> str | None:

@@ -30,6 +30,7 @@ from core.detector import InputCandidate
 from core.dashboard_time import (
     CAMERA_INSTRUMENTS,
     DashboardTimeState,
+    recorded_coverage_segments,
     parse_dashboard_datetime,
 )
 from core.enums import DetectionStatus, ProcessingStatus
@@ -4747,7 +4748,9 @@ class DashboardScanBackend:
                 state.errors = errors
                 state.utc_start_time = time_result.utc_start_time
                 state.utc_end_time = time_result.utc_end_time
-                state.coverage_segments = list(time_result.coverage_segments)
+                state.coverage_segments = recorded_coverage_segments(
+                    instrument_id, time_result.coverage_segments
+                )
                 state.original_start_time = time_result.original_min_timestamp
                 state.original_end_time = time_result.original_max_timestamp
                 if instrument_id == "gopro" and time_result.utc_start_time:

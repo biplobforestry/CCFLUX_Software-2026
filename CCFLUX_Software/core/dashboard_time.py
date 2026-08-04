@@ -18,6 +18,26 @@ UNTRIMMED_INSTRUMENTS = frozenset({"sif", "flir", "gopro", "micasense"})
 # minimum and maximum shown on the dashboard.
 CAMERA_INSTRUMENTS = frozenset({"flir", "gopro", "micasense"})
 
+# Instruments whose timestamps are read from part of the delivery rather than
+# all of it, so their per-file coverage is a sample and not the whole story.
+SAMPLED_COVERAGE_INSTRUMENTS = frozenset({"flir", "gopro", "micasense"})
+
+
+def recorded_coverage_segments(
+    instrument_id: str,
+    segments: Iterable[tuple[datetime, datetime]],
+) -> list[tuple[datetime, datetime]]:
+    """Per-file coverage, but only where it speaks for the whole delivery.
+
+    A camera's timestamps are read from a bounded sample of its files and a
+    FLIR export from its two edges, so the stretches missing from what they
+    report are not gaps in the recording. Reading them as gaps took MicaSense
+    out of the selectable jobs for an interval it had in fact been capturing.
+    """
+    if instrument_id in SAMPLED_COVERAGE_INSTRUMENTS:
+        return []
+    return [(start, end) for start, end in segments]
+
 
 @dataclass(slots=True)
 class InstrumentTimeSelection:
