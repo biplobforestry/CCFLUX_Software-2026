@@ -33,6 +33,9 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_HEADER_BYTES = 64 * 1024
 DEFAULT_SAMPLE_ROWS = 5
 DEFAULT_CANDIDATE_FILE_SAMPLES = 20
+# Cameras keep a bounded sample rather than every file; their adapters expand
+# the delivery lazily when they process it.
+BOUNDED_SAMPLE_INSTRUMENTS = frozenset({"micasense", "flir", "gopro"})
 DEFAULT_DIAGNOSTIC_SAMPLES = 50
 DEFAULT_PROGRESS_INTERVAL_SECONDS = 0.10
 DEFAULT_EAGER_PROGRESS_FILES = 5
@@ -148,11 +151,33 @@ class _CandidateAccumulator:
     confidence_score: float = 0.0
     matching_file_count: int = 0
     sample_matching_files: list[Path] = field(default_factory=list)
+    # Every camera delivery's path, so the sample can span the set instead of
+    # its first arrivals. Paths are small; a long flight holds a few thousand.
+    bounded_names: list[Path] = field(default_factory=list)
     matching_files: list[Path] = field(default_factory=list)
     warnings: set[str] = field(default_factory=set)
     errors: set[str] = field(default_factory=set)
     omitted_warning_count: int = 0
     omitted_error_count: int = 0
+
+    def bounded_sample(self) -> tuple[Path, ...]:
+        """The sample, extended at both ends for a bounded camera delivery.
+
+        A camera names its captures in acquisition order, so the earliest and
+        latest names are the earliest and latest acquisitions. Taking both ends
+        makes coverage span the delivery; taking whichever arrived first makes
+        it span the start, which is what happened.
+        """
+        sample = list(self.sample_matching_files)
+        if self.bounded_names:
+            ordered = sorted(
+                dict.fromkeys(self.bounded_names),
+                key=lambda path: (path.name, str(path)),
+            )
+            edge = max(1, DEFAULT_CANDIDATE_FILE_SAMPLES // 2)
+            sample += ordered[:edge] + ordered[-edge:]
+        unique = list(dict.fromkeys(sample))
+        return tuple(sorted(unique, key=lambda path: (path.name, str(path))))
 
     def add(
         self,
@@ -168,9 +193,17 @@ class _CandidateAccumulator:
         self.matching_file_count += 1
         if len(self.sample_matching_files) < sample_limit:
             self.sample_matching_files.append(file_path)
+        if self.instrument_id in BOUNDED_SAMPLE_INSTRUMENTS:
+            # A camera's coverage is read from this sample, so the sample has to
+            # bound the set. MicaSense delivered 2 371 captures spanning 11:21 to
+            # 15:51 and was reported as ending at 11:28, which put every later
+            # capture outside the Time Filter. Discovery is threaded, so arrival
+            # order says nothing about capture order - the names are kept and the
+            # extremes taken from them at the end.
+            self.bounded_names.append(file_path)
         # Scientific datasets need every segment for coverage and processing.
         # Camera datasets remain bounded and are expanded lazily by their adapters.
-        if self.instrument_id not in {"micasense", "flir", "gopro"}:
+        if self.instrument_id not in BOUNDED_SAMPLE_INSTRUMENTS:
             self.matching_files.append(file_path)
         for warning in warnings:
             if warning in self.warnings:
@@ -545,7 +578,7 @@ class FlightFolderScanner:
                     matched_rules=tuple(sorted(accumulator.matched_rules)),
                     confidence_score=round(accumulator.confidence_score, 3),
                     matching_file_count=accumulator.matching_file_count,
-                    sample_matching_files=tuple(accumulator.sample_matching_files),
+                    sample_matching_files=accumulator.bounded_sample(),
                     warnings=tuple(sorted(warnings)),
                     errors=tuple(sorted(errors)),
                     ambiguous=ambiguous,

@@ -155,7 +155,16 @@ class FlightFolderScannerTests(unittest.TestCase):
             item for item in report.candidates if item.instrument_id == "gopro"
         )
         self.assertEqual(candidate.matching_file_count, 3000)
-        self.assertEqual(len(candidate.sample_matching_files), 20)
+        # Bounded, and spanning the delivery. It used to be the first twenty
+        # files to arrive, and a camera's coverage is read from this sample:
+        # MicaSense delivered 2 371 captures over four and a half hours and was
+        # reported as ending seven minutes in, which put every later capture
+        # outside the Time Filter. Discovery is threaded, so arrival order says
+        # nothing about capture order - both ends are taken by name.
+        self.assertLessEqual(len(candidate.sample_matching_files), 40)
+        names = [path.name for path in candidate.sample_matching_files]
+        self.assertIn("GX000000.mp4", names)
+        self.assertIn("GX002999.mp4", names)
         self.assertEqual(report.malformed_file_count, 0)
 
     def test_large_scan_throttles_gui_progress_without_losing_final_count(self) -> None:
@@ -407,3 +416,67 @@ class FlightFolderScannerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CameraSampleSpansDeliveryTests(unittest.TestCase):
+    """A camera's UTC coverage is read from its bounded sample, so the sample
+    has to reach both ends of the delivery.
+
+    MicaSense delivered 2 371 captures spanning 11:21 to 15:51 and was reported
+    as ending at 11:28 - the last of the first twenty files to arrive. Every
+    capture after that fell outside the Time Filter, so a five-minute window at
+    12:00 excluded the instrument entirely while its images sat on disk.
+    """
+
+    def test_the_sample_reaches_the_first_and_last_capture(self) -> None:
+        config = configuration_with_test_only_gopro_pattern()
+        scanner = FlightFolderScanner(config, candidate_file_sample_limit=20)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            camera = root / "GoPro"
+            camera.mkdir()
+            for index in range(500):
+                (camera / f"GX{index:06d}.mp4").touch()
+            report = scanner.scan(root)
+
+        candidate = next(
+            item for item in report.candidates if item.instrument_id == "gopro"
+        )
+        names = sorted(path.name for path in candidate.sample_matching_files)
+
+        self.assertEqual(names[0], "GX000000.mp4", "the earliest capture")
+        self.assertEqual(names[-1], "GX000499.mp4", "the latest capture")
+
+    def test_a_small_delivery_is_returned_whole(self) -> None:
+        config = configuration_with_test_only_gopro_pattern()
+        scanner = FlightFolderScanner(config, candidate_file_sample_limit=20)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            camera = root / "GoPro"
+            camera.mkdir()
+            for index in range(5):
+                (camera / f"GX{index:06d}.mp4").touch()
+            report = scanner.scan(root)
+
+        candidate = next(
+            item for item in report.candidates if item.instrument_id == "gopro"
+        )
+
+        self.assertEqual(len(candidate.sample_matching_files), 5)
+
+    def test_a_scientific_instrument_still_keeps_every_file(self) -> None:
+        """Only cameras are sampled; the rest need every segment."""
+        scanner = FlightFolderScanner(production_configuration())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            folder = root / "Picarro"
+            folder.mkdir()
+            for index in range(30):
+                (folder / f"log{index:03d}.dat").write_text(
+                    "DATE,TIME\n2026-08-03,12:00:00\n", encoding="utf-8"
+                )
+            report = scanner.scan(root)
+
+        picarro = [c for c in report.candidates if c.instrument_id == "picarro"]
+        if picarro:
+            self.assertEqual(len(picarro[0].all_matching_files), 30)
