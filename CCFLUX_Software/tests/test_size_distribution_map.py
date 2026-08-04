@@ -5,6 +5,7 @@ so each sample takes the position of the nearest Noseboom fix in time. A
 sample with no fix close enough must be reported, not placed by guesswork.
 """
 import base64
+import re
 import io
 from datetime import datetime, timedelta, timezone
 
@@ -12,7 +13,7 @@ import pytest
 from PIL import Image
 
 from core.map_pdf_export import decode_map_png, render_map_pdf, safe_file_stem
-from core.opc_map import (
+from core.size_distribution_map import (
     build_map_payload,
     georeference_sensor,
     navigation_index,
@@ -92,7 +93,7 @@ class TestGeoreferenceSensor:
         times, points = navigation_index([_fix(0)])
         placed = georeference_sensor(_heatmap([0], [[1.5], [2.5], [4.0]]), times, points)
         assert placed["points"][0]["total"] == 8.0
-        assert placed["points"][0]["bins"] == [1.5, 2.5, 4.0]
+        assert placed["points"][0]["values"] == [1.5, 2.5, 4.0]
 
     def test_a_sample_far_from_any_fix_is_counted_not_placed(self):
         times, points = navigation_index([_fix(0)])
@@ -113,7 +114,7 @@ class TestGeoreferenceSensor:
     def test_a_bin_with_no_reading_stays_none_and_does_not_sum(self):
         times, points = navigation_index([_fix(0)])
         placed = georeference_sensor(_heatmap([0], [[None], [3.0]]), times, points)
-        assert placed["points"][0]["bins"] == [None, 3.0]
+        assert placed["points"][0]["values"] == [None, 3.0]
         assert placed["points"][0]["total"] == 3.0
 
     def test_a_long_flight_is_thinned_but_keeps_both_ends(self):
@@ -220,13 +221,14 @@ class TestMapWorkspaceControls:
     ASSETS = _Path(__file__).resolve().parents[1] / "app" / "assets"
     markup = (ASSETS / "opc.html").read_text(encoding="utf-8")
     script = (ASSETS / "opc.js").read_text(encoding="utf-8")
+    shared = (ASSETS / "size_map.js").read_text(encoding="utf-8")
 
     def test_the_workspace_offers_a_map_tab(self):
         assert 'data-view="map" href="/opc/map"' in self.markup
         assert 'data-section="map"' in self.markup
 
     @pytest.mark.parametrize("control", [
-        "mapSensor", "mapBin", "mapPalette", "mapLog",
+        "mapSensor", "mapChannel", "mapPalette", "mapLog",
         "mapNewTabBtn", "mapFullscreenBtn", "mapPdfBtn", "mapResetBtn",
     ])
     def test_each_control_exists(self, control):
@@ -234,11 +236,11 @@ class TestMapWorkspaceControls:
 
     def test_the_colour_bar_is_vertical(self):
         """Ticks are positioned from the bottom, so the ramp reads upwards."""
-        assert "linear-gradient(to top," in self.script
-        assert "tick.style.bottom=" in self.script
+        assert "linear-gradient(to top," in self.shared
+        assert "tick.style.bottom = " in self.shared
 
     def test_changing_a_control_redraws(self):
-        assert "['mapSensor','mapBin','mapPalette','mapLog']" in self.script
+        assert "['mapChannel','mapPalette','mapLog']" in self.script
 
     def test_both_sensors_can_be_shown(self):
         assert '<option value="hbx4">' in self.markup
@@ -246,13 +248,83 @@ class TestMapWorkspaceControls:
 
     def test_the_map_is_laid_out_only_once_its_card_is_visible(self):
         """Leaflet measures its container; a map built while hidden is grey."""
-        assert "if(view==='map')setTimeout(showMap,60)" in self.script
-        assert "invalidateSize()" in self.script
+        assert "if(view==='map')setTimeout(()=>sizeMap.show(),60)" in self.script
+        assert "invalidateSize()" in self.shared
 
     def test_a_new_tab_carries_the_current_selection(self):
-        assert "function mapPermalink()" in self.script
-        assert "applyPermalink()" in self.script
+        assert "function permalink()" in self.shared
+        assert "applyPermalink()" in self.shared
 
     def test_the_export_posts_the_visible_map(self):
         assert "'/api/opc/map/export'" in self.script
-        assert "composeMapImage()" in self.script
+        assert "composeImage()" in self.shared
+
+
+class TestPartectorWorkspace:
+    """The Partector carries the same map and the same colour-scale fix."""
+
+    from pathlib import Path as _Path
+
+    ASSETS = _Path(__file__).resolve().parents[1] / "app" / "assets"
+    markup = (ASSETS / "partector.html").read_text(encoding="utf-8")
+    script = (ASSETS / "partector.js").read_text(encoding="utf-8")
+
+    def test_the_workspace_offers_a_map_tab(self):
+        assert 'data-view="map" href="/partector/map"' in self.markup
+        assert 'id="partectorMap"' in self.markup
+
+    def test_the_heatmap_range_comes_from_the_data(self):
+        assert "zauto:false" in self.script
+        assert "heatBounds(heat.z)" in self.script
+
+    def test_the_heatmap_opens_by_decade(self):
+        assert re.search(r'id="heatLog"[^>]*\bchecked\b', self.markup)
+        assert "$('heatLog').onchange=renderHeat" in self.script
+
+    def test_a_channel_that_counted_nothing_is_not_coloured_as_low(self):
+        assert "number>0?Math.log10" in self.script
+
+    def test_the_title_states_the_scale_and_the_true_peak(self):
+        assert "logarithmic colour scale" in self.script
+        assert "peak ${format(bounds.max)}" in self.script
+
+    def test_the_map_uses_the_shared_module(self):
+        assert "window.CCFLUX.createSizeMap" in self.script
+        assert "'/api/partector/map'" in self.script
+
+
+class TestChannelLabels:
+    def test_the_partector_names_its_channels_by_diameter(self):
+        from core.size_distribution_map import channel_labels
+
+        labels = channel_labels({"diameter_nm": [10.0, 16.26, 300.0]}, 3)
+        assert [item["label"] for item in labels] == ["10 nm", "16.26 nm", "300 nm"]
+
+    def test_the_opc_names_its_channels_by_bin(self):
+        from core.size_distribution_map import channel_labels
+
+        labels = channel_labels({"bin_index": [0, 1, 2]}, 3)
+        assert [item["label"] for item in labels] == ["Bin 0", "Bin 1", "Bin 2"]
+
+    def test_a_heatmap_naming_neither_still_gets_one_label_per_row(self):
+        from core.size_distribution_map import channel_labels
+
+        assert len(channel_labels({}, 4)) == 4
+
+
+class TestInstrumentSensors:
+    def test_a_two_sensor_payload_keeps_both(self):
+        from core.size_distribution_map import instrument_sensors
+
+        assert set(instrument_sensors({"sensors": {"hbx4": {}, "hbx5": {}}})) == {"hbx4", "hbx5"}
+
+    def test_a_single_instrument_payload_becomes_one_sensor(self):
+        from core.size_distribution_map import instrument_sensors
+
+        found = instrument_sensors({"instrument_id": "partector", "heatmap": {"z": []}})
+        assert set(found) == {"partector"}
+
+    def test_a_payload_with_no_heatmap_has_no_sensor(self):
+        from core.size_distribution_map import instrument_sensors
+
+        assert instrument_sensors({}) == {}

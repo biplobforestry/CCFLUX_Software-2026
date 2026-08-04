@@ -2819,15 +2819,24 @@ class DashboardScanBackend:
             "options": dict(self._sif_options) if normalized == "sif" else None,
         }
 
-    def opc_map_view(self) -> dict[str, object]:
-        """Return the OPC size distribution placed on the Noseboom track.
+    SIZE_MAP_PAGES = {
+        "opc": ("OPC", "OPC_Size_Distribution_Map"),
+        "partector": ("Partector Pro", "Partector_Size_Distribution_Map"),
+    }
+
+    def size_distribution_map_view(self, page: str) -> dict[str, object]:
+        """Return an instrument's size distribution on the Noseboom track.
 
         Built when asked for rather than during processing, so a flight
         processed before this map existed shows it without being run again.
         """
-        from core.opc_map import build_map_payload
+        from core.size_distribution_map import build_map_payload
 
-        view = self.hatchbox_view("opc")
+        normalized = page.casefold()
+        if normalized not in self.SIZE_MAP_PAGES:
+            raise ValueError(f"No size distribution map for: {page}")
+        instrument_name = self.SIZE_MAP_PAGES[normalized][0]
+        view = self.hatchbox_view(normalized)
         if not view.get("ready"):
             return {
                 "ready": False,
@@ -2845,25 +2854,28 @@ class DashboardScanBackend:
                 "flight_id": flight_id,
                 "message": (
                     "Noseboom is the navigation reference for the payload. "
-                    "Process Noseboom from the Main GUI to place the OPC "
-                    "samples on a map."
+                    f"Process Noseboom from the Main GUI to place the "
+                    f"{instrument_name} samples on a map."
                     if noseboom_status is not ProcessingStatus.COMPLETE
                     else "Processed Noseboom data carries no position fix, so "
-                    "the OPC samples cannot be placed on a map."
+                    f"the {instrument_name} samples cannot be placed on a map."
                 ),
             }
         payload = build_map_payload(
-            view.get("data") or {}, points, flight_id=str(flight_id or "")
+            view.get("data") or {},
+            points,
+            flight_id=str(flight_id or ""),
+            instrument_name=instrument_name,
         )
         self.logger.log(
             LogLevel.SUCCESS if payload["available"] else LogLevel.WARNING,
             "hatchbox-view",
-            "OPC size distribution paired with Noseboom positions: "
+            f"{instrument_name} size distribution paired with Noseboom positions: "
             + ", ".join(
                 f"{name} {sensor['matched_count']}/{sensor['sampled_from']}"
                 for name, sensor in payload["sensors"].items()
             ),
-            processing_step="opc-map",
+            processing_step="size-distribution-map",
         )
         return {
             "ready": bool(payload["available"]),
@@ -2872,36 +2884,44 @@ class DashboardScanBackend:
             "data": payload,
         }
 
-    def export_opc_map_pdf(self, request: Mapping[str, Any]) -> tuple[str, bytes]:
-        """Convert the visible OPC map, as the browser drew it, to a PDF."""
+    def export_size_distribution_map_pdf(
+        self, page: str, request: Mapping[str, Any]
+    ) -> tuple[str, bytes]:
+        """Convert the visible map, as the browser drew it, to a PDF."""
         from core.map_pdf_export import render_map_pdf
 
+        normalized = page.casefold()
+        if normalized not in self.SIZE_MAP_PAGES:
+            raise ValueError(f"No size distribution map for: {page}")
+        instrument_name, tag = self.SIZE_MAP_PAGES[normalized]
         with self._lock:
             project = self._flight_project
             flight_id = project.flight_id if project else "Flight"
         filename, pdf = render_map_pdf(
             str(request.get("image") or ""),
             flight_name=str(request.get("flight_name") or flight_id or "Flight"),
-            map_name="OPC size distribution map",
+            map_name=f"{instrument_name} size distribution map",
             subject=str(request.get("subject") or "")
-            or "OPC HBX-4 and HBX-5 bin-resolved concentration on the flight track",
-            filename_tag="OPC_Size_Distribution_Map",
+            or f"{instrument_name} size-resolved concentration on the flight track",
+            filename_tag=tag,
         )
         destination: Path | None = None
         if project is not None:
-            export_root = project.flight_output_root / "exports" / "opc_map"
+            export_root = (
+                project.flight_output_root / "exports" / f"{normalized}_map"
+            )
             export_root.mkdir(parents=True, exist_ok=True)
             destination = export_root / filename
             destination.write_bytes(pdf)
             with self._lock:
-                project.output_locations["opc_map_exports"] = export_root
+                project.output_locations[f"{normalized}_map_exports"] = export_root
             self._checkpoint_project()
         self.logger.log(
             LogLevel.SUCCESS,
             "hatchbox-view",
-            "OPC size distribution map exported as PDF",
+            f"{instrument_name} size distribution map exported as PDF",
             file_path=destination,
-            processing_step="opc-map-export",
+            processing_step="size-distribution-map-export",
         )
         return filename, pdf
 

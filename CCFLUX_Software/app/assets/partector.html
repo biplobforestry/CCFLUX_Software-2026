@@ -3,7 +3,27 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Partector Pro · CC-FLUX Campaign 2026</title>
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
   <link rel="stylesheet" href="/hatchbox_science.css">
+  <style>
+    .map-shell{position:relative}
+    #partectorMap{height:clamp(460px,66vh,860px);border-radius:10px;overflow:hidden;background:#0a1c2b}
+    .map-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    .map-toolbar label{display:flex;align-items:center;gap:7px;color:var(--muted);font-weight:700}
+    .map-toolbar select{min-height:40px}
+    .map-legend{position:absolute;z-index:850;right:14px;bottom:24px;padding:12px 14px;border:1px solid #507084;border-radius:10px;background:#071827f2;box-shadow:0 8px 25px #0008}
+    .map-legend .legend-title{display:block;font-size:1rem;font-weight:800;margin-bottom:9px;white-space:nowrap}
+    .map-legend .colorbar{display:flex;gap:9px;height:clamp(200px,38vh,420px)}
+    .map-legend .ramp{width:26px;border-radius:4px;border:1px solid #7d9db4;flex:0 0 auto}
+    .map-legend .ticks{position:relative;flex:1 1 auto;min-width:84px;font-variant-numeric:tabular-nums}
+    .map-legend .tick{position:absolute;left:0;transform:translateY(-50%);white-space:nowrap;font-size:.86rem;line-height:1;color:#eaf4fb}
+    .map-legend .tick::before{content:'';position:absolute;left:-9px;top:50%;width:6px;height:1px;background:#9ab8cc}
+    .map-legend .legend-note{display:block;margin-top:8px;font-size:.76rem;color:#a9c4d6;max-width:210px}
+    .map-message{position:absolute;z-index:850;left:14px;top:14px;max-width:calc(100% - 260px);padding:9px 12px;border-radius:9px;background:#071827ee;border:1px solid #507084;color:#dbeaf4;font-size:.86rem}
+    .map-reset{position:absolute;z-index:850;left:14px;bottom:24px}
+    .leaflet-popup-content{color:#142735;line-height:1.45}
+    @media(max-width:900px){.map-legend{left:14px;right:auto;width:220px}.map-message{max-width:calc(100% - 28px)}}
+  </style>
 </head>
 <body>
   <header class="topbar">
@@ -13,13 +33,14 @@
   </header>
   <div class="status-strip"><span class="status-dot" id="statusDot"></span><span id="statusText">Reading processed Partector project data…</span><span class="spacer"></span><strong id="flightName">No project</strong></div>
   <main>
-    <nav class="nav-tabs"><a class="btn active" data-view="overview" href="/partector/overview">Overview</a><a class="btn" data-view="size" href="/partector/size-distribution">Size distribution</a><a class="btn" data-view="housekeeping" href="/partector/housekeeping">Housekeeping & QC</a></nav>
+    <nav class="nav-tabs"><a class="btn active" data-view="overview" href="/partector/overview">Overview</a><a class="btn" data-view="size" href="/partector/size-distribution">Size distribution</a><a class="btn" data-view="housekeeping" href="/partector/housekeeping">Housekeeping & QC</a><a class="btn" data-view="map" href="/partector/map">Map view</a></nav>
     <section class="summary-grid" id="summaryGrid"></section>
     <section class="chart-grid">
       <article class="chart-card wide" data-section="overview"><div class="card-head"><h2>Particle metrics</h2><div class="toolbar"><label>Quantity <select id="timeMetric"><option value="number_cm3">Number concentration [#/cm³]</option><option value="ldsa_um2_cm3">LDSA [µm²/cm³]</option><option value="mean_diameter_nm">Mean diameter [nm]</option><option value="mass_ug_m3">PM0.3 mass [µg/m³]</option></select></label><button class="btn" data-fullscreen="timePlot">Full screen</button></div></div><div class="plot" id="timePlot"></div></article>
-      <article class="chart-card wide" data-section="size"><div class="card-head"><h2>Eight-channel particle number size distribution</h2><button class="btn" data-fullscreen="heatPlot">Full screen</button></div><div class="plot" id="heatPlot"></div><div class="science-note">Channels are treated as dN/dlog₁₀(D). Integrals use logarithmic bin widths and geometric-midpoint edges; no temporal interpolation or smoothing is applied.</div></article>
+      <article class="chart-card wide" data-section="size"><div class="card-head"><h2>Eight-channel particle number size distribution</h2><div class="toolbar"><label title="The distribution spans six decades; on a linear colour scale the whole flight takes one shade."><input type="checkbox" id="heatLog" checked> Logarithmic colour scale</label><button class="btn" data-fullscreen="heatPlot">Full screen</button></div></div><div class="plot" id="heatPlot"></div><div class="science-note">Channels are treated as dN/dlog₁₀(D). Integrals use logarithmic bin widths and geometric-midpoint edges; no temporal interpolation or smoothing is applied.</div></article>
       <article class="chart-card wide" data-section="size"><div class="card-head"><h2>Integrated number size bands</h2><button class="btn" data-fullscreen="bandsPlot">Full screen</button></div><div class="plot" id="bandsPlot"></div></article>
       <article class="chart-card wide" data-section="housekeeping"><div class="card-head"><h2>Housekeeping diagnostics</h2><div class="toolbar"><label>Quantity <select id="houseMetric"><option value="flow_lpm">Flow [L/min]</option><option value="temperature_c">Temperature [°C]</option><option value="rh_percent">RH [%]</option><option value="pressure_hpa">Pressure [hPa]</option><option value="battery_v">Battery [V]</option><option value="pump_current_ma">Pump current [mA]</option><option value="size_integral_to_reported_ratio">8-bin / reported number ratio</option></select></label><button class="btn" data-fullscreen="housePlot">Full screen</button></div></div><div class="plot" id="housePlot"></div></article>
+      <article class="chart-card wide" data-section="map"><div class="card-head"><h2>Size distribution on the flight track</h2><div class="map-toolbar"><label>Size class <select id="mapChannel"></select></label><label>Colours <select id="mapPalette"></select></label><label title="The distribution spans six decades and reads as one colour on a linear ramp"><input type="checkbox" id="mapLog" checked> Log</label><button class="btn" id="mapNewTabBtn" type="button" title="Open this map on its own, in a new tab">Open in new tab</button><button class="btn" id="mapFullscreenBtn" type="button">Full screen</button><button class="btn" id="mapPdfBtn" type="button" title="Export the map as it is drawn now">Export PDF</button></div></div><div class="map-shell"><div id="partectorMap"></div><div class="map-message" id="mapMessage" hidden></div><button class="btn map-reset" id="mapResetBtn" type="button">Reset position</button><div class="map-legend" id="mapLegend" hidden><strong class="legend-title" id="legendTitle"></strong><div class="colorbar"><div class="ramp" id="legendRamp"></div><div class="ticks" id="legendTicks"></div></div><span class="legend-note" id="legendNote"></span></div></div><select id="mapSensor" hidden><option value="partector">Partector Pro</option></select></article>
     </section>
   </main>
   <div class="busy show" id="busy"><div class="busy-card"><div class="spinner"></div><h2>Preparing Partector scientific workspace</h2><p id="busyText">Loading the saved, precomputed flight products.</p></div></div>

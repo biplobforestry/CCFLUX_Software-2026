@@ -52,18 +52,80 @@
     const key=$('timeMetric').value,[title,ytitle,digits]=labels[key];
     Plotly.react('timePlot',sessionTraces(key,title,'#0072B2','Turbo',digits),layout(`${title} · QC-valid records · colour indicates measured value`,ytitle,{yaxis:{...numberAxis(digits),title:ytitle,gridcolor:'#dce5ea'},margin:{l:100,r:118,t:96,b:76}}),config);
   }
+  const format=value=>Number(value).toPrecision(3).replace(/\.?0+$/,'');
+  // The distribution spans six decades and peaks at sixty times its own 99th
+  // percentile, so colouring from the lowest to the highest value left the
+  // whole flight in one shade. The range is taken from the values that carry
+  // signal, and a channel that counted nothing is left empty rather than
+  // sharing the lowest colour with one that counted a little.
+  function heatBounds(z){
+    const values=[];
+    (z||[]).forEach(row=>(row||[]).forEach(value=>{
+      const number=Number(value);
+      if(Number.isFinite(number))values.push(number);
+    }));
+    if(!values.length)return {low:0,high:1,max:1,positiveLow:0};
+    values.sort((a,b)=>a-b);
+    const low=values[0],max=values[values.length-1];
+    const positive=values.filter(value=>value>0);
+    const at=(list,fraction)=>list[Math.min(list.length-1,Math.floor(list.length*fraction))];
+    if(!positive.length||!(max>low))return {low,high:max>low?max:low+1,max,positiveLow:0};
+    return {low,high:Math.max(at(positive,.99),positive[0]),max,positiveLow:at(positive,.01)};
+  }
   function renderHeat(){
     const heat=payload.heatmap;
     const diameters=(heat.diameter_nm||[]).map(Number);
-    Plotly.react('heatPlot',[{type:'heatmap',x:heat.time,y:diameters,z:heat.z,colorscale:'Turbo',colorbar:{title:'dN/dlog₁₀(D)<br>[#/cm³]',tickformat:',.0f',separatethousands:true,exponentformat:'none'},hovertemplate:'UTC %{x}<br>Diameter %{y:.0f} nm<br>%{z:,.2f} #/cm³<extra></extra>'}],layout('Particle number size distribution','Particle diameter [nm]',{yaxis:{title:'Particle diameter [nm]',type:'log',tickmode:'array',tickvals:diameters,ticktext:diameters.map(value=>value.toLocaleString()),gridcolor:'#dce5ea',automargin:true},margin:{l:110,r:120,t:96,b:76}}),config);
+    const bounds=heatBounds(heat.z),logarithmic=$('heatLog').checked&&bounds.max>0;
+    const trace={type:'heatmap',x:heat.time,y:diameters,colorscale:'Turbo',zauto:false,
+      customdata:heat.z,
+      hovertemplate:'UTC %{x}<br>Diameter %{y:.0f} nm<br>%{customdata:,.2f} #/cm³<extra></extra>'};
+    if(logarithmic){
+      const floor=bounds.positiveLow>0?bounds.positiveLow:bounds.max/1000;
+      const ceiling=Math.max(bounds.max,floor*10);
+      trace.z=heat.z.map(row=>(row||[]).map(value=>{
+        const number=Number(value);
+        return Number.isFinite(number)&&number>0?Math.log10(Math.min(Math.max(number,floor),ceiling)):null;
+      }));
+      trace.zmin=Math.log10(floor);trace.zmax=Math.log10(ceiling);
+      const ticks=[];
+      for(let power=Math.ceil(trace.zmin);power<=Math.floor(trace.zmax);power+=1)ticks.push(power);
+      trace.colorbar={title:'dN/dlog₁₀(D)<br>[#/cm³]',tickmode:'array',tickvals:ticks,
+        ticktext:ticks.map(power=>format(Math.pow(10,power)))};
+    }else{
+      trace.z=heat.z;trace.zmin=bounds.low;trace.zmax=bounds.high;
+      trace.colorbar={title:'dN/dlog₁₀(D)<br>[#/cm³]',tickformat:',.0f',separatethousands:true,exponentformat:'none'};
+    }
+    const scaleNote=logarithmic?'logarithmic colour scale':'linear colour scale';
+    const peakNote=!logarithmic&&bounds.high<bounds.max
+      ? `; colour saturates at ${format(bounds.high)}, peak ${format(bounds.max)}`
+      : `; peak ${format(bounds.max)}`;
+    Plotly.react('heatPlot',[trace],layout(`Particle number size distribution · ${scaleNote}${peakNote}`,'Particle diameter [nm]',{yaxis:{title:'Particle diameter [nm]',type:'log',tickmode:'array',tickvals:diameters,ticktext:diameters.map(value=>value.toLocaleString()),gridcolor:'#dce5ea',automargin:true},margin:{l:110,r:126,t:96,b:76}}),config);
   }
   function renderBands(){
     const entries=[['n_10_30_cm3','10–30 nm','#0072B2'],['n_30_50_cm3','30–50 nm','#009E73'],['n_50_100_cm3','50–100 nm','#E69F00'],['n_100_300_cm3','100–300 nm','#D55E00']];
     Plotly.react('bandsPlot',entries.flatMap(([key,name,color])=>sessionTraces(key,name,color)),layout('Logarithmically integrated number-size bands','Number concentration [#/cm³]',{yaxis:{title:'Number concentration [#/cm³]',type:'log',gridcolor:'#dce5ea',...numberAxis(0)}}),config);
   }
   function renderHouse(){const key=$('houseMetric').value,[title,ytitle,digits]=labels[key];Plotly.react('housePlot',sessionTraces(key,title,'#7B2CBF'),layout(`${title} · QC-valid records`,ytitle,{yaxis:{title:ytitle,gridcolor:'#dce5ea',...numberAxis(digits)}}),config);}
-  function showView(view,push=true){document.querySelectorAll('[data-section]').forEach(card=>card.hidden=card.dataset.section!==view);document.querySelectorAll('[data-view]').forEach(link=>link.classList.toggle('active',link.dataset.view===view));if(push)history.pushState({view},'',`/partector/${view==='size'?'size-distribution':view==='housekeeping'?'housekeeping':'overview'}`);setTimeout(resizePlots,50);}
-  function pathView(){return location.pathname.includes('size-distribution')?'size':location.pathname.includes('housekeeping')?'housekeeping':'overview';}
+  const sizeMap=window.CCFLUX.createSizeMap({
+    dataUrl:'/api/partector/map', exportUrl:'/api/partector/map/export',
+    viewPath:'/partector/map', ids:{map:'partectorMap', channel:'mapChannel'}
+  });
+  const VIEW_PATHS={size:'size-distribution',housekeeping:'housekeeping',map:'map',overview:'overview'};
+  function showView(view,push=true){
+    document.querySelectorAll('[data-section]').forEach(card=>card.hidden=card.dataset.section!==view);
+    document.querySelectorAll('[data-view]').forEach(link=>link.classList.toggle('active',link.dataset.view===view));
+    if(push)history.pushState({view},'',`/partector/${VIEW_PATHS[view]||'overview'}`);
+    setTimeout(resizePlots,50);
+    // Leaflet measures its container, so the map can only lay out once the
+    // card is on screen; one built while hidden renders as grey tiles.
+    if(view==='map')setTimeout(()=>sizeMap.show(),60);
+  }
+  function pathView(){
+    const path=location.pathname;
+    return path.includes('size-distribution')?'size'
+      :path.includes('housekeeping')?'housekeeping'
+      :path.endsWith('/map')?'map':'overview';
+  }
   function resizePlots(){document.querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));}
   async function load(){
     $('busy').classList.add('show');
@@ -76,6 +138,15 @@
     finally{$('busy').classList.remove('show');}
   }
   $('refreshBtn').onclick=load;$('timeMetric').onchange=renderTime;$('houseMetric').onchange=renderHouse;
+  $('heatLog').onchange=renderHeat;
+  ['mapChannel','mapPalette','mapLog'].forEach(id=>$(id).onchange=()=>sizeMap.draw());
+  $('mapResetBtn').onclick=()=>sizeMap.resetPosition();
+  $('mapNewTabBtn').onclick=()=>window.open(sizeMap.permalink(),'_blank','noopener');
+  $('mapFullscreenBtn').onclick=async()=>{
+    await $('partectorMap').closest('.chart-card').requestFullscreen();
+    setTimeout(()=>sizeMap.invalidate(),150);
+  };
+  $('mapPdfBtn').onclick=event=>sizeMap.exportPdf(event.currentTarget);
   document.querySelectorAll('[data-view]').forEach(link=>link.onclick=event=>{event.preventDefault();showView(link.dataset.view);});
   document.querySelectorAll('[data-fullscreen]').forEach(button=>button.onclick=async()=>{await $(button.dataset.fullscreen).closest('.chart-card').requestFullscreen();setTimeout(resizePlots,120);});
   addEventListener('popstate',()=>showView(pathView(),false));addEventListener('resize',resizePlots);addEventListener('fullscreenchange',()=>setTimeout(resizePlots,120));load();

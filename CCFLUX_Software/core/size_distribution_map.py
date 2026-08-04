@@ -1,8 +1,11 @@
-"""Place OPC bin-resolved concentrations on the flight track.
+"""Place a size-resolved concentration on the flight track.
 
-The OPC records concentration against its own clock and carries no position.
-Noseboom is the navigation reference for the whole payload, so each OPC sample
-is paired with the nearest Noseboom fix in time and takes that position. A
+Serves the OPC, whose channels are OPC-N3 software bins, and the Partector,
+whose channels are particle diameters.
+
+Neither instrument records a position of its own. Noseboom is the navigation
+reference for the whole payload, so each sample is paired with the nearest
+Noseboom fix in time and takes that position. A
 sample with no fix close enough in time is reported as unmatched rather than
 placed at a guessed position - the map may only show where the airship
 demonstrably was.
@@ -19,7 +22,6 @@ from typing import Any
 # airship speed, and anything beyond it means the navigation record has a gap.
 DEFAULT_MAXIMUM_TIME_DELTA_SECONDS = 2.0
 DEFAULT_POINT_LIMIT = 4000
-BIN_COUNT = 24
 
 
 def parse_utc(value: Any) -> datetime | None:
@@ -87,6 +89,39 @@ def nearest_fix(
     return (index, delta) if delta <= maximum_delta_seconds else None
 
 
+def channel_labels(
+    heatmap: Mapping[str, Any], row_count: int
+) -> list[dict[str, Any]]:
+    """Name each row of the grid the way its instrument names it.
+
+    The OPC counts into numbered software bins and the Partector into named
+    diameters, so the map labels a size class in the instrument's own terms
+    rather than inventing a common index.
+    """
+    diameters = list(heatmap.get("diameter_nm") or [])
+    if diameters:
+        return [
+            {
+                "index": index,
+                "label": f"{_trim(value)} nm",
+                "diameter_nm": _finite(value),
+            }
+            for index, value in enumerate(diameters[:row_count])
+        ]
+    bins = list(heatmap.get("bin_index") or range(row_count))
+    return [
+        {"index": index, "label": f"Bin {value}", "bin": int(value)}
+        for index, value in enumerate(bins[:row_count])
+    ]
+
+
+def _trim(value: Any) -> str:
+    number = _finite(value)
+    if number is None:
+        return str(value)
+    return f"{number:g}"
+
+
 def _sample_positions(count: int, limit: int) -> range | list[int]:
     """Thin evenly, keeping the first and last so the track stays complete."""
     if count <= limit:
@@ -104,10 +139,10 @@ def georeference_sensor(
     maximum_delta_seconds: float = DEFAULT_MAXIMUM_TIME_DELTA_SECONDS,
     point_limit: int = DEFAULT_POINT_LIMIT,
 ) -> dict[str, Any]:
-    """Pair one sensor's bin-resolved samples with the flight track."""
+    """Pair one sensor's size-resolved samples with the flight track."""
     stamps = list(heatmap.get("time") or [])
     grid = [list(row or []) for row in (heatmap.get("z") or [])]
-    bins = [int(value) for value in (heatmap.get("bin_index") or range(BIN_COUNT))]
+    channels = channel_labels(heatmap, len(grid))
     points: list[dict[str, Any]] = []
     unmatched = 0
     undated = 0
@@ -136,15 +171,15 @@ def georeference_sensor(
                 "lon": float(fix["lon"]),
                 "altitude_m": _finite(altitude),
                 "delta_s": round(delta, 3),
-                "bins": values,
-                # The sum over bins is the number concentration the map shows
-                # when no single size class is selected.
+                "values": values,
+                # The sum over channels is what the map shows when no single
+                # size class is selected.
                 "total": sum(carried) if carried else None,
             }
         )
     return {
         "points": points,
-        "bin_index": bins,
+        "channels": channels,
         "matched_count": len(points),
         "unmatched_count": unmatched,
         "undated_count": undated,
@@ -152,18 +187,35 @@ def georeference_sensor(
     }
 
 
+def instrument_sensors(payload: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """Return the sensors a browser payload carries, keyed for the map.
+
+    The OPC ships two sensors under "sensors"; the Partector is one
+    instrument whose heatmap sits at the top level. Both are presented to the
+    map as a mapping of sensor id to a payload holding a heatmap.
+    """
+    sensors = payload.get("sensors")
+    if isinstance(sensors, Mapping) and sensors:
+        return dict(sensors)
+    if payload.get("heatmap"):
+        instrument = str(payload.get("instrument_id") or "instrument")
+        return {instrument: payload}
+    return {}
+
+
 def build_map_payload(
-    opc_payload: Mapping[str, Any],
+    browser_payload: Mapping[str, Any],
     noseboom_points: Iterable[Mapping[str, Any]],
     *,
     flight_id: str = "",
+    instrument_name: str = "instrument",
     maximum_delta_seconds: float = DEFAULT_MAXIMUM_TIME_DELTA_SECONDS,
     point_limit: int = DEFAULT_POINT_LIMIT,
 ) -> dict[str, Any]:
-    """Return both OPC sensors placed on the Noseboom flight track."""
+    """Return every sensor of one instrument on the Noseboom flight track."""
     times, fixes = navigation_index(noseboom_points)
     sensors: dict[str, Any] = {}
-    for sensor_id, sensor in (opc_payload.get("sensors") or {}).items():
+    for sensor_id, sensor in instrument_sensors(browser_payload).items():
         placed = georeference_sensor(
             sensor.get("heatmap") or {},
             times,
@@ -180,7 +232,7 @@ def build_map_payload(
     ]
     available = any(sensor["matched_count"] for sensor in sensors.values())
     return {
-        "schema": "ccflux-opc-map-v1",
+        "schema": "ccflux-size-distribution-map-v1",
         "available": available,
         "flight_id": flight_id,
         "navigation": "Noseboom, nearest fix in time",
@@ -192,11 +244,11 @@ def build_map_payload(
             ""
             if available
             else (
-                "No OPC sample falls within "
+                f"No {instrument_name} sample falls within "
                 f"{maximum_delta_seconds:g} s of a Noseboom position fix."
                 if times
-                else "Noseboom carries no usable position fix, so the OPC "
-                "samples cannot be placed on a map."
+                else "Noseboom carries no usable position fix, so the "
+                f"{instrument_name} samples cannot be placed on a map."
             )
         ),
     }
