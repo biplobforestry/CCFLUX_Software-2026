@@ -2819,6 +2819,92 @@ class DashboardScanBackend:
             "options": dict(self._sif_options) if normalized == "sif" else None,
         }
 
+    def opc_map_view(self) -> dict[str, object]:
+        """Return the OPC size distribution placed on the Noseboom track.
+
+        Built when asked for rather than during processing, so a flight
+        processed before this map existed shows it without being run again.
+        """
+        from core.opc_map import build_map_payload
+
+        view = self.hatchbox_view("opc")
+        if not view.get("ready"):
+            return {
+                "ready": False,
+                "flight_id": view.get("flight_id"),
+                "message": view.get("message"),
+            }
+        with self._lock:
+            noseboom = self._instruments["noseboom"]
+            points = tuple(noseboom.quicklook.get("points", ()))
+            noseboom_status = noseboom.processing_status
+            flight_id = self._flight_project.flight_id if self._flight_project else ""
+        if not points:
+            return {
+                "ready": False,
+                "flight_id": flight_id,
+                "message": (
+                    "Noseboom is the navigation reference for the payload. "
+                    "Process Noseboom from the Main GUI to place the OPC "
+                    "samples on a map."
+                    if noseboom_status is not ProcessingStatus.COMPLETE
+                    else "Processed Noseboom data carries no position fix, so "
+                    "the OPC samples cannot be placed on a map."
+                ),
+            }
+        payload = build_map_payload(
+            view.get("data") or {}, points, flight_id=str(flight_id or "")
+        )
+        self.logger.log(
+            LogLevel.SUCCESS if payload["available"] else LogLevel.WARNING,
+            "hatchbox-view",
+            "OPC size distribution paired with Noseboom positions: "
+            + ", ".join(
+                f"{name} {sensor['matched_count']}/{sensor['sampled_from']}"
+                for name, sensor in payload["sensors"].items()
+            ),
+            processing_step="opc-map",
+        )
+        return {
+            "ready": bool(payload["available"]),
+            "flight_id": flight_id,
+            "message": payload["message"],
+            "data": payload,
+        }
+
+    def export_opc_map_pdf(self, request: Mapping[str, Any]) -> tuple[str, bytes]:
+        """Convert the visible OPC map, as the browser drew it, to a PDF."""
+        from core.map_pdf_export import render_map_pdf
+
+        with self._lock:
+            project = self._flight_project
+            flight_id = project.flight_id if project else "Flight"
+        filename, pdf = render_map_pdf(
+            str(request.get("image") or ""),
+            flight_name=str(request.get("flight_name") or flight_id or "Flight"),
+            map_name="OPC size distribution map",
+            subject=str(request.get("subject") or "")
+            or "OPC HBX-4 and HBX-5 bin-resolved concentration on the flight track",
+            filename_tag="OPC_Size_Distribution_Map",
+        )
+        destination: Path | None = None
+        if project is not None:
+            export_root = project.flight_output_root / "exports" / "opc_map"
+            export_root.mkdir(parents=True, exist_ok=True)
+            destination = export_root / filename
+            destination.write_bytes(pdf)
+            with self._lock:
+                project.output_locations["opc_map_exports"] = export_root
+            self._checkpoint_project()
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "hatchbox-view",
+            "OPC size distribution map exported as PDF",
+            file_path=destination,
+            processing_step="opc-map-export",
+        )
+        return filename, pdf
+
     def log_hatchbox_view_event(self, page: str, message: str) -> None:
         self.logger.log(
             LogLevel.INFO, "hatchbox-view", message,

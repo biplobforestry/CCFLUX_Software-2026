@@ -135,7 +135,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 self.server.dashboard_file.parent / "vendor" / "leaflet" / "leaflet.js",
                 self.server.dashboard_file.with_name("sif.js"),
             )
-        elif path in {"/opc.js", "/partector.js", "/ins_gimbal.js", "/hatchbox_science.css"}:
+        elif path == "/opc.js":
+            self._send_javascript_bundle(
+                self.server.dashboard_file.parent / "vendor" / "leaflet" / "leaflet.js",
+                self.server.dashboard_file.with_name("opc.js"),
+            )
+        elif path in {"/partector.js", "/ins_gimbal.js", "/hatchbox_science.css"}:
             self._send_file(self.server.dashboard_file.with_name(path.removeprefix("/")))
         elif path == "/miro_rack":
             self.server.miro_rack.log_view(
@@ -267,6 +272,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             )
         elif path == "/api/opc":
             self._send_json(HTTPStatus.OK, self.server.backend.hatchbox_view("opc"))
+        elif path == "/api/opc/map":
+            self._send_json(HTTPStatus.OK, self.server.backend.opc_map_view())
         elif path == "/api/partector":
             self._send_json(HTTPStatus.OK, self.server.backend.hatchbox_view("partector"))
         elif path == "/api/ins-gimbal":
@@ -489,6 +496,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 body = self._json_body()
                 result = self.server.backend.start_noseboom_statistics_export(body)
                 self._send_json(HTTPStatus.ACCEPTED, result)
+            elif path == "/api/opc/map/export":
+                body = self._json_body()
+                filename, pdf = self.server.backend.export_opc_map_pdf(body)
+                self._send_bytes(
+                    HTTPStatus.OK,
+                    pdf,
+                    "application/pdf",
+                    {"Content-Disposition": f'attachment; filename="{filename}"'},
+                )
             elif path == "/api/miro-rack/map/export":
                 body = self._json_body()
                 filename, pdf = self.server.miro_rack.export_map_pdf(body)
