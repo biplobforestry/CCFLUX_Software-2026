@@ -338,7 +338,11 @@ class MicaSenseLevel1Adapter(InstrumentBase):
             ],
             metadata={
                 "level": 1,
-                "image_count": len(files),
+                # The counts describe what was evaluated, which is the delivery
+                # narrowed to the Time Filter. Counting every delivered file
+                # here reported 14,226 images beside 42 captures of 6 bands.
+                "image_count": len(self._records),
+                "delivered_image_count": len(files),
                 "capture_count": len(self._captures),
                 "complete_capture_count": complete,
                 "incomplete_capture_count": incomplete,
@@ -353,8 +357,8 @@ class MicaSenseLevel1Adapter(InstrumentBase):
                 "median_trigger_interval_seconds": (
                     median(trigger_intervals) if trigger_intervals else None
                 ),
-                "gps_present_count": len(files) - missing_gps,
-                "exposure_present_count": len(files) - missing_exposure,
+                "gps_present_count": len(self._records) - missing_gps,
+                "exposure_present_count": len(self._records) - missing_exposure,
                 "corrupt_files": corrupt,
                 "unusually_small_files": small,
                 "thumbnail_count": len(thumbnail_paths),
@@ -824,7 +828,14 @@ def _capture_rows(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
             }
         )
         counts = Counter(record["band_number"] for record in group)
-        times = [record["timestamp"] for record in group if record["timestamp"]]
+        # A camera powered up without a clock write dates its frames from the
+        # epoch. Such a stamp says nothing about when the image was taken, and
+        # taken as a trigger time it put a 56-year interval in the list.
+        times = [
+            record["timestamp"]
+            for record in group
+            if record["timestamp"] and record["timestamp"].year >= 2000
+        ]
         missing = sorted(EXPECTED_BANDS - set(bands))
         duplicate_count = sum(max(0, count - 1) for band, count in counts.items() if band is not None)
         rows.append(
