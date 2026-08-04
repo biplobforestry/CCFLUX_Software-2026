@@ -140,7 +140,8 @@
   $('refreshBtn').onclick=load;$('timeMetric').onchange=renderTime;$('houseMetric').onchange=renderHouse;
   $('heatLog').onchange=renderHeat;
   ['mapChannel','mapPalette','mapLog'].forEach(id=>$(id).onchange=()=>sizeMap.draw());
-  $('mapResetBtn').onclick=()=>sizeMap.resetPosition();
+  ['mapResetBtn','mapResetTopBtn'].forEach(id=>$(id).onclick=()=>sizeMap.resetPosition());
+  $('mapUpdateBtn').onclick=()=>sizeMap.show();
   $('mapNewTabBtn').onclick=()=>window.open(sizeMap.permalink(),'_blank','noopener');
   $('mapFullscreenBtn').onclick=async()=>{
     await $('partectorMap').closest('.chart-card').requestFullscreen();

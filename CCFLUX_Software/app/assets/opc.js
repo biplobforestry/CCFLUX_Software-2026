@@ -141,7 +141,8 @@
   $('refreshBtn').onclick=load;$('timeMetric').onchange=renderTime;$('heatSensor').onchange=renderHeat;$('heatLog').onchange=renderHeat;$('diagnosticMetric').onchange=renderDiagnostics;
   $('mapSensor').onchange=()=>sizeMap.onSensorChange();
   ['mapChannel','mapPalette','mapLog'].forEach(id=>$(id).onchange=()=>sizeMap.draw());
-  $('mapResetBtn').onclick=()=>sizeMap.resetPosition();
+  ['mapResetBtn','mapResetTopBtn'].forEach(id=>$(id).onclick=()=>sizeMap.resetPosition());
+  $('mapUpdateBtn').onclick=()=>sizeMap.show();
   $('mapNewTabBtn').onclick=()=>window.open(sizeMap.permalink(),'_blank','noopener');
   $('mapFullscreenBtn').onclick=async()=>{
     await $('opcMap').closest('.chart-card').requestFullscreen();

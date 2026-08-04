@@ -1066,15 +1066,29 @@ class DashboardScanBackend:
         with self._lock:
             if self._worker is not None and self._worker.is_alive():
                 raise RuntimeError("A Flight Folder scan is already running")
-            existing_project = (
-                self._flight_project
-                if self._flight_project is not None
-                and self._flight_project.flight_folder_path.resolve(
+            # The same flight, wherever its raw data now sit. Matching only on
+            # the recorded path meant that scanning a project processed on
+            # another machine - where the flight folder was D:\Flight_X and is
+            # now /Volumes/SSD/Flight_X - started a new project and silently
+            # dropped every processed product the open one carried.
+            existing_project = None
+            if self._flight_project is not None:
+                recorded = self._flight_project.flight_folder_path.resolve(
                     strict=False
                 )
-                == root.resolve(strict=False)
-                else None
-            )
+                if recorded == root.resolve(strict=False):
+                    existing_project = self._flight_project
+                elif self._flight_project.flight_id == root.name:
+                    existing_project = self._flight_project
+                    existing_project.flight_folder_path = root
+                    self.logger.log(
+                        LogLevel.INFO,
+                        "flight-project",
+                        f"Flight {root.name} rescanned from {root}; the open "
+                        f"project recorded {recorded}. Keeping its processed "
+                        "products and adopting the folder now being scanned.",
+                        processing_step="scan-start",
+                    )
             incremental = bool(
                 existing_project is not None
                 and existing_project.completed_jobs

@@ -130,7 +130,10 @@ window.CCFLUX.createSizeMap = function createSizeMap(options) {
         : range.low + fraction * (range.high - range.low);
       const tick = document.createElement('span');
       tick.className = 'tick';
-      tick.style.bottom = `${fraction * 100}%`;
+      // Positioned from the top, like every other legend in the software:
+      // `top` with translateY(-50%) centres the label on its value, while
+      // `bottom` put the whole label above the line and over the title.
+      tick.style.top = `${100 - fraction * 100}%`;
       tick.textContent = format(value);
       ticks.appendChild(tick);
     }

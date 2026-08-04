@@ -235,9 +235,9 @@ class TestMapWorkspaceControls:
         assert f'id="{control}"' in self.markup
 
     def test_the_colour_bar_is_vertical(self):
-        """Ticks are positioned from the bottom, so the ramp reads upwards."""
+        """The ramp runs upwards and the labels are stacked down its side."""
         assert "linear-gradient(to top," in self.shared
-        assert "tick.style.bottom = " in self.shared
+        assert "tick.style.top = " in self.shared
 
     def test_changing_a_control_redraws(self):
         assert "['mapChannel','mapPalette','mapLog']" in self.script
@@ -328,3 +328,53 @@ class TestInstrumentSensors:
         from core.size_distribution_map import instrument_sensors
 
         assert instrument_sensors({}) == {}
+
+
+class TestMapLayout:
+    """Full screen must mean the whole display, and the legend must not
+    print its title over its own topmost tick."""
+
+    from pathlib import Path as _Path
+
+    ASSETS = _Path(__file__).resolve().parents[1] / "app" / "assets"
+    PAGES = ("opc.html", "partector.html")
+
+    @pytest.mark.parametrize("page", PAGES)
+    def test_the_card_becomes_the_viewport(self, page):
+        markup = (self.ASSETS / page).read_text(encoding="utf-8")
+        assert ".chart-card:fullscreen{height:100vh" in markup
+
+    @pytest.mark.parametrize("page", PAGES)
+    def test_the_map_takes_the_rows_the_toolbar_leaves(self, page):
+        """The map was clamped to 860px, leaving the rest of the screen black."""
+        markup = (self.ASSETS / page).read_text(encoding="utf-8")
+        assert ".chart-card:fullscreen .map-shell{flex:1 1 auto;min-height:0}" in markup
+        assert ".chart-card:fullscreen .size-map{height:100%" in markup
+
+    @pytest.mark.parametrize("page", PAGES)
+    def test_the_legend_cannot_outgrow_a_short_window(self, page):
+        markup = (self.ASSETS / page).read_text(encoding="utf-8")
+        assert "max-height:calc(100% - 48px);overflow:auto" in markup
+
+    def test_ticks_are_positioned_from_the_top_like_every_other_legend(self):
+        """`bottom:100%` put the whole label above the bar and over the title;
+        `top` with translateY(-50%) centres it on its value."""
+        shared = (self.ASSETS / "size_map.js").read_text(encoding="utf-8")
+        assert "tick.style.top = `${100 - fraction * 100}%`" in shared
+        assert "tick.style.bottom" not in shared
+        for page in (*self.PAGES, "flir.html", "sif.html"):
+            markup = (self.ASSETS / page).read_text(encoding="utf-8")
+            assert "transform:translateY(-50%)" in markup
+
+    @pytest.mark.parametrize("page", PAGES)
+    def test_the_toolbar_carries_update_and_reset(self, page):
+        markup = (self.ASSETS / page).read_text(encoding="utf-8")
+        assert 'id="mapUpdateBtn"' in markup
+        assert 'id="mapResetTopBtn"' in markup
+        assert 'id="mapResetBtn"' in markup
+
+    @pytest.mark.parametrize("script", ("opc.js", "partector.js"))
+    def test_both_reset_buttons_do_the_same_thing(self, script):
+        source = (self.ASSETS / script).read_text(encoding="utf-8")
+        assert "['mapResetBtn','mapResetTopBtn']" in source
+        assert "$('mapUpdateBtn').onclick=()=>sizeMap.show()" in source
