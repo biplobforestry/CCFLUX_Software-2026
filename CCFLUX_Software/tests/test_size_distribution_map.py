@@ -8,6 +8,7 @@ import base64
 import re
 import io
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from PIL import Image
