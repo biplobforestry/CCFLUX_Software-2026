@@ -8,7 +8,11 @@ Filter". Coverage is now kept per source file.
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from core.dashboard_time import DashboardTimeState
+from core.dashboard_time import (
+    SAMPLED_COVERAGE_INSTRUMENTS,
+    DashboardTimeState,
+    recorded_coverage_segments,
+)
 from core.time_extraction import merge_coverage_segments
 
 
@@ -118,6 +122,79 @@ class MergeCoverageSegmentsTests(unittest.TestCase):
 
     def test_no_segments_is_no_coverage(self):
         self.assertEqual(merge_coverage_segments([]), ())
+
+
+class SampledCoverageIsNotAGapTests(unittest.TestCase):
+    """A camera's coverage is sampled, so it must not be read as complete.
+
+    MicaSense timestamps come from a bounded sample of the 2,371 archives and a
+    FLIR export is read from its two edges. Treating the stretches missing from
+    that sample as gaps in the recording removed MicaSense from the selectable
+    jobs for 12:00 - 12:05, when it had in fact been flying and capturing.
+    """
+
+    def test_a_camera_records_no_coverage_segments(self):
+        for instrument_id in ("micasense", "flir", "gopro"):
+            with self.subTest(instrument_id):
+                self.assertEqual(
+                    recorded_coverage_segments(instrument_id, SIF_SEGMENTS), []
+                )
+
+    def test_an_instrument_read_in_full_keeps_its_segments(self):
+        for instrument_id in ("sif", "noseboom", "picarro", "opc_hbx4"):
+            with self.subTest(instrument_id):
+                self.assertEqual(
+                    recorded_coverage_segments(instrument_id, SIF_SEGMENTS),
+                    list(SIF_SEGMENTS),
+                )
+
+    def test_the_sampled_set_matches_what_the_scanner_samples(self):
+        from core.scanner import BOUNDED_SAMPLE_INSTRUMENTS
+
+        self.assertTrue(BOUNDED_SAMPLE_INSTRUMENTS <= SAMPLED_COVERAGE_INSTRUMENTS)
+
+    def test_micasense_stays_selectable_for_an_interval_it_flew(self):
+        # The scan samples 37 of 2,371 archives, none of them inside the
+        # window; the envelope must still speak for the camera.
+        state = DashboardTimeState.from_instrument_ranges(
+            {"micasense": (_utc(11, 21, 32), _utc(15, 51, 35), ())},
+            coverage_segments={
+                "micasense": recorded_coverage_segments(
+                    "micasense", ((_utc(11, 21, 32), _utc(11, 21, 32)),
+                                  (_utc(15, 51, 35), _utc(15, 51, 35)))
+                )
+            },
+        )
+        state.selected_analysis_start = _utc(12, 0)
+        state.selected_analysis_end = _utc(12, 5)
+        state._refresh_availability()
+        micasense = state.instruments["micasense"]
+        self.assertFalse(micasense.outside_selected_range)
+        self.assertEqual(micasense.availability_percentage, 100.0)
+
+
+class UnsetCameraClockWarningTests(unittest.TestCase):
+    """A few boot-time frames must not be reported as the whole delivery.
+
+    Flight_CCT0803 had 8 MicaSense images stamped before 2000 while the rest ran
+    from 11:21 to 15:51, yet the warning said the images could not be placed on
+    the flight timeline at all - contradicting the coverage shown beside it.
+    """
+
+    def test_some_images_placed_says_which_ones_were_not(self):
+        from core.time_extraction import _unset_clock_warning
+
+        message = _unset_clock_warning(8, True)
+        self.assertIn("8 image(s)", message)
+        self.assertIn("remaining images are placed", message)
+        self.assertNotIn("cannot be placed", message)
+
+    def test_no_image_placed_keeps_the_blanket_warning(self):
+        from core.time_extraction import _unset_clock_warning
+
+        message = _unset_clock_warning(120, False)
+        self.assertIn("cannot be placed on the", message)
+        self.assertIn("without time filtering", message)
 
 
 if __name__ == "__main__":
