@@ -2344,10 +2344,27 @@ class DashboardScanBackend:
         }
 
     def noseboom_view(self) -> dict[str, object]:
+        # What this machine can actually serve, so the download dialog offers
+        # only the frequencies that will work rather than failing on Prepare.
+        raw_available = any(
+            Path(path).is_file() for path in self._noseboom_source_paths()
+        )
+        archived = None if raw_available else self._archived_noseboom_table()
         with self._lock:
             state = self._instruments["noseboom"]
             project = self._flight_project
             return {
+                "download": {
+                    "source": "original" if raw_available
+                    else "project" if archived is not None else "none",
+                    "maximum_frequency_hz": (
+                        None if raw_available
+                        else self.ARCHIVED_EXPORT_HZ if archived is not None
+                        else 0.0
+                    ),
+                    "full_variables_available": raw_available,
+                    "custodians": self.DATA_CUSTODIANS,
+                },
                 "ready": bool(state.quicklook.get("available")),
                 "flight_id": project.flight_id if project else None,
                 "project_file": str(project.project_file) if project else None,
@@ -3479,20 +3496,48 @@ class DashboardScanBackend:
                 "filename": None,
             })
         with self._lock:
-            report = self._report
             project = self._flight_project
             selected_start = self._time_state.selected_analysis_start
             selected_end = self._time_state.selected_analysis_end
-        if report is None or project is None or selected_start is None or selected_end is None:
-            raise RuntimeError("Complete Initial Check and apply the Time Filter before downloading")
-        paths = tuple(dict.fromkeys(
-            path
-            for candidate in report.candidates
-            if candidate.instrument_id == "noseboom"
-            for path in candidate.all_matching_files
-        ))
-        if not paths:
-            raise RuntimeError("No selected Noseboom source files are available")
+        if project is None:
+            raise RuntimeError("Open or scan a flight before downloading")
+        if selected_start is None or selected_end is None:
+            raise RuntimeError("Apply the Time Filter before downloading")
+        # The original CSV stays on the acquisition machine. When it is out of
+        # reach - a project opened on another computer - the 10 Hz table the
+        # project carries answers anything from 1 to 10 Hz.
+        paths = tuple(
+            path for path in self._noseboom_source_paths() if Path(path).is_file()
+        )
+        archive = None if paths else self._archived_noseboom_table()
+        if not paths and archive is None:
+            with self._lock:
+                self._noseboom_export_progress.update(
+                    {"running": False, "error": "No Noseboom source", "step": "Failed"}
+                )
+            raise RuntimeError(
+                "This project carries no Noseboom download table and the "
+                "original CSV is not reachable from this computer. Reprocess "
+                "the flight where the raw data are held, or contact "
+                f"{self.DATA_CUSTODIANS}."
+            )
+        if archive is not None:
+            if variables == "full" or original_resolution or (
+                frequency_hz is not None and frequency_hz > self.ARCHIVED_EXPORT_HZ
+            ):
+                with self._lock:
+                    self._noseboom_export_progress.update(
+                        {"running": False, "step": "Failed",
+                         "error": "Above the resolution this project carries"}
+                    )
+                raise ValueError(
+                    "This project carries the Noseboom data at "
+                    f"{self.ARCHIVED_EXPORT_HZ:g} Hz, so the limited variable "
+                    "set can be downloaded at any frequency from 1 to "
+                    f"{self.ARCHIVED_EXPORT_HZ:g} Hz. For the full variable set "
+                    "or a higher resolution, please contact "
+                    f"{self.DATA_CUSTODIANS}."
+                )
         destination = project.flight_output_root / "exports" / "noseboom"
         destination.mkdir(parents=True, exist_ok=True)
         safe_flight = "".join(
@@ -3548,15 +3593,30 @@ class DashboardScanBackend:
             return target
 
         bridge = LegacyNoseboomBridge()
-        self._report_noseboom_export(5.0, "Reading the selected interval")
-        data = bridge.load_csv_window(
-            paths, start_ns, end_ns,
-            progress=lambda percent, step: self._report_noseboom_export(
-                5.0 + 0.75 * percent, step
-            ),
-        )
+        if archive is not None:
+            self._report_noseboom_export(
+                20.0, f"Reading the {self.ARCHIVED_EXPORT_HZ:g} Hz table held in the project"
+            )
+            import pandas as pd
+
+            source = pd.read_csv(archive)
+            window = pd.to_numeric(source.get("time_ns"), errors="coerce")
+            source = source.loc[window.between(start_ns, end_ns)]
+            if source.empty:
+                raise RuntimeError(
+                    "The Time Filter selects no part of the Noseboom table "
+                    "this project carries"
+                )
+        else:
+            self._report_noseboom_export(5.0, "Reading the selected interval")
+            data = bridge.load_csv_window(
+                paths, start_ns, end_ns,
+                progress=lambda percent, step: self._report_noseboom_export(
+                    5.0 + 0.75 * percent, step
+                ),
+            )
+            source = bridge.module.make_export_source(data)
         self._report_noseboom_export(85.0, "Resampling the selected variables")
-        source = bridge.module.make_export_source(data)
         table = bridge.module.resample_export_data(source, frequency_hz)
         target = destination / f"{safe_flight}_noseboom_{frequency_label}_{stamp}.{format_name}"
         self._report_noseboom_export(95.0, f"Writing {len(table):,} rows")
@@ -3589,6 +3649,106 @@ class DashboardScanBackend:
         )
         self._persist_project_logs()
         return target
+    # A project must be able to answer a download on its own. The raw Noseboom
+    # CSV is tens of gigabytes and stays on the acquisition machine, so the
+    # project carries a 10 Hz table of the plotted variables instead: enough
+    # for any request between 1 and 10 Hz, and small enough to travel.
+    ARCHIVED_EXPORT_HZ = 10.0
+    DATA_CUSTODIANS = (
+        "Eva Y. Pfannerstill, Georgios I. Gkatzelis or Biplob Dey"
+    )
+
+    def _archive_noseboom_10hz(
+        self,
+        project: FlightProject,
+        paths: Sequence[Path],
+        selected_start: datetime,
+        selected_end: datetime,
+    ) -> Path | None:
+        """Write the 10 Hz table the project travels with."""
+        from instruments.noseboom.legacy_bridge import LegacyNoseboomBridge
+
+        # Under "processed" so the archive travels inside the .ccflux and is
+        # relocated with every other product when the project moves machine.
+        target = (
+            project.flight_output_root / "processed" / "noseboom" / "noseboom_10hz.csv"
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            bridge = LegacyNoseboomBridge()
+            data = bridge.load_csv_window(
+                tuple(paths),
+                int(selected_start.timestamp() * 1_000_000_000),
+                int(selected_end.timestamp() * 1_000_000_000),
+            )
+            table = bridge.module.resample_export_data(
+                bridge.module.make_export_source(data), self.ARCHIVED_EXPORT_HZ
+            )
+            table.to_csv(target, index=False, encoding="utf-8")
+        except Exception as exc:
+            # The flight is still processed and reviewable; only the offline
+            # download loses its source, so say so and carry on.
+            self.logger.capture_exception(
+                "noseboom-export",
+                "The 10 Hz Noseboom table could not be archived; downloads from "
+                "this project will need the original CSV",
+                exc,
+                instrument="noseboom",
+                processing_step="archive-10hz",
+            )
+            return None
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "noseboom-export",
+            f"Archived {len(table):,} rows of Noseboom at "
+            f"{self.ARCHIVED_EXPORT_HZ:g} Hz for downloads from the project",
+            instrument="noseboom",
+            file_path=target,
+            processing_step="archive-10hz",
+        )
+        return target
+
+    def _noseboom_source_paths(self) -> tuple[Path, ...]:
+        """Noseboom sources from the live scan, or from the saved project.
+
+        Reopening a project restores no scan report, so a download that only
+        consulted the report failed on a project the operator had just opened.
+        """
+        with self._lock:
+            report = self._report
+            project = self._flight_project
+        if report is not None:
+            paths = tuple(
+                dict.fromkeys(
+                    path
+                    for candidate in report.candidates
+                    if candidate.instrument_id == "noseboom"
+                    for path in candidate.all_matching_files
+                )
+            )
+            if paths:
+                return paths
+        if project is None:
+            return ()
+        saved = project.detected_instruments.get("noseboom")
+        if saved is None:
+            return ()
+        return tuple(Path(value) for value in (saved.selected_source_files or ()))
+
+    def _archived_noseboom_table(self) -> Path | None:
+        with self._lock:
+            project = self._flight_project
+        if project is None:
+            return None
+        recorded = project.output_locations.get("noseboom_10hz")
+        for candidate in (
+            recorded,
+            project.flight_output_root / "processed" / "noseboom" / "noseboom_10hz.csv",
+        ):
+            if candidate and Path(candidate).is_file():
+                return Path(candidate)
+        return None
+
     def update_noseboom_straight_settings(self, settings: dict[str, object]) -> dict[str, float]:
         allowed = {
             "min_speed_mps", "max_turn_rate_dps", "max_roll_deg",
@@ -5386,6 +5546,8 @@ class DashboardScanBackend:
         outputs = adapter.export_results(
             result, adapter.output_root, ("csv",)
         )
+        context.report_progress(96.0, "Archiving the 10 Hz Noseboom table")
+        archive = self._archive_noseboom_10hz(project, paths, selected_start, selected_end)
         quicklook = dict(result.metadata.get("map", {}))
         quicklook_path = project.flight_output_root / "quicklooks" / "noseboom_browser.json"
         quicklook_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5404,8 +5566,11 @@ class DashboardScanBackend:
                 saved_state.output_locations = [
                     *(Path(value.path) for value in outputs),
                     quicklook_path,
+                    *([archive] if archive is not None else []),
                 ]
             project.output_locations["noseboom_quicklook"] = quicklook_path
+            if archive is not None:
+                project.output_locations["noseboom_10hz"] = archive
             project.output_locations["processing_log"] = (
                 project.flight_output_root / "logs" / "processing.jsonl"
             )

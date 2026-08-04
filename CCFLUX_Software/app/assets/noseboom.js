@@ -277,18 +277,36 @@
   async function saveSettingsAndProceed(){try{await applyStraightSettings(readSettings(),false);}catch(error){window.alert(error.message);}}
   async function resetSettings(){await applyStraightSettings(defaultSettings(),true);}
 
-  function openDownload(){byId('downloadModal').classList.add('show');}
+  function openDownload(){syncDownloadOptions();byId('downloadModal').classList.add('show');}
   function closeDownload(){byId('downloadModal').classList.remove('show');}
   // Original resolution writes the recorded rows, which only the full variable
   // set offers; the limited set is a resampled table by definition.
   function syncDownloadOptions(){
+    // A project opened away from the acquisition machine carries a 10 Hz
+    // table rather than the raw CSV, so only what it can serve is offered
+    // and the rest names who to ask.
+    const download=payload?.download||{};
+    const fromProject=download.source==='project';
+    const ceiling=Number(download.maximum_frequency_hz);
+    const variables=byId('downloadVariables').value;
+    const fullOption=byId('downloadVariables').querySelector('option[value="full"]');
+    fullOption.disabled=fromProject;
+    if(fromProject&&variables==='full')byId('downloadVariables').value='limited';
     const full=byId('downloadVariables').value==='full';
-    const original=byId('downloadFrequency').querySelector('option[value="original"]');
-    original.disabled=!full;
-    if(!full&&byId('downloadFrequency').value==='original')byId('downloadFrequency').value='1';
-    byId('downloadVariablesNote').textContent=full
-      ?'Full writes every recorded column, plus EVENT and Flight ID. CSV or text only.'
-      :'Limited writes the 14 columns shown on this page.';
+    const frequency=byId('downloadFrequency');
+    frequency.querySelectorAll('option').forEach(option=>{
+      if(option.value==='original'){option.disabled=!full||fromProject;return;}
+      option.disabled=fromProject&&Number.isFinite(ceiling)&&Number(option.value)>ceiling;
+    });
+    const chosen=frequency.querySelector(`option[value="${frequency.value}"]`);
+    if(!chosen||chosen.disabled)frequency.value='1';
+    byId('downloadVariablesNote').textContent=fromProject
+      ?`This project carries the Noseboom data at ${ceiling} Hz. Any frequency `
+        +`from 1 to ${ceiling} Hz is available. For the full variable set or a `
+        +`higher resolution, please contact ${download.custodians||'the data custodians'}.`
+      :full
+        ?'Full writes every recorded column, plus EVENT and Flight ID. CSV or text only.'
+        :'Limited writes the 14 columns shown on this page.';
   }
 
   let downloadPolling=false;
@@ -373,7 +391,7 @@
   async function startStatisticsExport(){const formats=Array.from(document.querySelectorAll('[name=exportFormat]:checked')).map(input=>input.value);if(!formats.length){alert('Select at least one export format.');return;}const dpi=Number(byId('exportDpi').value);closeExport();showBusy('Exporting publication figures','Starting the background renderer.',1);try{await api('/api/noseboom/statistics/export',{method:'POST',body:JSON.stringify({formats,dpi})});await pollStatisticsExport();}catch(error){hideBusy();alert(error.message);log(`Noseboom statistics export failed to start: ${error.message}`);}}
   async function pollStatisticsExport(){for(;;){await new Promise(resolve=>setTimeout(resolve,350));const state=await api('/api/noseboom/statistics/export/progress');showBusy('Exporting publication figures',state.step||'Rendering figures',state.progress||0);if(state.status==='running')continue;if(state.status==='failed'){hideBusy();throw new Error(state.error||'Publication export failed');}hideBusy();byId('exportResults').innerHTML=`<h3>Export complete</h3>${(state.files||[]).map(file=>`<a href="${escapeHtml(file.url)}">Download ${escapeHtml(file.name)}</a>`).join('')}`;byId('exportModal').classList.add('show');log(`Noseboom statistics export complete: ${(state.files||[]).length} files`);return;}}
 
-  async function refresh(){showBusy('Loading Noseboom workspace','Reading the active Flight Project and bounded scientific browser data.');try{payload=await api('/api/noseboom');const rawPoints=(payload?.data?.points||[]).filter(point=>finite(point.lat)&&finite(point.lon)),pointLimit=Math.max(500,Number(payload?.data?.browser_limits?.map_points)||6000),pointStep=Math.max(1,Math.ceil(rawPoints.length/pointLimit));browserPoints=rawPoints.filter((_,index)=>index%pointStep===0);byId('flightName').textContent=payload.flight_id||'No project';if(!payload.ready||!payload.data?.available){byId('statusText').textContent=payload.processing_status==='processing'?payload.processing_step:'Noseboom processing has not produced a map yet.';showMapError(payload.data?.reason||'Noseboom processing has not produced a valid route.');byId('statisticsExportBtn').disabled=true;return;}byId('statusDot').classList.add('ready');byId('statusText').textContent='Processed Noseboom data loaded from the active Flight Project';byId('mapMessage').hidden=true;byId('statisticsExportBtn').disabled=false;const route=points();if(ensureMap()){await makeLayers(route);showLayer(activeLayer,false,false);resetMap(false);setTimeout(()=>map.invalidateSize(false),120);}showBusy('Preparing scientific plots','Rendering the selected Noseboom statistical view.',62);await renderStats(activeStat,false,false);byId('dataExportBtn').style.display='';log('Noseboom browser data rendered successfully');}catch(error){byId('statusText').textContent=`Noseboom view failed: ${error.message}`;showMapError(error.message);log(`Noseboom browser error: ${error.message}`);}finally{hideBusy();}}
+  async function refresh(){showBusy('Loading Noseboom workspace','Reading the active Flight Project and bounded scientific browser data.');try{payload=await api('/api/noseboom');const rawPoints=(payload?.data?.points||[]).filter(point=>finite(point.lat)&&finite(point.lon)),pointLimit=Math.max(500,Number(payload?.data?.browser_limits?.map_points)||6000),pointStep=Math.max(1,Math.ceil(rawPoints.length/pointLimit));browserPoints=rawPoints.filter((_,index)=>index%pointStep===0);byId('flightName').textContent=payload.flight_id||'No project';if(!payload.ready||!payload.data?.available){byId('statusText').textContent=payload.processing_status==='processing'?payload.processing_step:'Noseboom processing has not produced a map yet.';showMapError(payload.data?.reason||'Noseboom processing has not produced a valid route.');byId('statisticsExportBtn').disabled=true;return;}byId('statusDot').classList.add('ready');byId('statusText').textContent='Processed Noseboom data loaded from the active Flight Project';byId('mapMessage').hidden=true;byId('statisticsExportBtn').disabled=false;const route=points();if(ensureMap()){await makeLayers(route);showLayer(activeLayer,false,false);resetMap(false);setTimeout(()=>map.invalidateSize(false),120);}showBusy('Preparing scientific plots','Rendering the selected Noseboom statistical view.',62);await renderStats(activeStat,false,false);byId('dataExportBtn').style.display='';syncDownloadOptions();log('Noseboom browser data rendered successfully');}catch(error){byId('statusText').textContent=`Noseboom view failed: ${error.message}`;showMapError(error.message);log(`Noseboom browser error: ${error.message}`);}finally{hideBusy();}}
 
   const initial=viewFromPath();if(initial.layer)activeLayer=initial.layer;if(initial.stat)activeStat=initial.stat;
   byId('mainGuiBtn').onclick=()=>{window.location.href='/';};byId('refreshBtn').onclick=refresh;
