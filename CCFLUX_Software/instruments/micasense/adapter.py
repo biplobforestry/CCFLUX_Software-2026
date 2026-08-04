@@ -384,8 +384,16 @@ class MicaSenseLevel1Adapter(InstrumentBase):
         return result
 
     def process_detailed(self, loaded: Any, options: Mapping[str, Any]) -> InstrumentResult:
+        """MicaSense is read for its metadata only, by decision.
+
+        Reflectance and index work belongs to the standalone MicaSense pipeline
+        and is not run here, so no job offers this stage; the review software
+        reports what the camera recorded and how complete the captures are.
+        """
         raise NotImplementedError(
-            "Detailed MicaSense reflectance processing is not integrated"
+            "MicaSense is processed for acquisition metadata only. Reflectance "
+            "and vegetation index work is done by the standalone MicaSense "
+            "pipeline, not by the payload review software."
         )
 
     def create_plots(
