@@ -223,6 +223,9 @@ class InstrumentScanState:
     errors: list[str] = field(default_factory=list)
     utc_start_time: datetime | None = None
     utc_end_time: datetime | None = None
+    # What the source files cover one by one, so a gap between them is not
+    # hidden by the start-to-end envelope above.
+    coverage_segments: list[tuple[datetime, datetime]] = field(default_factory=list)
     original_start_time: str | None = None
     original_end_time: str | None = None
     processing_status: str = "idle"
@@ -2096,6 +2099,7 @@ class DashboardScanBackend:
             state.timestamp_warnings = list(saved.timestamp_warnings)
             state.utc_start_time = saved.utc_start_time
             state.utc_end_time = saved.utc_end_time
+            state.coverage_segments = list(saved.coverage_segments)
             state.processing_status = (
                 "complete" if instrument_id in completed_instruments else "idle"
             )
@@ -2143,7 +2147,13 @@ class DashboardScanBackend:
             for instrument_id, saved in project.detected_instruments.items()
         }
         time_state = DashboardTimeState.from_instrument_ranges(
-            ranges, analysis_anchor_id="noseboom"
+            ranges,
+            analysis_anchor_id="noseboom",
+            coverage_segments={
+                instrument_id: tuple(saved.coverage_segments)
+                for instrument_id, saved in project.detected_instruments.items()
+                if saved.coverage_segments
+            },
         )
         time_state.display_timezone = project.display_timezone
         if project.selected_analysis_start and project.selected_analysis_end:
@@ -4737,6 +4747,7 @@ class DashboardScanBackend:
                 state.errors = errors
                 state.utc_start_time = time_result.utc_start_time
                 state.utc_end_time = time_result.utc_end_time
+                state.coverage_segments = list(time_result.coverage_segments)
                 state.original_start_time = time_result.original_min_timestamp
                 state.original_end_time = time_result.original_max_timestamp
                 if instrument_id == "gopro" and time_result.utc_start_time:
@@ -4783,6 +4794,11 @@ class DashboardScanBackend:
                     if value.detection_status is not DetectionStatus.NOT_DETECTED
                 },
                 analysis_anchor_id="noseboom",
+                coverage_segments={
+                    key: tuple(value.coverage_segments)
+                    for key, value in self._instruments.items()
+                    if value.coverage_segments
+                },
             )
             self._sync_project_from_report(
                 report, expanded_source_files=expanded_source_files
@@ -4888,6 +4904,7 @@ class DashboardScanBackend:
                 utc_start_time=scan_state.utc_start_time,
                 utc_end_time=scan_state.utc_end_time,
                 timestamp_warnings=list(scan_state.timestamp_warnings),
+                coverage_segments=list(scan_state.coverage_segments),
                 processing_priority=self._registry.find_by_id(
                     instrument_id
                 ).effective_priority,
@@ -5924,12 +5941,10 @@ class DashboardScanBackend:
             raise
         except Exception as exc:
             self.logger.capture_exception(
+                "flir",
+                "FLIR temperature conversion and georeferencing did not "
+                "complete; the acquisition metadata was still written.",
                 exc,
-                component="flir",
-                message=(
-                    "FLIR temperature conversion and georeferencing did not "
-                    "complete; the acquisition metadata was still written."
-                ),
                 instrument="flir",
                 processing_step="georeferencing",
             )

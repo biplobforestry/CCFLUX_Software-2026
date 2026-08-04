@@ -133,6 +133,10 @@ class InstrumentProjectState:
     analysis_end_time: datetime | None = None
     time_offset_seconds: float = 0.0
     timestamp_warnings: list[str] = field(default_factory=list)
+    # What the source files cover one by one. Saved so that a reopened project
+    # still knows where the recording stopped and started again, instead of
+    # offering a gap as available and failing once processing reaches it.
+    coverage_segments: list[tuple[datetime, datetime]] = field(default_factory=list)
     processing_priority: int = 1
     enabled: bool = True
     output_locations: list[Path] = field(default_factory=list)
@@ -817,6 +821,7 @@ def _project_from_dict(data: Any) -> FlightProject:
             analysis_end_time=_datetime(value.get("analysis_end_time")),
             time_offset_seconds=float(value.get("time_offset_seconds", 0.0)),
             timestamp_warnings=list(value.get("timestamp_warnings", [])),
+            coverage_segments=_coverage_segments(value.get("coverage_segments")),
             processing_priority=int(value.get("processing_priority", 1)),
             enabled=bool(value.get("enabled", True)),
             output_locations=[
@@ -883,6 +888,29 @@ def _datetime(value: Any) -> datetime | None:
     if not isinstance(value, str):
         raise TypeError("datetime values must be ISO-8601 strings")
     return datetime.fromisoformat(value)
+
+
+def _coverage_segments(value: Any) -> list[tuple[datetime, datetime]]:
+    """Read the per-file coverage a project was saved with.
+
+    Projects written before coverage was recorded simply carry none, and the
+    start-to-end envelope stays the only thing known about them.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("coverage_segments must be a list")
+    segments: list[tuple[datetime, datetime]] = []
+    for item in value:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise TypeError("each coverage segment must be a start and an end")
+        first, last = _datetime(item[0]), _datetime(item[1])
+        if first is None or last is None:
+            continue
+        if last < first:
+            raise ValueError("a coverage segment cannot end before it starts")
+        segments.append((first, last))
+    return segments
 
 
 def _required_datetime(value: Any, name: str) -> datetime:
