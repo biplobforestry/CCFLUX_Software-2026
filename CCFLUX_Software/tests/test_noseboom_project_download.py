@@ -6,6 +6,7 @@ blamed the Time Filter, which was applied. The raw CSV is tens of gigabytes and
 stays on the acquisition machine, so a project carries a 10 Hz table instead:
 enough for any request between 1 and 10 Hz, wherever the project is opened.
 """
+import inspect
 import re
 from pathlib import Path
 
@@ -103,3 +104,55 @@ class TestArchiveTravelsWithTheProject:
         source = inspect.getsource(DashboardScanBackend._archive_noseboom_10hz)
         assert "return None" in source
         assert "capture_exception" in source
+
+
+class TestArchiveCarriesNavigation:
+    """A project must be able to reapply the straight-flight criteria alone."""
+
+    source = inspect.getsource(DashboardScanBackend._archive_noseboom_10hz)
+
+    def test_the_navigation_columns_travel_with_the_download_columns(self):
+        assert "resample_navigation(data, rule)" in self.source
+
+    def test_the_archive_keeps_the_internal_column_names(self):
+        """Resampling renames columns for the operator's download; renamed
+        once, the archive could not be read back as a source."""
+        assert "module.EXPORT_COLUMNS.items()" in self.source
+        assert "table.rename(" in self.source
+
+    def test_a_naive_index_is_localised_rather_than_converted(self):
+        assert "navigation.index.tz is None" in self.source
+
+    def test_the_criteria_can_be_reapplied_from_the_archive(self):
+        preview = inspect.getsource(
+            DashboardScanBackend.preview_noseboom_straight_settings
+        )
+        assert "_one_hz_from_archive(archive" in preview
+        assert "self._archived_noseboom_table()" in preview
+
+    def test_the_old_guard_no_longer_blames_the_time_filter(self):
+        """The message said to apply the Time Filter when it was applied."""
+        preview = inspect.getsource(
+            DashboardScanBackend.preview_noseboom_straight_settings
+        )
+        assert "Complete Initial Check, apply the Time Filter" not in preview
+        assert "Apply the Time Filter before changing the criteria" in preview
+
+    def test_an_archive_without_navigation_says_what_is_missing(self):
+        helper = inspect.getsource(DashboardScanBackend._one_hz_from_archive)
+        assert "written before the" in helper
+        assert "missing:" in helper
+
+    def test_the_one_hz_grid_comes_from_the_stored_ten_hertz(self):
+        helper = inspect.getsource(DashboardScanBackend._one_hz_from_archive)
+        assert 'resample_navigation(window, "1s")' in helper
+
+
+def test_the_navigation_resampling_is_shared_with_the_one_hertz_builder():
+    """one_hz must stay the 1 s case of the same function, so the table the
+    archive rebuilds is the table the raw delivery would have produced."""
+    from instruments.noseboom.legacy_bridge import LegacyNoseboomBridge
+
+    module = LegacyNoseboomBridge().module
+    assert hasattr(module, "resample_navigation")
+    assert "resample_navigation(data,'1s')" in inspect.getsource(module.one_hz)

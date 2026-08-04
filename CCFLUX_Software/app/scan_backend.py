@@ -3374,16 +3374,21 @@ class DashboardScanBackend:
             selected_start = self._time_state.selected_analysis_start
             selected_end = self._time_state.selected_analysis_end
             current_view = dict(self._instruments["noseboom"].quicklook)
-        if report is None or project is None or selected_start is None or selected_end is None:
-            raise RuntimeError("Complete Initial Check, apply the Time Filter, and process Noseboom first")
-        paths = tuple(dict.fromkeys(
-            path
-            for candidate in report.candidates
-            if candidate.instrument_id == "noseboom"
-            for path in candidate.all_matching_files
-        ))
-        if not paths:
-            raise RuntimeError("No selected Noseboom source files are available")
+        if project is None:
+            raise RuntimeError("Open or scan a flight before changing the criteria")
+        if selected_start is None or selected_end is None:
+            raise RuntimeError("Apply the Time Filter before changing the criteria")
+        paths = tuple(
+            path for path in self._noseboom_source_paths() if Path(path).is_file()
+        )
+        archive = None if paths else self._archived_noseboom_table()
+        if not paths and archive is None:
+            raise RuntimeError(
+                "This project carries no Noseboom navigation table and the "
+                "original CSV is not reachable from this computer, so the "
+                "straight-flight criteria cannot be reapplied. Process "
+                "Noseboom again where the raw data are held."
+            )
         report_progress(10.0, "Preparing the selected Noseboom source interval.")
 
         self.logger.log(
@@ -3394,17 +3399,25 @@ class DashboardScanBackend:
             processing_step="straight-flight-recalculation",
         )
         bridge = LegacyNoseboomBridge()
-        data = bridge.load_csv_window(
-            paths,
-            int(selected_start.timestamp() * 1_000_000_000),
-            int(selected_end.timestamp() * 1_000_000_000),
-            progress=lambda percent, message: report_progress(
-                min(58.0, 12.0 + 1.15 * float(percent)), message
-            ),
-        )
-        report_progress(60.0, f"Loaded {len(data):,} selected Noseboom rows.")
-        report_progress(65.0, "Resampling the selected interval to validated 1 Hz navigation.")
-        one_hz = bridge.module.one_hz(data)
+        if archive is not None:
+            report_progress(
+                25.0,
+                f"Reading the {self.ARCHIVED_EXPORT_HZ:g} Hz navigation table held in the project.",
+            )
+            one_hz = self._one_hz_from_archive(archive, selected_start, selected_end)
+            report_progress(65.0, f"Prepared {len(one_hz):,} seconds of navigation.")
+        else:
+            data = bridge.load_csv_window(
+                paths,
+                int(selected_start.timestamp() * 1_000_000_000),
+                int(selected_end.timestamp() * 1_000_000_000),
+                progress=lambda percent, message: report_progress(
+                    min(58.0, 12.0 + 1.15 * float(percent)), message
+                ),
+            )
+            report_progress(60.0, f"Loaded {len(data):,} selected Noseboom rows.")
+            report_progress(65.0, "Resampling the selected interval to validated 1 Hz navigation.")
+            one_hz = bridge.module.one_hz(data)
         report_progress(75.0, "Detecting candidate straight-flight legs.")
         straight = bridge.module.detect_straight(one_hz, parsed)
         report_progress(88.0, "Preparing recalculated leg geometry and statistics.")
@@ -3689,6 +3702,8 @@ class DashboardScanBackend:
         selected_end: datetime,
     ) -> Path | None:
         """Write the 10 Hz table the project travels with."""
+        import pandas as pd
+
         from instruments.noseboom.legacy_bridge import LegacyNoseboomBridge
 
         # Under "processed" so the archive travels inside the .ccflux and is
@@ -3704,9 +3719,33 @@ class DashboardScanBackend:
                 int(selected_start.timestamp() * 1_000_000_000),
                 int(selected_end.timestamp() * 1_000_000_000),
             )
-            table = bridge.module.resample_export_data(
-                bridge.module.make_export_source(data), self.ARCHIVED_EXPORT_HZ
+            module = bridge.module
+            table = module.resample_export_data(
+                module.make_export_source(data), self.ARCHIVED_EXPORT_HZ
             )
+            # Resampling renames the columns for the operator's download. The
+            # archive keeps the internal names, because it is read back as a
+            # source: renamed once here, it could not be resampled again.
+            table = table.rename(
+                columns={value: key for key, value in module.EXPORT_COLUMNS.items()}
+            )
+            # The navigation columns travel with the download columns, so the
+            # straight-flight criteria can be changed from the project alone
+            # without the raw delivery.
+            rule = f"{int(round(1000 / self.ARCHIVED_EXPORT_HZ))}ms"
+            navigation = module.resample_navigation(data, rule)
+            stamps = pd.to_datetime(
+                pd.to_numeric(table["time_ns"], errors="coerce"), unit="ns", utc=True
+            )
+            navigation.index = (
+                navigation.index.tz_localize("UTC")
+                if navigation.index.tz is None
+                else navigation.index.tz_convert("UTC")
+            )
+            joined = navigation.reindex(stamps, method="nearest", tolerance=pd.Timedelta(rule))
+            for column in joined.columns:
+                if column not in table.columns:
+                    table[column] = joined[column].to_numpy()
             table.to_csv(target, index=False, encoding="utf-8")
         except Exception as exc:
             # The flight is still processed and reviewable; only the offline
@@ -3820,6 +3859,49 @@ class DashboardScanBackend:
                 "checks existed. Process Noseboom again to prepare them."
             ),
         }
+
+    def _one_hz_from_archive(
+        self, archive: Path, selected_start: datetime, selected_end: datetime
+    ):
+        """The 1 Hz navigation table the leg detection reads, from the archive.
+
+        The stored table is at 10 Hz, so the seconds it resamples to are the
+        same ones the raw delivery would have produced.
+        """
+        import pandas as pd
+
+        frame = pd.read_csv(archive)
+        stamps = pd.to_numeric(frame.get("time_ns"), errors="coerce")
+        window = frame.loc[
+            stamps.between(
+                int(selected_start.timestamp() * 1_000_000_000),
+                int(selected_end.timestamp() * 1_000_000_000),
+            )
+        ].copy()
+        if window.empty:
+            raise RuntimeError(
+                "The Time Filter selects no part of the Noseboom navigation "
+                "table this project carries"
+            )
+        window["time"] = pd.to_datetime(
+            pd.to_numeric(window["time_ns"], errors="coerce"), unit="ns", utc=True
+        )
+        missing = [
+            name
+            for name in ("plot_lat", "plot_lon", "ground_speed_mps", "heading_deg",
+                         "roll_deg", "altitude_m", "vertical_speed_mps")
+            if name not in window.columns
+        ]
+        if missing:
+            raise RuntimeError(
+                "The Noseboom table in this project was written before the "
+                "navigation columns were archived, so the straight-flight "
+                "criteria cannot be reapplied from it. Process Noseboom again "
+                f"to store them (missing: {', '.join(missing)})."
+            )
+        from instruments.noseboom.legacy_bridge import LegacyNoseboomBridge
+
+        return LegacyNoseboomBridge().module.resample_navigation(window, "1s")
 
     def _noseboom_source_paths(self) -> tuple[Path, ...]:
         """Noseboom sources from the live scan, or from the saved project.

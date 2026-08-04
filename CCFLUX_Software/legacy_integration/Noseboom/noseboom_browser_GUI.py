@@ -200,10 +200,18 @@ def haversine_m(lat1, lon1, lat2, lon2):
 
 STRAIGHT_DEFAULTS={'minimum_ground_speed_mps':8.0,'minimum_segment_duration_s':60,'heading_window_s':30,'maximum_heading_std_deg':10.0,'maximum_heading_rate_dps':3.0,'maximum_roll_angle_deg':10.0,'maximum_altitude_range_m':100.0,'maximum_vertical_speed_mps':2.2}
 
-def one_hz(data):
-    x=data.set_index('time'); scalar=['plot_lat','plot_lon','altitude_m','height_m','ground_speed_mps','vertical_speed_mps','roll_deg','wind_mps','wind_u_mps','wind_v_mps','wind_w_mps','air_temp_degC','rel_humidity_pct']
-    out=x[[c for c in scalar if c in x.columns]].resample('1s').median(); out['heading_deg']=x['heading_deg'].resample('1s').apply(circular_mean_deg)
+NAVIGATION_COLUMNS=['plot_lat','plot_lon','altitude_m','height_m','ground_speed_mps','vertical_speed_mps','roll_deg','wind_mps','wind_u_mps','wind_v_mps','wind_w_mps','air_temp_degC','rel_humidity_pct']
+
+def resample_navigation(data, rule='1s'):
+    """Navigation columns on a fixed grid; heading averaged through north."""
+    x=data.set_index('time')
+    out=x[[c for c in NAVIGATION_COLUMNS if c in x.columns]].resample(rule).median()
+    if 'heading_deg' in x.columns:
+        out['heading_deg']=x['heading_deg'].resample(rule).apply(circular_mean_deg)
     out=out.interpolate(limit=2).dropna(subset=['plot_lat','plot_lon']); out.index.name='time'; return out
+
+def one_hz(data):
+    return resample_navigation(data,'1s')
 
 def heading_std_deg(head, window):
     """Circular standard deviation of heading inside a centred window."""
