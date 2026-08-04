@@ -1018,17 +1018,22 @@ class DashboardScanBackend:
         resolved = Path(folder).expanduser().resolve()
         with self._lock:
             flight = self._selected_folder
-        if flight and (
+        # A delivery that keeps the camera data inside the flight folder is a
+        # normal layout, not a mistake. The two only have to be scanned once,
+        # which the scan arranges, so overlapping folders are accepted here.
+        overlapping = bool(flight) and (
             resolved == flight
             or resolved.is_relative_to(flight)
             or flight.is_relative_to(resolved)
-        ):
-            raise ValueError("Camera Folder and Flight Folder must be independent")
+        )
         with self._lock:
             self._selected_camera_folder = resolved
             camera_channel = self._new_scan_channel("camera", resolved)
             camera_channel["phase"] = "folder-selected"
             camera_channel["message"] = (
+                "Camera Folder sits inside the Flight Folder; one scan covers "
+                "both. Click Initial Check to discover every instrument."
+                if overlapping else
                 "Camera Folder selected. Click Initial Check and choose whether "
                 "to include camera scanning."
             )
@@ -1067,15 +1072,26 @@ class DashboardScanBackend:
                 raise ValueError(
                     f"Camera System Folder does not exist: {selected_camera_root}"
                 )
-            if (
-                selected_camera_root == root
-                or selected_camera_root.is_relative_to(root)
-                or root.is_relative_to(selected_camera_root)
-            ):
-                raise ValueError(
-                    "Flight Folder and Camera System Folder must be independent"
-                )
-        camera_root = selected_camera_root if include_camera else None
+        # One tree, one scan: reading the same files twice would double every
+        # count and every warning, so an overlapping camera folder is covered
+        # by the flight scan rather than scanned again beside it.
+        camera_inside_flight = selected_camera_root is not None and (
+            selected_camera_root == root
+            or selected_camera_root.is_relative_to(root)
+            or root.is_relative_to(selected_camera_root)
+        )
+        camera_root = (
+            None if camera_inside_flight else
+            (selected_camera_root if include_camera else None)
+        )
+        if camera_inside_flight and include_camera:
+            self.logger.log(
+                LogLevel.INFO,
+                "flight-scan",
+                f"Camera Folder {selected_camera_root} lies within the Flight "
+                f"Folder {root}; one scan covers both.",
+                processing_step="scan-start",
+            )
         if camera_root is not None:
             _assert_directory_responsive(camera_root)
         with self._lock:
