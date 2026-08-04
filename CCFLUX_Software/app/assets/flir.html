@@ -11,8 +11,21 @@
     .nav-tabs{flex-wrap:wrap}.summary-grid{grid-template-columns:repeat(4,minmax(190px,1fr))}
     .chart-card[hidden]{display:none}.map-card{position:relative}.thermal-map{height:min(68vh,760px);min-height:520px;background:#0a1825}
     .map-reset{position:absolute;z-index:900;right:14px;top:74px;height:42px;background:#071827eb;border-color:#ffb66f;box-shadow:0 8px 25px #0008}
-    .map-legend{position:absolute;z-index:850;right:14px;bottom:24px;width:250px;padding:11px 12px;border:1px solid #507084;border-radius:9px;background:#071827ec;box-shadow:0 8px 25px #0008}
-    .map-gradient{height:12px;margin:7px 0 4px;border-radius:99px;background:linear-gradient(90deg,#30123b,#3b63e8,#2ec7c9,#6ce34f,#f6c445,#e7352d)}
+    .map-legend{position:absolute;z-index:850;right:14px;bottom:24px;padding:12px 14px;border:1px solid #507084;border-radius:10px;background:#071827f2;box-shadow:0 8px 25px #0008}
+    .map-legend .legend-title{display:block;font-size:1rem;font-weight:800;margin-bottom:9px;white-space:nowrap}
+    .map-legend .colorbar{display:flex;gap:9px;height:clamp(200px,38vh,420px)}
+    .map-legend .ramp{width:26px;border-radius:4px;border:1px solid #7d9db4;flex:0 0 auto}
+    .map-legend .ticks{position:relative;flex:1 1 auto;min-width:76px;font-variant-numeric:tabular-nums}
+    .map-legend .tick{position:absolute;left:0;transform:translateY(-50%);white-space:nowrap;font-size:.86rem;line-height:1;color:#eaf4fb}
+    .map-legend .tick::before{content:'';position:absolute;left:-9px;top:50%;width:6px;height:1px;background:#9ab8cc}
+    .map-legend .legend-note{display:block;margin-top:8px;font-size:.76rem;color:#a9c4d6}
+    /* The card fills the screen; the map fills the card. A fixed height here
+       left the map at its windowed size with black beneath it. */
+    :fullscreen{display:flex;flex-direction:column}
+    :fullscreen .thermal-map{flex:1;min-height:0;height:auto!important}
+    :-webkit-full-screen{display:flex;flex-direction:column}
+    :-webkit-full-screen .thermal-map{flex:1;min-height:0;height:auto!important}
+    
     .map-range{display:flex;justify-content:space-between;color:#bdd5df;font-size:.78rem}.map-note{position:absolute;z-index:850;left:14px;bottom:24px;max-width:min(520px,70vw);padding:10px 12px;border:1px solid #507084;border-radius:9px;background:#071827ec;color:#d7e9f0;font-size:.8rem;line-height:1.4}
     .map-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.map-toolbar label{display:flex;align-items:center;gap:7px;color:var(--muted);font-weight:700}.map-toolbar select{min-height:40px}
     .gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;padding:16px}.thermal-frame{margin:0;border:1px solid #31536a;border-radius:10px;overflow:hidden;background:#071725}.thermal-frame img{display:block;width:100%;height:220px;object-fit:contain;background:#02070c;image-rendering:auto}.thermal-frame figcaption{padding:10px;color:#bed4df;font-size:.8rem}
@@ -51,10 +64,10 @@
       <article class="chart-card wide" data-section="overview"><div class="card-head"><h2>Acquisition-gap diagnostics</h2><button class="btn" data-fullscreen="gapPlot">Full screen</button></div><div class="plot" id="gapPlot"></div></article>
 
       <article class="chart-card wide map-card" data-section="temperature">
-        <div class="card-head"><h2>Georeferenced apparent land-surface temperature</h2><div class="map-toolbar"><label>Frame statistic <select id="mapMetric"><option value="temperature_median_c">Median temperature</option><option value="temperature_mean_c">Mean temperature</option><option value="temperature_max_c">Maximum temperature</option><option value="temperature_min_c">Minimum temperature</option></select></label></div></div>
+        <div class="card-head"><h2>Georeferenced apparent land-surface temperature</h2><div class="map-toolbar"><label>Frame statistic <select id="mapMetric"><option value="temperature_median_c">Median temperature</option><option value="temperature_mean_c">Mean temperature</option><option value="temperature_max_c">Maximum temperature</option><option value="temperature_min_c">Minimum temperature</option></select></label><label>Colours <select id="mapPalette"></select></label><button class="btn" id="mapNewTabBtn" type="button" title="Open this statistic on its own, in a new tab">Open in new tab</button><button class="btn" id="mapFullscreenBtn" type="button">Full screen</button></div></div>
         <div id="thermalMap" class="thermal-map" role="application" aria-label="Interactive FLIR land-surface-temperature map"></div>
         <button class="btn map-reset" id="resetMapBtn" type="button">Reset map position</button>
-        <div class="map-legend" id="mapLegend" hidden><strong id="legendTitle">Median temperature [°C]</strong><div class="map-gradient"></div><div class="map-range"><span id="legendLow">—</span><span id="legendHigh">—</span></div></div>
+        <div class="map-legend" id="mapLegend" hidden><strong class="legend-title" id="legendTitle">Median temperature [°C]</strong><div class="colorbar"><div class="ramp" id="legendRamp"></div><div class="ticks" id="legendTicks"></div></div><span class="legend-note" id="legendNote"></span></div>
         <div class="map-note" id="mapNote">Waiting for radiometric temperature conversion and Noseboom georeferencing.</div>
         <p class="interpretation" id="interpretation"></p>
       </article>

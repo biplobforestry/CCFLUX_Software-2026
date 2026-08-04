@@ -2,7 +2,61 @@
   'use strict';
   const $=id=>document.getElementById(id);
   const plotConfig={responsive:true,displaylogo:false,scrollZoom:true,doubleClick:'reset',toImageButtonOptions:{format:'png',scale:2}};
+  // Colour scales as stop lists, interpolated the same way. Thermal stays the
+  // default: it is perceptually ordered, which is what a quantitative
+  // temperature map needs. The sequential ramps are offered for figures that
+  // have to match an existing publication, and bwr for showing departure either
+  // side of a midpoint.
+  const PALETTES={
+    Thermal:[[48,18,59],[59,99,232],[46,199,201],[108,227,79],[246,196,69],[231,53,45]],
+    YlOrRd:[[255,255,204],[254,217,118],[253,141,60],[240,59,32],[189,0,38]],
+    OrRd:[[255,247,236],[253,212,158],[253,141,60],[227,74,51],[127,0,0]],
+    PuRd:[[247,244,249],[212,185,218],[223,101,176],[206,18,86],[103,0,31]],
+    bwr:[[0,0,255],[255,255,255],[255,0,0]]
+  };
+  const DEFAULT_PALETTE='Thermal';
   const thermalPalette=['#30123b','#3b63e8','#2ec7c9','#6ce34f','#f6c445','#e7352d'];
+  function paletteName(){
+    const select=$('mapPalette');
+    return select&&PALETTES[select.value]?select.value:DEFAULT_PALETTE;
+  }
+  function paletteStops(name){return PALETTES[name]||PALETTES[DEFAULT_PALETTE];}
+  function paletteGradient(name){
+    return `linear-gradient(to top,${paletteStops(name).map(c=>`rgb(${c.join(',')})`).join(',')})`;
+  }
+  function setPalettes(){
+    const select=$('mapPalette');
+    if(!select||select.options.length)return;
+    const requested=new URLSearchParams(location.search).get('palette');
+    select.innerHTML=Object.keys(PALETTES).map(n=>`<option value="${n}">${n}</option>`).join('');
+    select.value=PALETTES[requested]?requested:DEFAULT_PALETTE;
+  }
+  // Ticks formatted from the range they span, so the column reads as one scale.
+  function tickFormatter(low,high){
+    const span=Math.abs(high-low),largest=Math.max(Math.abs(low),Math.abs(high));
+    if(!(span>0))return v=>Number(v).toPrecision(3);
+    if(largest>=1e5||(largest>0&&largest<1e-3)){
+      const sup={'0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹','-':'⁻'};
+      return v=>{const[m,e]=Number(v).toExponential(2).split('e');
+        return `${m} × 10${String(Number(e)).split('').map(c=>sup[c]||c).join('')}`;};
+    }
+    const decimals=Math.min(6,Math.max(0,2-Math.floor(Math.log10(span))));
+    return v=>Number(v).toFixed(decimals);
+  }
+  const LEGEND_TICKS=6;
+  function renderLegend(title,low,high,palette,count){
+    const heading=$('legendTitle'),ramp=$('legendRamp'),ticks=$('legendTicks'),note=$('legendNote');
+    if(!heading||!ramp||!ticks)return;
+    heading.textContent=title;
+    ramp.style.background=paletteGradient(palette);
+    const format=tickFormatter(low,high),rows=[];
+    for(let step=0;step<LEGEND_TICKS;step+=1){
+      const fraction=step/(LEGEND_TICKS-1),value=high-(high-low)*fraction;
+      rows.push(`<span class="tick" style="top:${(fraction*100).toFixed(4)}%">${format(value)}</span>`);
+    }
+    ticks.innerHTML=rows.join('');
+    if(note)note.textContent=Number.isFinite(count)?`${count.toLocaleString()} frames`:'';
+  }
   const metricLabels={
     temperature_median_c:'Median temperature [°C]',
     temperature_mean_c:'Mean temperature [°C]',
@@ -18,7 +72,12 @@
     return {...base,...extra,xaxis:{...base.xaxis,...(extra.xaxis||{})},yaxis:{...base.yaxis,...(extra.yaxis||{})}};
   }
   function quantile(values,fraction){const sorted=values.map(Number).filter(Number.isFinite).sort((a,b)=>a-b);if(!sorted.length)return null;return sorted[Math.round((sorted.length-1)*fraction)];}
-  function color(value,low,high){const position=Math.max(0,Math.min(1,(Number(value)-low)/Math.max(high-low,1e-12)))*(thermalPalette.length-1),left=Math.floor(position),right=Math.min(thermalPalette.length-1,left+1),mix=position-left;const a=thermalPalette[left].match(/\w\w/g).map(v=>parseInt(v,16)),b=thermalPalette[right].match(/\w\w/g).map(v=>parseInt(v,16));return `rgb(${a.map((v,i)=>Math.round(v*(1-mix)+b[i]*mix)).join(',')})`;}
+  function color(value,low,high,palette=paletteName()){
+    const stops=paletteStops(palette);
+    const position=Math.max(0,Math.min(.999,(Number(value)-low)/Math.max(high-low,1e-12)))*(stops.length-1);
+    const left=Math.floor(position),mix=position-left,a=stops[left],b=stops[left+1]||stops[left];
+    return `rgb(${a.map((v,i)=>Math.round(v*(1-mix)+b[i]*mix)).join(',')})`;
+  }
   function summaryCard(name,value,note=''){return `<div class="summary"><span>${name}</span><strong>${value}</strong>${note?`<small>${note}</small>`:''}</div>`;}
   function renderSummary(){
     const summary=payload.summary||{},temperatures=payload.temperature_records||[],mapped=payload.map_points||[];
@@ -61,6 +120,7 @@
     const metric=$('mapMetric').value,points=(payload.map_points||[]).filter(point=>finite(point.latitude)&&finite(point.longitude)&&finite(point[metric]));
     $('interpretation').textContent=payload.temperature_interpretation||'';
     if(!points.length){$('mapNote').textContent=payload.temperature_reason||'No georeferenced FLIR temperature frames are available.';$('mapLegend').hidden=true;mapBounds=null;return;}
+    const palette=paletteName();
     const values=points.map(point=>Number(point[metric])),low=quantile(values,.02),highCandidate=quantile(values,.98),high=highCandidate>low?highCandidate:low+1;
     const step=Math.max(1,Math.ceil(points.length/4000)),shown=points.filter((_,index)=>index%step===0),renderer=L.canvas({padding:.5,tolerance:8});
     const route=L.polyline(shown.map(point=>[point.latitude,point.longitude]),{renderer,color:'#17212b',weight:2,opacity:.58,interactive:false}).addTo(map);mapLayers.push(route);
@@ -72,12 +132,12 @@
       return `<strong>FLIR frame ${point.frame_id}</strong><br>${point.timestamp_utc}<br>Latitude: ${Number(point.latitude).toFixed(6)}<br>Longitude: ${Number(point.longitude).toFixed(6)}<br>Altitude: ${finite(point.altitude_m)?Number(point.altitude_m).toFixed(2)+' m':'n/a'}<br>${metricLabels[metric]}: ${value.toFixed(3)}<br>Mean: ${finite(point.temperature_mean_c)?Number(point.temperature_mean_c).toFixed(3)+' °C':'n/a'}<br>Range: ${finite(point.temperature_min_c)&&finite(point.temperature_max_c)?Number(point.temperature_min_c).toFixed(3)+'–'+Number(point.temperature_max_c).toFixed(3)+' °C':'n/a'}<br>Noseboom time difference: ${finite(point.time_delta_seconds)?Number(point.time_delta_seconds).toFixed(3)+' s':'n/a'}`;
     };
     const markers=shown.map(point=>L.circleMarker([point.latitude,point.longitude],
-      {renderer,radius:4,color:'#071827',weight:.45,fillColor:color(Number(point[metric]),low,high),fillOpacity:.92}
+      {renderer,radius:4,color:'#071827',weight:.45,fillColor:color(Number(point[metric]),low,high,palette),fillOpacity:.92}
     ).bindPopup(()=>popup(point)));
     const group=L.layerGroup(markers).addTo(map);mapLayers.push(group);
     mapBounds=L.latLngBounds(shown.map(point=>[point.latitude,point.longitude]));
     if(mapBounds.isValid())map.fitBounds(mapBounds,{padding:[30,30],maxZoom:17});
-    $('legendTitle').textContent=metricLabels[metric];$('legendLow').textContent=`${low.toFixed(2)} °C`;$('legendHigh').textContent=`${high.toFixed(2)} °C`;$('mapLegend').hidden=false;
+    renderLegend(metricLabels[metric],low,high,palette,points.length);$('mapLegend').hidden=false;
     // Naming the true frame count, because what is drawn is a reduced view of
     // it and the reader should not mistake one for the other.
     const total=Number(payload.map_points_total)||points.length;
@@ -138,6 +198,10 @@
       // each stage. Done in one synchronous run, the browser cannot repaint at
       // all, so the page stayed behind "Preparing FLIR workspace" for the whole
       // of it and looked hung rather than busy.
+      // ?metric= is honoured once, when the payload first arrives, so choosing
+      // another statistic in the same tab is not undone on every redraw.
+      const requested=new URLSearchParams(location.search).get('metric');
+      if(requested&&metricLabels[requested])$('mapMetric').value=requested;
       $('busy').classList.remove('show');
       await drawEverything();
       showView(pathView(),false);
@@ -172,7 +236,21 @@
   }
   $('exportBtn').onclick=showExports;
   $('exportClose').onclick=()=>$('exportModal').classList.remove('show');
-  $('refreshBtn').onclick=load;$('mapMetric').onchange=renderMap;$('resetMapBtn').onclick=()=>{if(map&&mapBounds?.isValid())map.fitBounds(mapBounds,{padding:[30,30],maxZoom:17});};
+  setPalettes();
+  $('refreshBtn').onclick=load;$('mapMetric').onchange=renderMap;$('mapPalette').onchange=renderMap;
+  // One statistic on its own, in its own tab: the metric and the colours travel
+  // in the URL so the new tab opens on exactly what was being looked at.
+  $('mapNewTabBtn').onclick=()=>{
+    const parameters=new URLSearchParams({metric:$('mapMetric').value,palette:paletteName()});
+    window.open(`/flir/temperature-map?${parameters}`,'_blank','noopener');
+  };
+  $('mapFullscreenBtn').onclick=()=>{
+    const card=document.querySelector('[data-section="temperature"]');
+    if(!document.fullscreenElement){card?.requestFullscreen?.().then(()=>setTimeout(()=>map?.invalidateSize(),120));}
+    else{document.exitFullscreen();}
+  };
+  // Leaving full screen resizes the container as much as entering it does.
+  addEventListener('fullscreenchange',()=>setTimeout(()=>map?.invalidateSize(),120));$('resetMapBtn').onclick=()=>{if(map&&mapBounds?.isValid())map.fitBounds(mapBounds,{padding:[30,30],maxZoom:17});};
   document.querySelectorAll('[data-view]').forEach(link=>link.onclick=event=>{event.preventDefault();showView(link.dataset.view);});
   document.querySelectorAll('[data-fullscreen]').forEach(button=>button.onclick=async()=>{await $(button.dataset.fullscreen).closest('.chart-card').requestFullscreen();setTimeout(()=>Plotly.Plots.resize($(button.dataset.fullscreen)),120);});
   addEventListener('popstate',()=>showView(pathView(),false));addEventListener('resize',()=>document.querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot)));load();
