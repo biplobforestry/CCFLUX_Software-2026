@@ -764,9 +764,12 @@ function closeMapSync() {
         if project is None:
             return {"saved": False, "reason": "No main Flight Project is active"}
         with self.module.LOCK:
-            loaded = all(
+            # Whichever analyzer this flight carried. Demanding both meant a
+            # Picarro-only flight saved no session, so reopening its project
+            # showed no Picarro data at all.
+            loaded = self.module.STORE.get("meta") is not None and any(
                 self.module.STORE.get(name) is not None
-                for name in ("miro", "picarro", "meta")
+                for name in ("miro", "picarro")
             )
             results = self.module.STORE.get("results")
         existing = project.output_locations.get("miro_rack_session")

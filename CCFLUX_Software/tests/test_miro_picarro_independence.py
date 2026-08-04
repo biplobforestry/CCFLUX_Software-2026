@@ -96,3 +96,94 @@ def test_the_map_page_falls_back_for_a_project_saved_before_the_flag():
 
     assert "payload.layers" in block
     assert ".some(rows => (rows || []).length)" in block
+
+
+def _rack_module():
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "legacy_integration" / "MIRO_Rack"
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    import MIRO_Rack_GUI
+
+    return MIRO_Rack_GUI
+
+
+def _frame(start_hour):
+    import pandas as pd
+
+    return pd.DataFrame(
+        {
+            "timestamp": pd.date_range(f"2026-08-03 {start_hour}:00", periods=60, freq="2s"),
+            "CO2 raw": range(60),
+        }
+    )
+
+
+def _store(module, *, miro, picarro):
+    with module.LOCK:
+        module.STORE.update(
+            {
+                "miro": miro,
+                "picarro": picarro,
+                "meta": {"paths": {}},
+                "results": {"picarro": {"ok": True}},
+                "project": None,
+            }
+        )
+
+
+def test_a_picarro_only_flight_saves_and_restores_its_session(tmp_path):
+    """Flight_CCT0803 carried no MIRO, and its Picarro analysis was lost on
+    reopening because the session refused to save without both analyzers."""
+    module = _rack_module()
+    target = tmp_path / "picarro_only.hdf"
+    _store(module, miro=None, picarro=_frame(12))
+
+    module.save_project_worker(str(target), {"results_current": True})
+    _store(module, miro="cleared", picarro="cleared")
+    module.load_project_worker(str(target))
+
+    with module.LOCK:
+        assert module.STORE["miro"] is None
+        assert len(module.STORE["picarro"]) == 60
+        assert module.STORE["project"]["results_available"] is True
+
+
+def test_a_miro_only_flight_saves_and_restores_its_session(tmp_path):
+    module = _rack_module()
+    target = tmp_path / "miro_only.hdf"
+    _store(module, miro=_frame(13), picarro=None)
+
+    module.save_project_worker(str(target), {"results_current": True})
+    _store(module, miro="cleared", picarro="cleared")
+    module.load_project_worker(str(target))
+
+    with module.LOCK:
+        assert len(module.STORE["miro"]) == 60
+        assert module.STORE["picarro"] is None
+
+
+def test_both_analyzers_still_round_trip(tmp_path):
+    module = _rack_module()
+    target = tmp_path / "both.hdf"
+    _store(module, miro=_frame(13), picarro=_frame(12))
+
+    module.save_project_worker(str(target), {"results_current": True})
+    _store(module, miro="cleared", picarro="cleared")
+    module.load_project_worker(str(target))
+
+    with module.LOCK:
+        assert len(module.STORE["miro"]) == 60
+        assert len(module.STORE["picarro"]) == 60
+
+
+def test_a_session_with_neither_analyzer_is_refused(tmp_path):
+    import pytest
+
+    module = _rack_module()
+    _store(module, miro=None, picarro=None)
+
+    with pytest.raises(RuntimeError, match="MIRO or Picarro"):
+        module.save_project_worker(str(tmp_path / "empty.hdf"), {})
