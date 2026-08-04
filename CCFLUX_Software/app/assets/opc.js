@@ -15,8 +15,38 @@
   let payload = null;
 
   async function api(url){const r=await fetch(url,{cache:'no-store'});if(!r.ok)throw new Error(`Request failed (${r.status})`);return r.json();}
-  function layout(title,ytitle,extra={}){return {title:{text:title,x:.5,font:{size:18}},paper_bgcolor:'#f7fafc',plot_bgcolor:'#fff',font:{family:'Arial, sans-serif',size:14,color:'#172431'},margin:{l:82,r:42,t:66,b:70},xaxis:{title:'Recorded UTC',gridcolor:'#dce5ea',rangeslider:{visible:false}},yaxis:{title:ytitle,gridcolor:'#dce5ea',zerolinecolor:'#b9c7cf'},legend:{orientation:'h',y:1.13,x:0},hovermode:'closest',...extra};}
-  function dualAxisLayout(title,ytitle){return layout(title,ytitle,{margin:{l:92,r:104,t:68,b:70},hovermode:'x unified',yaxis:{title:{text:`HBX-4 · ${ytitle}`,font:{color:colors.hbx4}},tickfont:{color:colors.hbx4},gridcolor:'#dce5ea',zerolinecolor:'#b9c7cf',automargin:true,fixedrange:false},yaxis2:{title:{text:`HBX-5 · ${ytitle}`,font:{color:colors.hbx5}},tickfont:{color:colors.hbx5},overlaying:'y',side:'right',showgrid:false,zeroline:false,automargin:true,fixedrange:false}});}
+  function layout(title,ytitle,extra={}){return {title:{text:title,x:.5,y:1,yanchor:'top',pad:{t:10},font:{size:18}},paper_bgcolor:'#f7fafc',plot_bgcolor:'#fff',font:{family:'Arial, sans-serif',size:14,color:'#172431'},margin:{l:82,r:42,t:96,b:70},xaxis:{title:'Recorded UTC',gridcolor:'#dce5ea',rangeslider:{visible:false}},yaxis:{title:ytitle,gridcolor:'#dce5ea',zerolinecolor:'#b9c7cf'},legend:{orientation:'h',y:1.02,yanchor:'bottom',x:0},hovermode:'closest',...extra};}
+  function dualAxisLayout(title,ytitle){return layout(title,ytitle,{margin:{l:92,r:104,t:96,b:70},hovermode:'x unified',yaxis:{title:{text:`HBX-4 · ${ytitle}`,font:{color:colors.hbx4}},tickfont:{color:colors.hbx4},gridcolor:'#dce5ea',zerolinecolor:'#b9c7cf',automargin:true,fixedrange:false},yaxis2:{title:{text:`HBX-5 · ${ytitle}`,font:{color:colors.hbx5}},tickfont:{color:colors.hbx5},overlaying:'y',side:'right',showgrid:false,zeroline:false,automargin:true,fixedrange:false}});}
+  const format=value=>Number(value).toPrecision(3).replace(/\.?0+$/,'');
+  // Most bins of a clean flight read exactly zero - 87% on HBX-4 and 99% on
+  // HBX-5 for Flight_CCT0803 - so colouring from the lowest to the highest
+  // value left every structure in one shade at the bottom of the ramp. The
+  // colour range is taken from the values that carry signal, and the colour
+  // bar states both where the colour saturates and the true peak, so nothing
+  // the sensor recorded is hidden by the choice.
+  function heatBounds(z){
+    const values=[];
+    (z||[]).forEach(row=>(row||[]).forEach(value=>{
+      const number=Number(value);
+      if (Number.isFinite(number)) values.push(number);
+    }));
+    if (!values.length) return {low:0,high:1,max:1,positiveLow:0};
+    values.sort((a,b)=>a-b);
+    const low=values[0], max=values[values.length-1];
+    const positive=values.filter(value=>value>0);
+    const at=(list,fraction)=>list[Math.min(list.length-1,Math.floor(list.length*fraction))];
+    if (!positive.length || !(max>low)) return {low,high:max>low?max:low+1,max,positiveLow:0};
+    return {
+      low,
+      // The linear range stops at the 99th percentile of the bins that
+      // counted something, so a handful of spikes cannot flatten the rest.
+      high:Math.max(at(positive,.99),positive[0]),
+      max,
+      // The logarithmic floor ignores the lowest 1%, so one near-zero count
+      // cannot stretch the ramp over a decade nothing else occupies.
+      positiveLow:at(positive,.01)
+    };
+  }
   function tracesBySession(sensor,key,label,axis='y'){
     const s=sensor.series,sessions=[...new Set(s.session.filter(v=>v!==null))],traces=[];
     sessions.forEach((session,index)=>{
@@ -43,7 +73,34 @@
   }
   function renderHeat(){
     const sensor=payload.sensors[$('heatSensor').value],h=sensor.heatmap;
-    Plotly.react('heatPlot',[{type:'heatmap',x:h.time,y:h.bin_index,z:h.z,colorscale:'Viridis',colorbar:{title:'#/cm³'},hovertemplate:'UTC %{x}<br>Bin %{y}<br>%{z:.4g} #/cm³<extra></extra>'}],layout(`${sensor.label} · bin-resolved concentration`,'OPC-N3 software bin index',{yaxis:{title:'OPC-N3 software bin index',dtick:1},margin:{l:88,r:70,t:62,b:70}}),config);
+    const bounds=heatBounds(h.z), logarithmic=$('heatLog').checked && bounds.high>0;
+    const trace={type:'heatmap',x:h.time,y:h.bin_index,colorscale:'Viridis',zauto:false,
+      customdata:h.z,hovertemplate:'UTC %{x}<br>Bin %{y}<br>%{customdata:.4g} #/cm³<extra></extra>'};
+    if (logarithmic) {
+      // A bin that counted nothing has no logarithm. Those cells are left
+      // empty rather than pinned to the bottom of the ramp, so "counted
+      // nothing" and "counted a little" no longer share one colour.
+      const floor=bounds.positiveLow>0?bounds.positiveLow:bounds.max/1000;
+      const ceiling=Math.max(bounds.max,floor*10);
+      trace.z=h.z.map(row=>(row||[]).map(value=>{
+        const number=Number(value);
+        return Number.isFinite(number) && number>0 ? Math.log10(Math.min(Math.max(number,floor),ceiling)) : null;
+      }));
+      trace.zmin=Math.log10(floor); trace.zmax=Math.log10(ceiling);
+      const ticks=[];
+      for (let power=Math.ceil(trace.zmin); power<=Math.floor(trace.zmax); power+=1) ticks.push(power);
+      trace.colorbar={title:{text:'#/cm³',side:'right'},tickmode:'array',tickvals:ticks,
+        ticktext:ticks.map(power=>format(Math.pow(10,power)))};
+    } else {
+      trace.z=h.z; trace.zmin=bounds.low; trace.zmax=bounds.high;
+      trace.colorbar={title:{text:'#/cm³',side:'right'}};
+    }
+    const scaleNote=logarithmic?'logarithmic colour scale':'linear colour scale';
+    const peakNote=!logarithmic && bounds.high<bounds.max
+      ? `; colour saturates at ${format(bounds.high)}, peak ${format(bounds.max)}`
+      : `; peak ${format(bounds.max)}`;
+    Plotly.react('heatPlot',[trace],
+      layout(`${sensor.label} · bin-resolved concentration · ${scaleNote}${peakNote}`,'OPC-N3 software bin index',{yaxis:{title:'OPC-N3 software bin index',dtick:1},margin:{l:88,r:104,t:96,b:70}}),config);
   }
   function renderDiagnostics(){
     const key=$('diagnosticMetric').value,[title,ytitle]=labels[key];
@@ -67,7 +124,7 @@
     }catch(error){$('statusText').textContent=`OPC view failed: ${error.message}`;$('statusText').style.color='var(--danger)';}
     finally{$('busy').classList.remove('show');}
   }
-  $('refreshBtn').onclick=load;$('timeMetric').onchange=renderTime;$('heatSensor').onchange=renderHeat;$('diagnosticMetric').onchange=renderDiagnostics;
+  $('refreshBtn').onclick=load;$('timeMetric').onchange=renderTime;$('heatSensor').onchange=renderHeat;$('heatLog').onchange=renderHeat;$('diagnosticMetric').onchange=renderDiagnostics;
   document.querySelectorAll('[data-view]').forEach(a=>a.onclick=e=>{e.preventDefault();showView(a.dataset.view);});
   document.querySelectorAll('[data-fullscreen]').forEach(b=>b.onclick=async()=>{const card=$(b.dataset.fullscreen).closest('.chart-card');await card.requestFullscreen();setTimeout(resizePlots,120);});
   addEventListener('popstate',()=>showView(pathView(),false));addEventListener('resize',resizePlots);addEventListener('fullscreenchange',()=>setTimeout(resizePlots,120));load();

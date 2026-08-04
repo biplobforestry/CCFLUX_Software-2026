@@ -7,7 +7,7 @@
   async function api(url){const response=await fetch(url,{cache:'no-store'});if(!response.ok)throw new Error(`Request failed (${response.status})`);return response.json();}
   function numericAxis(digits=3){return {separatethousands:true,exponentformat:'none',showexponent:'none',tickformat:`,.${digits}f`,automargin:true};}
   function layout(title,yTitle,extra={}){
-    const base={title:{text:title,x:.5,font:{size:18}},paper_bgcolor:'#f7fafc',plot_bgcolor:'#fff',font:{family:'Arial, sans-serif',size:14,color:'#172431'},margin:{l:98,r:52,t:68,b:78},xaxis:{title:'Recorded UTC',gridcolor:'#dce5ea',automargin:true},yaxis:{title:yTitle,gridcolor:'#dce5ea',...numericAxis(3)},legend:{orientation:'h',y:1.13,x:0},hovermode:'closest'};
+    const base={title:{text:title,x:.5,y:1,yanchor:'top',pad:{t:10},font:{size:18}},paper_bgcolor:'#f7fafc',plot_bgcolor:'#fff',font:{family:'Arial, sans-serif',size:14,color:'#172431'},margin:{l:98,r:52,t:96,b:78},xaxis:{title:'Recorded UTC',gridcolor:'#dce5ea',automargin:true},yaxis:{title:yTitle,gridcolor:'#dce5ea',...numericAxis(3)},legend:{orientation:'h',y:1.02,yanchor:'bottom',x:0},hovermode:'closest'};
     return {...base,...extra,xaxis:{...base.xaxis,...(extra.xaxis||{})},yaxis:{...base.yaxis,...(extra.yaxis||{})}};
   }
   function sessionTraces(key,name,color,width=1.2,dash='solid'){
@@ -49,7 +49,7 @@
     (spectrogram.sessions||[]).forEach((session,index)=>traces.push({type:'heatmap',x:session.time,y:session.frequency_hz,z:session.power_db_g2_hz,colorscale:'Viridis',zmin:limits[0],zmax:limits[1],showscale:index===0,colorbar:{title:'Acceleration PSD<br>[dB re g²/Hz]',tickformat:',.1f',exponentformat:'none'},hovertemplate:'UTC %{x}<br>Frequency %{y:,.3f} Hz<br>PSD %{z:,.2f} dB re g²/Hz<extra></extra>'}));
     const nyquist=Number(payload.summary?.sampling?.effective_update_nyquist_hz);
     const extra=Number.isFinite(nyquist)?{shapes:[{type:'line',xref:'paper',x0:0,x1:1,y0:nyquist,y1:nyquist,line:{color:'#ffffff',width:2,dash:'dash'}}],annotations:[{xref:'paper',x:1,y:nyquist,text:`Effective update Nyquist ${nyquist.toLocaleString(undefined,{maximumFractionDigits:3})} Hz`,showarrow:false,xanchor:'right',yshift:12,font:{color:'#172431',size:13},bgcolor:'#ffffffcc'}]}:{};
-    Plotly.react('spectrogramPlot',traces,layout('Acceleration spectrogram · unfiltered input','Frequency [Hz]',{margin:{l:100,r:132,t:68,b:78},...extra}),config);
+    Plotly.react('spectrogramPlot',traces,layout('Acceleration spectrogram · unfiltered input','Frequency [Hz]',{margin:{l:100,r:132,t:96,b:78},...extra}),config);
   }
   function renderAsd(){
     const acceleration=payload.asd?.acceleration||{},angular=payload.asd?.angular_rate||{},nyquist=Number(payload.summary?.sampling?.effective_update_nyquist_hz);
@@ -58,7 +58,13 @@
       {type:'scatter',mode:'lines',x:angular.frequency_hz,y:angular.amplitude_dps_sqrt_hz,name:'Angular-rate ASD',yaxis:'y2',line:{color:colours.y,width:2},hovertemplate:'Frequency %{x:,.4f} Hz<br>Angular-rate ASD %{y:.6e} (deg/s)/√Hz<extra></extra>'}
     ];
     const shapes=Number.isFinite(nyquist)?[{type:'line',x0:nyquist,x1:nyquist,yref:'paper',y0:0,y1:1,line:{color:'#555',dash:'dash',width:1.5}}]:[];
-    Plotly.react('asdPlot',traces,layout('Welch amplitude spectral density · Duration-weighted spectra use every acquisition session','Acceleration ASD [g/√Hz]',{xaxis:{title:'Frequency [Hz]',gridcolor:'#dce5ea',...numericAxis(3)},yaxis:{title:'Acceleration ASD [g/√Hz]',type:'log',gridcolor:'#dce5ea',tickformat:'.3e',automargin:true},yaxis2:{title:'Angular-rate ASD [(deg/s)/√Hz]',type:'log',overlaying:'y',side:'right',tickformat:'.3e',automargin:true,gridcolor:'rgba(0,0,0,0)'},margin:{l:112,r:126,t:68,b:78},shapes}),config);
+    // Both axes are decades. Labelling every minor tick in exponent notation
+    // printed nine crowded labels per decade down each side; one label per
+    // decade as a power of ten reads at a glance. Each axis carries the colour
+    // of the trace it belongs to, so left and right are told apart directly.
+    const decadeAxis=colour=>({type:'log',dtick:1,exponentformat:'power',showexponent:'all',
+      ticks:'outside',ticklen:5,tickfont:{color:colour},automargin:true});
+    Plotly.react('asdPlot',traces,layout('Welch amplitude spectral density · Duration-weighted spectra use every acquisition session','Acceleration ASD [g/√Hz]',{xaxis:{title:'Frequency [Hz]',gridcolor:'#dce5ea',...numericAxis(3)},yaxis:{title:{text:'Acceleration ASD [g/√Hz]',font:{color:colours.x}},gridcolor:'#dce5ea',...decadeAxis(colours.x)},yaxis2:{title:{text:'Angular-rate ASD [(deg/s)/√Hz]',font:{color:colours.y}},overlaying:'y',side:'right',gridcolor:'rgba(0,0,0,0)',...decadeAxis(colours.y)},margin:{l:112,r:126,t:96,b:78},shapes}),config);
   }
   function pathView(){if(location.pathname.includes('/motion'))return'motion';if(location.pathname.includes('/frequency'))return'frequency';return'overview';}
   function showView(view,push=true){document.querySelectorAll('[data-section]').forEach(card=>card.hidden=card.dataset.section!==view);document.querySelectorAll('[data-view]').forEach(link=>link.classList.toggle('active',link.dataset.view===view));if(push)history.pushState({view},'',`/ins_gimbal/${view}`);setTimeout(resizePlots,60);}
