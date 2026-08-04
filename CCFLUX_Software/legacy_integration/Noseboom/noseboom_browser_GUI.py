@@ -198,93 +198,88 @@ def haversine_m(lat1, lon1, lat2, lon2):
     a=np.sin(dp/2)**2+np.cos(p1)*np.cos(p2)*np.sin(dl/2)**2
     return 2*r*np.arcsin(np.sqrt(np.clip(a,0,1)))
 
-STRAIGHT_DEFAULTS={'min_speed_mps':8.0,'max_turn_rate_dps':1.5,'max_roll_deg':8.0,'heading_window_s':20,'max_heading_range_deg':12.0,'min_leg_seconds':60,'min_leg_distance_m':1000.0,'target_leg_distance_m':2000.0,'max_leg_heading_drift_deg':20.0,'max_cross_track_m':80.0,'max_altitude_deviation_m':50.0}
+STRAIGHT_DEFAULTS={'minimum_ground_speed_mps':8.0,'minimum_segment_duration_s':60,'heading_window_s':30,'maximum_heading_std_deg':10.0,'maximum_heading_rate_dps':3.0,'maximum_roll_angle_deg':10.0,'maximum_altitude_range_m':100.0,'maximum_vertical_speed_mps':2.2}
 
 def one_hz(data):
     x=data.set_index('time'); scalar=['plot_lat','plot_lon','altitude_m','height_m','ground_speed_mps','vertical_speed_mps','roll_deg','wind_mps','wind_u_mps','wind_v_mps','wind_w_mps','air_temp_degC','rel_humidity_pct']
     out=x[[c for c in scalar if c in x.columns]].resample('1s').median(); out['heading_deg']=x['heading_deg'].resample('1s').apply(circular_mean_deg)
     out=out.interpolate(limit=2).dropna(subset=['plot_lat','plot_lon']); out.index.name='time'; return out
 
-def evaluate_straight_window(q, cfg):
-    """Return quality metrics for one candidate straight-flight window, or None."""
-    if len(q) < 2:
-        return None
-    duration=(q.index[-1]-q.index[0]).total_seconds()+1
-    if duration < cfg['min_leg_seconds']:
-        return None
-    step=haversine_m(q['plot_lat'].iloc[:-1].to_numpy(),q['plot_lon'].iloc[:-1].to_numpy(),q['plot_lat'].iloc[1:].to_numpy(),q['plot_lon'].iloc[1:].to_numpy())
-    distance=float(np.nansum(step))
-    if distance < cfg['min_leg_distance_m']:
-        return None
-    hu=np.rad2deg(np.unwrap(np.deg2rad(q['heading_deg'].to_numpy(float))))
-    heading_drift=float(np.nanmax(hu)-np.nanmin(hu))
-    lat0=np.deg2rad(float(q['plot_lat'].mean()))
-    east=(q['plot_lon'].to_numpy()-q['plot_lon'].iloc[0])*111320.0*np.cos(lat0)
-    north=(q['plot_lat'].to_numpy()-q['plot_lat'].iloc[0])*110540.0
-    x0,y0=east[0],north[0]; x1,y1=east[-1],north[-1]
-    denom=max(float(np.hypot(x1-x0,y1-y0)),1.0)
-    cross=np.abs((y1-y0)*east-(x1-x0)*north+x1*y0-y1*x0)/denom
-    cross_max=float(np.nanmax(cross)); cross_rms=float(np.sqrt(np.nanmean(cross**2)))
-    alt_dev=float(np.nanmax(np.abs(q['altitude_m']-np.nanmean(q['altitude_m'])))) if 'altitude_m' in q else np.nan
-    if heading_drift>cfg['max_leg_heading_drift_deg'] or cross_max>cfg['max_cross_track_m'] or alt_dev>cfg['max_altitude_deviation_m']:
-        return None
-    return {'duration_s':float(duration),'distance_km':distance/1000.0,'mean_heading_deg':circular_mean_deg(q['heading_deg']),'mean_speed_mps':float(q['ground_speed_mps'].mean()),'heading_drift_deg':heading_drift,'max_cross_track_m':cross_max,'rms_cross_track_m':cross_rms,'max_altitude_deviation_m':alt_dev,'center_lat':float(q['plot_lat'].median()),'center_lon':float(q['plot_lon'].median())}
+def heading_std_deg(head, window):
+    """Circular standard deviation of heading inside a centred window."""
+    rad=np.deg2rad(pd.to_numeric(head,errors='coerce'))
+    minimum=max(5,int(window)//3)
+    sin_m=pd.Series(np.sin(rad),index=head.index).rolling(window,center=True,min_periods=minimum).mean()
+    cos_m=pd.Series(np.cos(rad),index=head.index).rolling(window,center=True,min_periods=minimum).mean()
+    r=np.sqrt(sin_m**2+cos_m**2).clip(1e-12,1.0)
+    return np.rad2deg(np.sqrt(-2.0*np.log(r)))
+
 
 def detect_straight(d1, params=None):
-    """Classify scientifically defensible Straight Flight legs on the 1 Hz table.
+    """Classify Straight Flight legs by a moving-window stability test.
 
-    Method: first identify stable samples, split them into continuous candidate
-    runs, then evaluate each run as piecewise target-distance windows. This is
-    analogous to multi-leg flight planning: each leg/window is judged by its own
-    speed, duration, heading stability, cross-track error, and altitude stability.
+    A sample is accepted while the Zeppelin holds forward motion and a
+    quasi-steady attitude: ground speed at or above the threshold, circular
+    heading standard deviation and heading rate inside their windows, roll and
+    vertical speed small, and the altitude range across the window bounded.
+    Consecutive accepted samples are merged into one leg, and a leg is kept
+    when it lasts at least the minimum duration. Distance comes from
+    consecutive latitude and longitude, duration from the recorded time.
     """
     cfg=STRAIGHT_DEFAULTS.copy()
     if params:
         cfg.update({k:float(v) for k,v in params.items() if k in cfg and v not in (None,'')})
     cfg['heading_window_s']=int(max(5,round(cfg['heading_window_s'])))
-    cfg['min_leg_seconds']=int(max(5,round(cfg['min_leg_seconds'])))
-    cfg['min_leg_distance_m']=max(1.0,float(cfg['min_leg_distance_m']))
-    cfg['target_leg_distance_m']=max(cfg['min_leg_distance_m'],float(cfg.get('target_leg_distance_m',cfg['min_leg_distance_m'])))
+    cfg['minimum_segment_duration_s']=int(max(5,round(cfg['minimum_segment_duration_s'])))
     d=d1.copy(); idx=d.index
-    dt=idx.to_series().diff().dt.total_seconds().fillna(1).clip(lower=1)
-    d['turn_rate_dps']=circular_difference_deg(d['heading_deg']).abs()/dt
-    unwrapped=np.rad2deg(np.unwrap(np.deg2rad(d['heading_deg'].astype(float).to_numpy())))
-    h=pd.Series(unwrapped,index=idx)
-    win=f"{cfg['heading_window_s']}s"
-    d['heading_range_deg']=h.rolling(win,center=True,min_periods=max(3,cfg['heading_window_s']//2)).max()-h.rolling(win,center=True,min_periods=max(3,cfg['heading_window_s']//2)).min()
-    candidate=((d['ground_speed_mps']>=cfg['min_speed_mps']) & (d['turn_rate_dps']<=cfg['max_turn_rate_dps']) & (d['heading_range_deg']<=cfg['max_heading_range_deg']) & (d['roll_deg'].abs()<=cfg['max_roll_deg'])).fillna(False)
-    d['straight_candidate']=(candidate.rolling(5,center=True,min_periods=3).mean()>=0.8).fillna(False)
-    breaks=d['straight_candidate'].ne(d['straight_candidate'].shift(fill_value=False)) | (idx.to_series().diff().dt.total_seconds().fillna(1)>2)
+    seconds=idx.to_series().diff().dt.total_seconds().fillna(1.0).clip(lower=0.001)
+    window=cfg['heading_window_s']
+    minimum=max(5,window//3)
+    heading=pd.to_numeric(d['heading_deg'],errors='coerce')
+    d['heading_std_deg']=heading_std_deg(heading,window)
+    d['heading_rate_dps']=(circular_difference_deg(heading).abs()/seconds)
+    altitude=pd.to_numeric(d['altitude_m'],errors='coerce')
+    d['altitude_range_m']=(altitude.rolling(window,center=True,min_periods=minimum).max()
+                           -altitude.rolling(window,center=True,min_periods=minimum).min())
+    vertical=pd.to_numeric(d['vertical_speed_mps'],errors='coerce')
+    good=((d['ground_speed_mps']>=cfg['minimum_ground_speed_mps'])
+          & (d['heading_std_deg']<=cfg['maximum_heading_std_deg'])
+          & (d['heading_rate_dps']<=cfg['maximum_heading_rate_dps'])
+          & (d['roll_deg'].abs()<=cfg['maximum_roll_angle_deg'])
+          & (d['altitude_range_m']<=cfg['maximum_altitude_range_m'])
+          & (vertical.abs()<=cfg['maximum_vertical_speed_mps'])).fillna(False)
+    d['straight_candidate']=good
+    # A gap in the record ends a leg: samples either side of it were not one
+    # continuous transect however similar they look.
+    breaks=good.ne(good.shift(fill_value=False)) | (seconds>2)
     run_id=breaks.cumsum()
     d['straight']=False; d['straight_leg_id']=0
     metrics=[]; leg_id=0
-    for source_run,g in d[d['straight_candidate']].groupby(run_id[d['straight_candidate']]):
-        if len(g)<cfg['min_leg_seconds']:
+    for _run,g in d[good].groupby(run_id[good]):
+        duration=float((g.index[-1]-g.index[0]).total_seconds())
+        if duration < cfg['minimum_segment_duration_s']:
             continue
-        step=haversine_m(g['plot_lat'].iloc[:-1].to_numpy(),g['plot_lon'].iloc[:-1].to_numpy(),g['plot_lat'].iloc[1:].to_numpy(),g['plot_lon'].iloc[1:].to_numpy()) if len(g)>1 else np.array([])
-        cumulative=np.r_[0.0,np.cumsum(step)] if len(step) else np.array([0.0])
-        if cumulative[-1] < cfg['min_leg_distance_m']:
-            continue
-        left=0
-        while left < len(g)-1:
-            right=int(np.searchsorted(cumulative, cumulative[left]+cfg['target_leg_distance_m'], side='left'))
-            right=min(max(right,left+1),len(g)-1)
-            # If the remaining tail is shorter than target but still acceptable, keep it as final window.
-            if cumulative[-1]-cumulative[left] < cfg['target_leg_distance_m']:
-                right=len(g)-1
-            q=g.iloc[left:right+1]
-            m=evaluate_straight_window(q,cfg)
-            if m is not None:
-                leg_id+=1
-                d.loc[q.index,'straight']=True; d.loc[q.index,'straight_leg_id']=leg_id
-                m.update({'leg':leg_id,'source_run':int(source_run),'start':str(q.index[0]),'end':str(q.index[-1])})
-                metrics.append(m)
-                left=right+1
-            else:
-                # Slide forward by half the minimum duration to avoid one bad endpoint killing a whole run.
-                left+=max(1,int(cfg['min_leg_seconds']//2))
-            if len(g)-left < max(2,int(cfg['min_leg_seconds']//2)):
-                break
+        if len(g)>1:
+            step=haversine_m(g['plot_lat'].iloc[:-1].to_numpy(),g['plot_lon'].iloc[:-1].to_numpy(),
+                             g['plot_lat'].iloc[1:].to_numpy(),g['plot_lon'].iloc[1:].to_numpy())
+            distance=float(np.nansum(step))
+        else:
+            distance=0.0
+        leg_id+=1
+        d.loc[g.index,'straight']=True; d.loc[g.index,'straight_leg_id']=leg_id
+        metrics.append({
+            'leg':leg_id,'start':str(g.index[0]),'end':str(g.index[-1]),
+            'duration_s':duration,'distance_km':distance/1000.0,
+            'mean_heading_deg':circular_mean_deg(g['heading_deg']),
+            'mean_speed_mps':float(g['ground_speed_mps'].mean()),
+            'mean_wind_speed_mps':float(pd.to_numeric(g['wind_mps'],errors='coerce').mean()),
+            'median_heading_std_deg':float(g['heading_std_deg'].median()),
+            'max_heading_rate_dps':float(np.nanmax(g['heading_rate_dps'].to_numpy())) if len(g) else float('nan'),
+            'max_abs_roll_deg':float(np.nanmax(np.abs(g['roll_deg'].to_numpy()))) if len(g) else float('nan'),
+            'altitude_range_m':float(np.nanmax(altitude.loc[g.index])-np.nanmin(altitude.loc[g.index])),
+            'max_abs_vertical_speed_mps':float(np.nanmax(np.abs(vertical.loc[g.index].to_numpy()))) if len(g) else float('nan'),
+            'center_lat':float(g['plot_lat'].median()),'center_lon':float(g['plot_lon'].median()),
+        })
     d.attrs['straight_params']=cfg; d.attrs['straight_metrics']=metrics
     return d
 
@@ -682,7 +677,7 @@ def api_payload():
             if isinstance(STATE.summary,dict):
                 for row in STATE.summary.get('straight_metrics',[]):
                     if int(row.get('leg',-1))==int(leg_id): metric=row; break
-            straight_legs.append({'id':int(leg_id),'coords':coords,'label':[float(mid['plot_lat']),float(mid['plot_lon'])],'duration_s':float((g.index[-1]-g.index[0]).total_seconds()+1),'distance_km':float(np.nansum(haversine_m(g['plot_lat'].iloc[:-1].to_numpy(),g['plot_lon'].iloc[:-1].to_numpy(),g['plot_lat'].iloc[1:].to_numpy(),g['plot_lon'].iloc[1:].to_numpy()))/1000.0) if len(g)>1 else 0.0,'mean_speed_mps':float(g['ground_speed_mps'].mean()) if 'ground_speed_mps' in g else None,'mean_wind_mps':float(np.nanmean(wind_speed)) if len(wind_speed) else None,'mean_heading_deg':float(metric.get('mean_heading_deg',np.nan)) if metric else None,'heading_drift_deg':float(metric.get('heading_drift_deg',np.nan)) if metric else None,'max_cross_track_m':float(metric.get('max_cross_track_m',np.nan)) if metric else None,'windSamples':wind_samples})
+            straight_legs.append({'id':int(leg_id),'coords':coords,'label':[float(mid['plot_lat']),float(mid['plot_lon'])],'duration_s':float((g.index[-1]-g.index[0]).total_seconds()+1),'distance_km':float(np.nansum(haversine_m(g['plot_lat'].iloc[:-1].to_numpy(),g['plot_lon'].iloc[:-1].to_numpy(),g['plot_lat'].iloc[1:].to_numpy(),g['plot_lon'].iloc[1:].to_numpy()))/1000.0) if len(g)>1 else 0.0,'mean_speed_mps':float(g['ground_speed_mps'].mean()) if 'ground_speed_mps' in g else None,'mean_wind_mps':float(np.nanmean(wind_speed)) if len(wind_speed) else None,'mean_heading_deg':float(metric.get('mean_heading_deg',np.nan)) if metric else None,'heading_std_deg':float(metric.get('median_heading_std_deg',np.nan)) if metric else None,'max_roll_deg':float(metric.get('max_abs_roll_deg',np.nan)) if metric else None,'altitude_range_m':float(metric.get('altitude_range_m',np.nan)) if metric else None,'max_vertical_speed_mps':float(metric.get('max_abs_vertical_speed_mps',np.nan)) if metric else None,'windSamples':wind_samples})
     midlat=float(np.nanmean(d['plot_lat'])); buffer=500
     bounds=[[float(d['plot_lat'].min()),float(d['plot_lon'].min())],[float(d['plot_lat'].max()),float(d['plot_lon'].max())]]
     hist={}
@@ -747,17 +742,14 @@ function closeExportCompleteModal(){document.getElementById('exportCompleteModal
 function showExportComplete(info){let d=document.getElementById('exportCompleteDetails');if(!info||!info.ok){d.innerHTML='<b>Export status:</b> '+((info&&info.message)||'Export finished, but no details were returned.');}else{d.innerHTML=`<table><tr><td>File</td><td>${info.path}</td></tr><tr><td>Frequency</td><td>${info.frequency_hz} Hz</td></tr><tr><td>Format</td><td>${info.format.toUpperCase()}</td></tr><tr><td>Exported rows</td><td>${Number(info.rows).toLocaleString()}</td></tr><tr><td>Source</td><td>${escapeHtml(info.source||'')}</td></tr><tr><td>Variables</td><td>Airflow_UTCcorr_Nanoseconds_ns, TIMESTAMP, Precise_time, latitude, longitude, altitude, WIND_vWind_x/y/z, WIND_dir_deg, WIND_vWind_m/s, RH, pstat, OAT</td></tr></table>`}document.getElementById('exportCompleteModal').style.display='flex'}
 async function startExportData(){if(uiBusy)return;let f=parseFloat(document.getElementById('exportFrequency').value);let fmt=document.getElementById('exportFormat').value;if(!Number.isFinite(f)||f<1||f>100){alert('Frequency must be between 1 and 100 Hz.');return}closeExportModal();setBusy(true,'Exporting Noseboom data',`Resampling original Noseboom data at ${f} Hz and writing ${fmt.toUpperCase()} file...`);await post('/export_data',{fname:fname.value,out:out.value,frequency:f,format:fmt});waitForIdleThen(async()=>{let info=await fetch('/export_result').then(r=>r.json()).catch(()=>null);showExportComplete(info)})}
 async function exportData(){openExportModal()}const straightFields=[
- {key:'min_speed_mps',name:'Minimum ground-speed threshold',unit:'m s-1',def:8,desc:'Lower bound for aircraft ground speed during candidate selection. Samples below this threshold are excluded from straight-flight screening because they do not represent sustained airborne transects.',effect:'Increasing this value restricts the analysis to faster flight periods; decreasing it includes slower flight sections.'},
- {key:'max_turn_rate_dps',name:'Maximum heading-rate threshold',unit:'deg s-1',def:1.5,desc:'Upper bound for the absolute heading-rate derived from the 1 Hz heading record. This is a kinematic criterion for excluding active turns.',effect:'Increasing this value permits more heading change within candidate windows; decreasing it selects straighter kinematic conditions.'},
- {key:'max_roll_deg',name:'Maximum absolute roll-angle threshold',unit:'deg',def:8,desc:'Upper bound for the magnitude of aircraft roll angle. Roll is used as an independent indicator of banking and manoeuvring.',effect:'Increasing this value admits more banked flight; decreasing it restricts the analysis to near-level conditions.'},
- {key:'heading_window_s',name:'Heading-stability window length',unit:'s',def:20,desc:'Length of the moving time window used to estimate local heading variability. This parameter defines the temporal scale over which short-term directional stability is assessed.',effect:'Increasing this value emphasizes broader directional changes; decreasing it makes the screening more sensitive to short-duration heading variability.'},
- {key:'max_heading_range_deg',name:'Maximum local heading variability',unit:'deg',def:12,desc:'Maximum allowed heading range within the heading-stability window. This is the local directional-stability criterion applied before leg construction.',effect:'Increasing this value accepts a wider range of local heading variability; decreasing it selects more directionally stable samples.'},
- {key:'min_leg_seconds',name:'Minimum measurement-window duration',unit:'s',def:60,desc:'Minimum duration required for an accepted straight-flight measurement window. This ensures that each retained leg contains sufficient temporal support for robust statistics.',effect:'Increasing this value retains only longer windows; decreasing it allows shorter measurement windows.'},
- {key:'min_leg_distance_m',name:'Minimum measurement-window distance',unit:'m',def:1000,desc:'Minimum along-track distance required for an accepted measurement window, calculated from consecutive geographic positions.',effect:'Increasing this value removes short spatial windows; decreasing it allows shorter spatial transects.'},
- {key:'target_leg_distance_m',name:'Target segmentation distance',unit:'m',def:2000,desc:'Nominal distance used to divide long stable candidate runs into comparable analysis windows before applying final quality-control criteria.',effect:'Increasing this value produces fewer, longer windows; decreasing it produces more, shorter windows.'},
- {key:'max_leg_heading_drift_deg',name:'Maximum window-scale heading drift',unit:'deg',def:20,desc:'Upper bound for total heading change across an accepted measurement window after angular unwrapping. This criterion rejects windows that are locally stable but form a broad arc.',effect:'Increasing this value allows more gradual curvature; decreasing it enforces stronger window-scale directional consistency.'},
- {key:'max_cross_track_m',name:'Maximum cross-track deviation',unit:'m',def:80,desc:'Maximum perpendicular distance between any sample in the window and the start-to-end reference line. This is the primary geometric straightness criterion.',effect:'Increasing this value allows greater lateral departure from the reference line; decreasing it enforces a tighter straight transect.'},
- {key:'max_altitude_deviation_m',name:'Maximum altitude excursion about window mean',unit:'m',def:50,desc:'Maximum absolute altitude deviation from the mean altitude within the measurement window. This parameter limits strong vertical excursions when quasi-level legs are required.',effect:'Increasing this value allows more altitude variability; decreasing it selects more vertically stable windows.'}
+ {key:'minimum_ground_speed_mps',name:'Minimum ground speed',unit:'m s-1',def:8,desc:'Forward motion the Zeppelin must hold for a sample to be screened. Slower samples are station-keeping or manoeuvring, not a transect.',effect:'Increasing this restricts the analysis to faster flight; decreasing it admits slower sections.'},
+ {key:'minimum_segment_duration_s',name:'Minimum segment duration',unit:'s',def:60,desc:'Shortest continuous period of accepted samples kept as one straight-flight leg.',effect:'Increasing this keeps only long transects; decreasing it admits shorter ones.'},
+ {key:'heading_window_s',name:'Heading stability window',unit:'s',def:30,desc:'Centred window over which the circular heading standard deviation and the altitude range are measured.',effect:'A longer window demands steadiness over a longer stretch; a shorter one reacts to local changes.'},
+ {key:'maximum_heading_std_deg',name:'Maximum heading standard deviation',unit:'deg',def:10,desc:'Circular standard deviation of heading inside the stability window, which is how steadily the airship was pointing.',effect:'Increasing this admits more weaving; decreasing it demands a straighter course.'},
+ {key:'maximum_heading_rate_dps',name:'Maximum heading rate',unit:'deg s-1',def:3,desc:'How fast the heading may change between consecutive samples, rejecting turns.',effect:'Increasing this admits gentler turns; decreasing it enforces a constant course.'},
+ {key:'maximum_roll_angle_deg',name:'Maximum absolute roll',unit:'deg',def:10,desc:'Bank angle limit, so a banking airship is not counted as flying straight.',effect:'Increasing this admits more bank; decreasing it demands level wings.'},
+ {key:'maximum_altitude_range_m',name:'Maximum altitude range',unit:'m',def:100,desc:'Altitude spread allowed inside the stability window, which keeps a leg quasi-level.',effect:'Increasing this admits climbing or descending legs; decreasing it demands level flight.'},
+ {key:'maximum_vertical_speed_mps',name:'Maximum absolute vertical speed',unit:'m s-1',def:2.2,desc:'Climb or descent rate limit applied sample by sample.',effect:'Increasing this admits faster vertical motion; decreasing it demands steadier level flight.'}
 ];
 function currentStraightParams(){return (data&&data.summary&&data.summary.straight_params)||Object.fromEntries(straightFields.map(f=>[f.key,f.def]))}
 function settingsText(){let p=currentStraightParams();let header='Method: 1 Hz flight data are screened for kinematic stability, grouped into continuous candidate runs, segmented into distance-based measurement windows, and retained only when they satisfy the geometric and altitude-stability criteria.\n\n';return header+straightFields.map(f=>`${f.name} (${f.key}, ${f.unit}): ${p[f.key]??f.def}\nDefinition: ${f.desc}\nSensitivity: ${f.effect}`).join('\n\n')}
@@ -886,7 +878,7 @@ function windRoseSvg(samples){
  return `<svg viewBox="0 0 305 235" aria-label="Windrose"><text x="248" y="20" font-size="11" font-weight="600">Wind Speed</text><text x="248" y="32" font-size="10">m/s</text>${rings}${axes}${sectors}${labels}<circle cx="${cx}" cy="${cy}" r="${inner}" fill="#cfe8f3" stroke="#555"/><text x="${cx}" y="${cy+3}" text-anchor="middle" font-size="9">${(100*counts.reduce((a,b)=>a+(b[0]||0),0)/n).toFixed(1)}%</text>${bar}${legend}</svg>`
 }
 function hideLegInfo(){if(legInfoControl){map.removeControl(legInfoControl);legInfoControl=null}selectedLegId=null}
-function showLegInfo(leg){if(selectedLegId===leg.id){hideLegInfo();return}selectedLegId=leg.id;if(!legInfoControl){legInfoControl=L.control({position:'topright'});legInfoControl.onAdd=()=>L.DomUtil.create('div','leg-info');legInfoControl.addTo(map)}let el=legInfoControl.getContainer();L.DomEvent.disableClickPropagation(el);el.innerHTML=`<h4>Straight Flight leg ${leg.id}</h4><table><tr><td>Length</td><td>${(leg.distance_km||0).toFixed(2)} km</td></tr><tr><td>Duration</td><td>${fmtDuration(leg.duration_s)} mm:ss</td></tr><tr><td>Mean aircraft speed</td><td>${Number.isFinite(leg.mean_speed_mps)?leg.mean_speed_mps.toFixed(2):'n/a'} m/s</td></tr><tr><td>Mean wind</td><td>${Number.isFinite(leg.mean_wind_mps)?leg.mean_wind_mps.toFixed(2):'n/a'} m/s</td></tr><tr><td>Mean heading</td><td>${Number.isFinite(leg.mean_heading_deg)?leg.mean_heading_deg.toFixed(1):'n/a'} deg</td></tr><tr><td>Heading drift</td><td>${Number.isFinite(leg.heading_drift_deg)?leg.heading_drift_deg.toFixed(1):'n/a'} deg</td></tr><tr><td>Max cross-track</td><td>${Number.isFinite(leg.max_cross_track_m)?leg.max_cross_track_m.toFixed(1):'n/a'} m</td></tr></table>${windRoseSvg(leg.windSamples)}<div style="font-size:11px;color:#555">Click same leg again to close.</div>`}
+function showLegInfo(leg){if(selectedLegId===leg.id){hideLegInfo();return}selectedLegId=leg.id;if(!legInfoControl){legInfoControl=L.control({position:'topright'});legInfoControl.onAdd=()=>L.DomUtil.create('div','leg-info');legInfoControl.addTo(map)}let el=legInfoControl.getContainer();L.DomEvent.disableClickPropagation(el);el.innerHTML=`<h4>Straight Flight leg ${leg.id}</h4><table><tr><td>Length</td><td>${(leg.distance_km||0).toFixed(2)} km</td></tr><tr><td>Duration</td><td>${fmtDuration(leg.duration_s)} mm:ss</td></tr><tr><td>Mean aircraft speed</td><td>${Number.isFinite(leg.mean_speed_mps)?leg.mean_speed_mps.toFixed(2):'n/a'} m/s</td></tr><tr><td>Mean wind</td><td>${Number.isFinite(leg.mean_wind_mps)?leg.mean_wind_mps.toFixed(2):'n/a'} m/s</td></tr><tr><td>Mean heading</td><td>${Number.isFinite(leg.mean_heading_deg)?leg.mean_heading_deg.toFixed(1):'n/a'} deg</td></tr><tr><td>Heading SD</td><td>${Number.isFinite(leg.heading_std_deg)?leg.heading_std_deg.toFixed(1):'n/a'} deg</td></tr><tr><td>Max roll</td><td>${Number.isFinite(leg.max_roll_deg)?leg.max_roll_deg.toFixed(1):'n/a'} deg</td></tr><tr><td>Altitude range</td><td>${Number.isFinite(leg.altitude_range_m)?leg.altitude_range_m.toFixed(0):'n/a'} m</td></tr></table>${windRoseSvg(leg.windSamples)}<div style="font-size:11px;color:#555">Click same leg again to close.</div>`}
 function showConnectorInfo(legs){if(selectedLegId==='connector'){hideLegInfo();return}selectedLegId='connector';if(!legInfoControl){legInfoControl=L.control({position:'topright'});legInfoControl.onAdd=()=>L.DomUtil.create('div','leg-info');legInfoControl.addTo(map)}let el=legInfoControl.getContainer();L.DomEvent.disableClickPropagation(el);let totalKm=legs.reduce((a,l)=>a+(l.distance_km||0),0),totalS=legs.reduce((a,l)=>a+(l.duration_s||0),0);let allWind=legs.flatMap(l=>l.windSamples||[]);let meanWind=allWind.length?allWind.reduce((a,w)=>a+(w.spd||0),0)/allWind.length:NaN;el.innerHTML=`<h4>Measured flight-track reference</h4><table><tr><td>Accepted Straight Flight legs</td><td>${legs.length}</td></tr><tr><td>Total accepted-leg length</td><td>${totalKm.toFixed(2)} km</td></tr><tr><td>Total accepted-leg duration</td><td>${fmtDuration(totalS)} mm:ss</td></tr><tr><td>Mean wind in accepted legs</td><td>${Number.isFinite(meanWind)?meanWind.toFixed(2):'n/a'} m/s</td></tr></table>${windRoseSvg(allWind)}<div style="font-size:11px;color:#555">The black dashed curve is the measured flight-track reference. It is not itself a classified Straight Flight leg; only orange numbered sections passed the straight-flight criteria. Click the dashed curve again to close.</div>`}
 function ensureMap(){
  if(map)return;

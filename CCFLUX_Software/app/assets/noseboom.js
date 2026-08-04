@@ -26,17 +26,14 @@
     cividis: [[0,34,78],[40,75,112],[101,105,112],[160,137,91],[253,234,69]]
   };
   const settingInfo = {
-    min_speed_mps: ['Minimum aircraft speed', 'm/s', 'Samples below this ground speed are excluded.', 8],
-    max_turn_rate_dps: ['Maximum turn rate', '°/s', 'Limits rapid heading changes in candidate samples.', 1.5],
-    max_roll_deg: ['Maximum absolute roll', '°', 'Limits aircraft bank angle.', 8],
-    heading_window_s: ['Heading stability window', 's', 'Window used for heading-range stability.', 20],
-    max_heading_range_deg: ['Maximum heading range', '°', 'Maximum heading variation inside the stability window.', 12],
-    min_leg_seconds: ['Minimum leg duration', 's', 'Minimum accepted duration for one straight-flight leg.', 60],
-    min_leg_distance_m: ['Minimum leg distance', 'm', 'Minimum accepted ground-track distance.', 1000],
-    target_leg_distance_m: ['Target leg distance', 'm', 'Target distance used to divide long candidate runs.', 2000],
-    max_leg_heading_drift_deg: ['Maximum leg heading drift', '°', 'Maximum unwrapped heading spread over a leg.', 20],
-    max_cross_track_m: ['Maximum cross-track deviation', 'm', 'Maximum distance from the endpoint-defined reference line.', 80],
-    max_altitude_deviation_m: ['Maximum altitude deviation', 'm', 'Maximum altitude departure from the leg mean.', 50]
+    minimum_ground_speed_mps: ['Minimum ground speed', 'm/s', 'Forward motion the Zeppelin must hold; slower samples are not a transect.', 8],
+    minimum_segment_duration_s: ['Minimum segment duration', 's', 'Shortest continuous period accepted as one straight-flight leg.', 60],
+    heading_window_s: ['Heading stability window', 's', 'Centred window over which heading steadiness and altitude range are measured.', 30],
+    maximum_heading_std_deg: ['Maximum heading standard deviation', '°', 'Circular standard deviation of heading inside the window.', 10],
+    maximum_heading_rate_dps: ['Maximum heading rate', '°/s', 'How fast the heading may change between samples.', 3],
+    maximum_roll_angle_deg: ['Maximum absolute roll', '°', 'Bank angle limit, so a turning airship is not counted as straight.', 10],
+    maximum_altitude_range_m: ['Maximum altitude range', 'm', 'Altitude spread allowed inside the stability window.', 100],
+    maximum_vertical_speed_mps: ['Maximum absolute vertical speed', 'm/s', 'Climb or descent rate limit for quasi-level flight.', 2.2]
   };
   const plotConfig = { responsive: true, scrollZoom: true, displayModeBar: true, displaylogo: false, doubleClick: 'reset', toImageButtonOptions: { format: 'png', scale: 2 } };
   const plotFont = { family: 'Times New Roman, Times, serif', size: 14, color: '#102534' };
@@ -143,7 +140,7 @@
     if (!legInfoControl) { legInfoControl = L.control({position:'topright'}); legInfoControl.onAdd = () => L.DomUtil.create('div','leg-info'); legInfoControl.addTo(map); }
     const element = legInfoControl.getContainer(); L.DomEvent.disableClickPropagation(element);
     const display = value => finite(value) ? Number(value).toFixed(2) : 'n/a';
-    element.innerHTML = `<h3>Straight Flight leg ${escapeHtml(leg.id)}</h3><table><tr><td>Length</td><td>${display(leg.distance_km)} km</td></tr><tr><td>Duration</td><td>${display(leg.duration_s)} s</td></tr><tr><td>Mean aircraft speed</td><td>${display(leg.mean_speed_mps)} m/s</td></tr><tr><td>Mean wind</td><td>${display(leg.mean_wind_mps)} m/s</td></tr><tr><td>Mean heading</td><td>${display(leg.mean_heading_deg)}°</td></tr><tr><td>Heading drift</td><td>${display(leg.heading_drift_deg)}°</td></tr><tr><td>Maximum cross-track</td><td>${display(leg.max_cross_track_m)} m</td></tr></table>${windRoseSvg(leg.windSamples)}<small>Click this leg again to hide the Wind Rose.</small>`;
+    element.innerHTML = `<h3>Straight Flight leg ${escapeHtml(leg.id)}</h3><table><tr><td>Length</td><td>${display(leg.distance_km)} km</td></tr><tr><td>Duration</td><td>${display(leg.duration_s)} s</td></tr><tr><td>Mean aircraft speed</td><td>${display(leg.mean_speed_mps)} m/s</td></tr><tr><td>Mean wind</td><td>${display(leg.mean_wind_mps)} m/s</td></tr><tr><td>Mean heading</td><td>${display(leg.mean_heading_deg)}°</td></tr><tr><td>Heading SD</td><td>${display(leg.heading_std_deg)}°</td></tr><tr><td>Maximum roll</td><td>${display(leg.max_roll_deg)}°</td></tr><tr><td>Altitude range</td><td>${display(leg.altitude_range_m)} m</td></tr><tr><td>Maximum vertical speed</td><td>${display(leg.max_vertical_speed_mps)} m/s</td></tr></table>${windRoseSvg(leg.windSamples)}<small>Click this leg again to hide the Wind Rose.</small>`;
   }
   async function makeLayers(route) {
     const width = Math.max(1, Math.min(20, Number(byId('lineWidthInput').value) || 5));
@@ -349,6 +346,49 @@
   function showViewMenu(event,panel,path,straight=false){event.preventDefault();viewMenuContext={panel,path};const menu=byId('viewMenu');byId('menuCurrentSettings').hidden=!straight;byId('menuChangeSettings').hidden=!straight;menu.style.left=`${Math.min(event.clientX,window.innerWidth-270)}px`;menu.style.top=`${Math.min(event.clientY,window.innerHeight-190)}px`;menu.classList.add('show');}
   function closeViewMenu(){byId('viewMenu').classList.remove('show');}
   async function openFullscreen(panelName){closeViewMenu();const target=panelName==='map'?byId('mapCard'):byId('statsCard');if(!document.fullscreenElement)await target.requestFullscreen();else await document.exitFullscreen();setTimeout(()=>{if(map)map.invalidateSize(false);document.querySelectorAll('#statsView .js-plotly-plot, #qcView .js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));},180);}
+
+  // The methods statement is written from the settings in force at the moment
+  // it is opened, so a reader copying it always quotes the thresholds that
+  // produced the legs on screen rather than the defaults.
+  function straightSettingValue(key) {
+    const settings = payload?.data?.straight_settings || {};
+    const value = settings[key];
+    const fallback = settingInfo[key] ? settingInfo[key][3] : null;
+    const number = Number(value ?? fallback);
+    return Number.isFinite(number) ? number : fallback;
+  }
+  function methodsStatement() {
+    const value = key => {
+      const number = straightSettingValue(key);
+      return Number.isFinite(Number(number))
+        ? String(Number(number)).replace(/\.0$/, '') : '—';
+    };
+    return 'Straight-flight legs were identified using a moving-window stability test '
+      + 'applied to the 1 Hz resampled noseboom/INS data. A flight segment was accepted '
+      + 'as a straight leg when the Zeppelin maintained sufficient forward motion and '
+      + 'quasi-steady attitude over a continuous period. The criteria were: ground speed '
+      + `≥ ${value('minimum_ground_speed_mps')} m s⁻¹, segment duration `
+      + `≥ ${value('minimum_segment_duration_s')} s, heading-stability window = `
+      + `${value('heading_window_s')} s, circular heading standard deviation ≤ `
+      + `${value('maximum_heading_std_deg')}°, heading-rate ≤ `
+      + `${value('maximum_heading_rate_dps')}° s⁻¹, absolute roll angle ≤ `
+      + `${value('maximum_roll_angle_deg')}°, altitude range within the window ≤ `
+      + `${value('maximum_altitude_range_m')} m, and absolute vertical speed ≤ `
+      + `${value('maximum_vertical_speed_mps')} m s⁻¹. `
+      + 'Consecutive samples satisfying all criteria were merged into one straight-flight '
+      + 'leg. Leg distance was calculated from consecutive latitude/longitude and leg '
+      + 'duration was calculated from Airflow_UTCcorr_Nanoseconds_ns.';
+  }
+  function showMethods() {
+    const legs = (payload?.data?.straight_metrics || []).length;
+    byId('methodsText').textContent = methodsStatement();
+    byId('methodsNote').textContent = legs
+      ? `${legs} straight-flight leg(s) met these criteria in the selected interval.`
+      : 'No straight-flight leg met these criteria in the selected interval.';
+    byId('methodsModal').classList.add('show');
+  }
+  function closeMethods() { byId('methodsModal').classList.remove('show'); }
+
   function showSettings(editable){const settings=payload?.data?.straight_settings||{},body=byId('settingsBody');body.innerHTML=`<p>These thresholds are applied to the preserved 1 Hz straight-flight classifier. Recalculation first creates a temporary visualization; you decide afterward whether it is saved in the Flight Project.</p><div class="settings-grid">${Object.entries(settingInfo).map(([key,[name,unit,help,defaultValue]])=>`<div class="setting"><label>${escapeHtml(name)} [${escapeHtml(unit)}]</label><input data-setting="${key}" type="number" step="any" value="${escapeHtml(settings[key]??defaultValue)}" ${editable?'':'disabled'} /><small>${escapeHtml(help)}</small></div>`).join('')}</div>`;byId('settingsActions').innerHTML=editable?'<button class="btn" id="settingsCancel">Cancel</button><button class="btn" id="settingsReset">Reset settings</button><button class="btn primary" id="settingsSave">Save settings and Proceed</button>':'';byId('settingsModal').classList.add('show');if(editable){byId('settingsCancel').onclick=closeSettings;byId('settingsReset').onclick=resetSettings;byId('settingsSave').onclick=saveSettingsAndProceed;}}
   function closeSettings(){byId('settingsModal').classList.remove('show');}
   function readSettings(){const settings={};for(const input of document.querySelectorAll('[data-setting]')){const value=Number(input.value);if(!Number.isFinite(value)||value<=0)throw new Error(`${settingInfo[input.dataset.setting][0]} must be greater than zero`);settings[input.dataset.setting]=value;}return settings;}
@@ -529,7 +569,7 @@
   byId('mainGuiBtn').onclick=()=>{window.location.href='/';};byId('refreshBtn').onclick=refresh;
   ['route','wind','straight'].forEach(layer=>{const button=byId(`${layer}Btn`);button.addEventListener('click',event=>activateLinkedView(event,()=>showLayer(layer)));button.addEventListener('contextmenu',event=>showViewMenu(event,'map',layerRoutes[layer],layer==='straight'));});
   document.querySelectorAll('[data-stat]').forEach(button=>{button.addEventListener('click',event=>activateLinkedView(event,()=>renderStats(button.dataset.stat)));button.addEventListener('contextmenu',event=>showViewMenu(event,'stats',statRoutes[button.dataset.stat],false));});
-  byId('resetMapBtn').onclick=()=>resetMap();byId('mapFullscreenBtn').onclick=()=>openFullscreen('map');byId('menuFullscreen').onclick=()=>openFullscreen(viewMenuContext.panel);byId('menuNewTab').onclick=()=>{closeViewMenu();window.open(viewMenuContext.path, '_blank', 'noopener');};byId('menuCurrentSettings').onclick=()=>showSettings(false);byId('menuChangeSettings').onclick=()=>showSettings(true);byId('settingsClose').onclick=closeSettings;byId('settingsModal').onclick=event=>{if(event.target===byId('settingsModal'))closeSettings();};
+  byId('resetMapBtn').onclick=()=>resetMap();byId('mapFullscreenBtn').onclick=()=>openFullscreen('map');byId('menuFullscreen').onclick=()=>openFullscreen(viewMenuContext.panel);byId('menuNewTab').onclick=()=>{closeViewMenu();window.open(viewMenuContext.path, '_blank', 'noopener');};byId('menuCurrentSettings').onclick=()=>showSettings(false);byId('menuChangeSettings').onclick=()=>showSettings(true);byId('methodsBtn').onclick=showMethods;byId('methodsClose').onclick=closeMethods;byId('methodsDone').onclick=closeMethods;byId('methodsCopy').onclick=()=>navigator.clipboard?.writeText(methodsStatement());byId('settingsClose').onclick=closeSettings;byId('settingsModal').onclick=event=>{if(event.target===byId('settingsModal'))closeSettings();};
   byId('bufferInput').oninput=()=>resetMap(false);byId('lineWidthInput').onchange=async()=>{showBusy('Updating map','Rebuilding bounded route layers.');try{await makeLayers(points());showLayer(activeLayer,false,false);}finally{hideBusy();}};byId('colorScheme').onchange=byId('lineWidthInput').onchange;
   byId('dataExportBtn').onclick=openDownload;byId('downloadClose').onclick=closeDownload;byId('downloadCancel').onclick=closeDownload;byId('downloadStart').onclick=startDataDownload;byId('downloadVariables').onchange=syncDownloadOptions;byId('downloadProgressClose').onclick=()=>byId('downloadProgressModal').classList.remove('show');syncDownloadOptions();byId('statisticsExportBtn').onclick=openExport;byId('exportClose').onclick=closeExport;byId('exportCancel').onclick=closeExport;byId('exportStart').onclick=startStatisticsExport;
   document.addEventListener('click',event=>{if(!event.target.closest('#viewMenu'))closeViewMenu();});window.addEventListener('popstate',()=>{const view=viewFromPath();if(view.layer)showLayer(view.layer,false,false);if(view.stat)renderStats(view.stat,false);});window.addEventListener('fullscreenchange',()=>setTimeout(()=>{if(map)map.invalidateSize(false);document.querySelectorAll('#statsView .js-plotly-plot, #qcView .js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));},180));

@@ -23,7 +23,7 @@ def _payload():
         "hist": {"wind_mps": [4.0, 6.0, 8.0, 7.0]},
         "frequency": [{"time": "2026-07-27T05:19:52+00:00", "frequency_hz": 10.0, "sample_count": 10}],
         "spectra": {"wind_mps": {"label": "Wind speed", "column": "wind_mps", "frequency_hz": [0.1, 0.2], "psd": [2.0, 1.0]}},
-        "straight_settings": {"min_speed_mps": 10.0, "min_leg_distance_m": 500.0, "target_leg_distance_m": 1000.0},
+        "straight_settings": {"minimum_ground_speed_mps": 10.0, "minimum_segment_duration_s": 90.0, "maximum_roll_angle_deg": 12.0},
     }
 
 
@@ -118,14 +118,14 @@ def test_saved_project_rehydrates_noseboom_settings_and_mirrors_browser_logs(tmp
 
     result = backend.open_project(project_file)
     view = backend.noseboom_view()
-    settings = backend.update_noseboom_straight_settings({"min_speed_mps": 11.0})
+    settings = backend.update_noseboom_straight_settings({"minimum_ground_speed_mps": 11.0})
     backend.log_noseboom_view_event("buffer changed to 700 m")
 
     assert not result["cancelled"]
     assert view["ready"]
     assert len(view["data"]["points"]) == 4
-    assert settings["min_speed_mps"] == 11.0
-    assert json.loads(quicklook.read_text(encoding="utf-8"))["straight_settings"]["min_speed_mps"] == 11.0
+    assert settings["minimum_ground_speed_mps"] == 11.0
+    assert json.loads(quicklook.read_text(encoding="utf-8"))["straight_settings"]["minimum_ground_speed_mps"] == 11.0
     assert backend.noseboom_export_file() == export
     project_log = tmp_path / "output" / "flight" / "logs" / "processing.jsonl"
     assert project_log.is_file()
@@ -164,7 +164,7 @@ def test_http_noseboom_routes_api_export_logo_and_settings(tmp_path: Path):
             disposition = response.headers["Content-Disposition"]
         request = urllib.request.Request(
             base + "/api/noseboom/straight-settings",
-            data=json.dumps({"settings": {"min_speed_mps": 12.0}}).encode("utf-8"),
+            data=json.dumps({"settings": {"minimum_ground_speed_mps": 12.0}}).encode("utf-8"),
             headers={"Content-Type": "application/json", "Origin": base},
             method="POST",
         )
@@ -185,8 +185,8 @@ def test_http_noseboom_routes_api_export_logo_and_settings(tmp_path: Path):
         assert state["data"]["points"][1]["straight"] is True
         assert state["data"]["hist"]["wind_mps"]
         assert saved_settings["saved"]
-        assert saved_settings["settings"]["min_speed_mps"] == 12.0
-        assert json.loads(quicklook.read_text(encoding="utf-8"))["straight_settings"]["min_speed_mps"] == 12.0
+        assert saved_settings["settings"]["minimum_ground_speed_mps"] == 12.0
+        assert json.loads(quicklook.read_text(encoding="utf-8"))["straight_settings"]["minimum_ground_speed_mps"] == 12.0
         assert b'class="ccflux-logo"' in logo_html
         assert b"<iframe" not in logo_html
         assert logo.startswith(b"<svg")

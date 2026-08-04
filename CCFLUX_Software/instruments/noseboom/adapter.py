@@ -643,11 +643,17 @@ def _map_payload(one_hz, frequency=None, spectra=None) -> dict[str, object]:
                 "mean_heading_deg": _finite_or_none(
                     metric.get("mean_heading_deg")
                 ),
-                "heading_drift_deg": _finite_or_none(
-                    metric.get("heading_drift_deg")
+                "heading_std_deg": _finite_or_none(
+                    metric.get("median_heading_std_deg")
                 ),
-                "max_cross_track_m": _finite_or_none(
-                    metric.get("max_cross_track_m")
+                "max_roll_deg": _finite_or_none(
+                    metric.get("max_abs_roll_deg")
+                ),
+                "altitude_range_m": _finite_or_none(
+                    metric.get("altitude_range_m")
+                ),
+                "max_vertical_speed_mps": _finite_or_none(
+                    metric.get("max_abs_vertical_speed_mps")
                 ),
                 "windSamples": wind_samples,
             })

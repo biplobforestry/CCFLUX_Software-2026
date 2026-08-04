@@ -1330,7 +1330,7 @@ def test_straight_flight_recalculation_runs_in_background_with_live_progress(mon
         return {"saved": False, "temporary": True, "data": {"points": [], "straight_legs": []}}
 
     monkeypatch.setattr(backend, "preview_noseboom_straight_settings", fake_preview)
-    started = backend.start_noseboom_straight_recalculation({"min_speed_mps": 8})
+    started = backend.start_noseboom_straight_recalculation({"minimum_ground_speed_mps": 8})
     backend._noseboom_recalculation_thread.join(timeout=2)
     completed = backend.noseboom_straight_recalculation_progress()
 

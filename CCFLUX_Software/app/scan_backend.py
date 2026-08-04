@@ -593,6 +593,21 @@ class FolderDialog:
         )
 
 
+# The straight-flight criteria, as the moving-window stability test names
+# them. Changing this tuple is what adds or removes a setting the operator can
+# edit; the defaults live with the detection itself.
+STRAIGHT_LEG_SETTINGS = (
+    "minimum_ground_speed_mps",
+    "minimum_segment_duration_s",
+    "heading_window_s",
+    "maximum_heading_std_deg",
+    "maximum_heading_rate_dps",
+    "maximum_roll_angle_deg",
+    "maximum_altitude_range_m",
+    "maximum_vertical_speed_mps",
+)
+
+
 class DashboardScanBackend:
     """Own one cancellable scan while exposing thread-safe dashboard snapshots."""
 
@@ -3338,13 +3353,7 @@ class DashboardScanBackend:
 
         report_progress(2.0, "Validating straight-flight settings.")
 
-        allowed = {
-            "min_speed_mps", "max_turn_rate_dps", "max_roll_deg",
-            "heading_window_s", "max_heading_range_deg", "min_leg_seconds",
-            "min_leg_distance_m", "target_leg_distance_m",
-            "max_leg_heading_drift_deg", "max_cross_track_m",
-            "max_altitude_deviation_m",
-        }
+        allowed = set(STRAIGHT_LEG_SETTINGS)
         if not isinstance(settings, dict) or not settings:
             raise ValueError("Straight-flight settings must be a non-empty object")
         parsed: dict[str, float] = {}
@@ -3854,13 +3863,7 @@ class DashboardScanBackend:
         return None
 
     def update_noseboom_straight_settings(self, settings: dict[str, object]) -> dict[str, float]:
-        allowed = {
-            "min_speed_mps", "max_turn_rate_dps", "max_roll_deg",
-            "heading_window_s", "max_heading_range_deg", "min_leg_seconds",
-            "min_leg_distance_m", "target_leg_distance_m",
-            "max_leg_heading_drift_deg", "max_cross_track_m",
-            "max_altitude_deviation_m",
-        }
+        allowed = set(STRAIGHT_LEG_SETTINGS)
         if not isinstance(settings, dict) or not settings:
             raise ValueError("Straight-flight settings must be a non-empty object")
         parsed: dict[str, float] = {}
