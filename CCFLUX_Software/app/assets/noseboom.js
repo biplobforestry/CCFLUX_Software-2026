@@ -18,7 +18,7 @@
   const nextFrame = () => new Promise(resolve => requestAnimationFrame(() => resolve()));
   const points = () => browserPoints;
   const layerRoutes = { route: '/noseboom/flight-route', wind: '/noseboom/wind-speed', straight: '/noseboom/straight-flight' };
-  const statRoutes = { hist: '/noseboom/statistics/histogram', freq: '/noseboom/statistics/frequency', alt: '/noseboom/statistics/altitude-profile', spectra: '/noseboom/statistics/wind-spectra' };
+  const statRoutes = { hist: '/noseboom/statistics/histogram', freq: '/noseboom/statistics/frequency', qc: '/noseboom/statistics/qc', alt: '/noseboom/statistics/altitude-profile', spectra: '/noseboom/statistics/wind-spectra' };
   const schemes = {
     turbo: [[48,18,59],[70,98,215],[53,171,248],[26,228,182],[162,252,60],[249,186,56],[233,75,53],[122,4,3]],
     viridis: [[68,1,84],[59,82,139],[33,145,140],[94,201,98],[253,231,37]],
@@ -66,6 +66,7 @@
     if (path.endsWith('/straight-flight')) return { layer: 'straight' };
     if (path.endsWith('/flight-route') || path.endsWith('/flightroot')) return { layer: 'route' };
     if (path.endsWith('/statistics/frequency')) return { stat: 'freq' };
+    if (path.endsWith('/statistics/qc')) return { stat: 'qc' };
     if (path.endsWith('/statistics/altitude-profile')) return { stat: 'alt' };
     if (path.endsWith('/statistics/wind-spectra')) return { stat: 'spectra' };
     if (path.includes('/statistics/')) return { stat: 'hist' };
@@ -180,8 +181,139 @@
     return {tickmode:'array',tickvals,ticktext};
   }
   function percentile(values, percent) { const sorted=values.filter(Number.isFinite).sort((a,b)=>a-b); if(!sorted.length)return null; const position=(sorted.length-1)*percent/100, lower=Math.floor(position), upper=Math.ceil(position); return sorted[lower]+(sorted[upper]-sorted[lower])*(position-lower); }
-  function frequencyDistribution(values, bins=48) { const clean=values.filter(Number.isFinite); if(clean.length<2)return {centers:[],curve:[],start:0,end:1,size:1}; let start=Math.min(...clean),end=Math.max(...clean); if(start===end){start-=.5;end+=.5;} const size=(end-start)/bins,counts=Array(bins).fill(0); clean.forEach(value=>{const index=Math.min(bins-1,Math.max(0,Math.floor((value-start)/size)));counts[index]+=1;}); const sigma=1.35,radius=4,kernel=[]; for(let offset=-radius;offset<=radius;offset+=1)kernel.push(Math.exp(-.5*(offset/sigma)**2)); const scale=kernel.reduce((a,b)=>a+b,0); const curve=counts.map((_,index)=>kernel.reduce((sum,weight,k)=>sum+weight*(counts[index+k-radius]||0),0)/scale); return {centers:counts.map((_,index)=>start+(index+.5)*size),curve,start,end,size}; }  async function renderStats(kind='hist', shouldUpdateUrl=true, manageBusy=true) {
-    if(!payload?.data?.available)return; const token=++renderToken; activeStat=kind; document.querySelectorAll('[data-stat]').forEach(button=>button.classList.toggle('active',button.dataset.stat===kind)); if(shouldUpdateUrl)updateViewUrl(statRoutes[kind]); if(manageBusy)showBusy('Preparing scientific plots','Rendering the selected Noseboom statistical view.'); await nextFrame();
+  function frequencyDistribution(values, bins=48) { const clean=values.filter(Number.isFinite); if(clean.length<2)return {centers:[],curve:[],start:0,end:1,size:1}; let start=Math.min(...clean),end=Math.max(...clean); if(start===end){start-=.5;end+=.5;} const size=(end-start)/bins,counts=Array(bins).fill(0); clean.forEach(value=>{const index=Math.min(bins-1,Math.max(0,Math.floor((value-start)/size)));counts[index]+=1;}); const sigma=1.35,radius=4,kernel=[]; for(let offset=-radius;offset<=radius;offset+=1)kernel.push(Math.exp(-.5*(offset/sigma)**2)); const scale=kernel.reduce((a,b)=>a+b,0); const curve=counts.map((_,index)=>kernel.reduce((sum,weight,k)=>sum+weight*(counts[index+k-radius]||0),0)/scale); return {centers:counts.map((_,index)=>start+(index+.5)*size),curve,start,end,size}; }
+  // --- Quality control -----------------------------------------------------
+  // The checks follow the campaign evaluation script: the flow-uncertainty
+  // limit test, wind direction against heading and ground track, the vertical
+  // wind, and wind speed and direction against the nearest airport's METAR
+  // reports. The airport is always named, so a reader knows whose observations
+  // the comparison used.
+  let qcPayload = null;
+  const QC_PLOTS = ['qcFlow','qcDirection','qcVertical','qcWindSpeed','qcWindDirection'];
+  const qcConfig = {responsive:true,displaylogo:false,
+    toImageButtonOptions:{format:'png',scale:3}};
+  function qcLayout(title, yTitle, extra={}) {
+    return {
+      title:{text:title,x:.5,y:1,yanchor:'top',pad:{t:8},font:{size:14}},
+      paper_bgcolor:'#ffffff', plot_bgcolor:'#ffffff',
+      font:{family:'Arial, sans-serif',size:11,color:'#172431'},
+      margin:{l:64,r:18,t:64,b:52},
+      xaxis:{title:'UTC time',gridcolor:'#dfe7ec',automargin:true},
+      yaxis:{title:yTitle,gridcolor:'#dfe7ec',automargin:true},
+      legend:{orientation:'h',y:1.02,yanchor:'bottom',x:0,font:{size:10}},
+      hovermode:'x unified', ...extra
+    };
+  }
+  const qcNumber = (value, digits=3) =>
+    Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : '—';
+
+  function renderQcFlow(section) {
+    Plotly.react('qcFlow', [
+      {type:'scattergl',mode:'lines',x:section.time,y:section.alpha,name:'alpha',
+       line:{width:1.2,color:'#0072B2'}},
+      {type:'scattergl',mode:'lines',x:section.time,y:section.beta,name:'beta',
+       line:{width:1.2,color:'#D55E00',dash:'dash'}}
+    ], qcLayout(
+      `Flow-uncertainty angles · ${section.samples_at_limit.toLocaleString()} sample(s) at the 90° limit `
+      + `(${section.percentage_at_limit.toFixed(4)}%)`,
+      'Uncertainty [deg]'), qcConfig);
+  }
+  function renderQcDirection(section) {
+    Plotly.react('qcDirection', [
+      {type:'scattergl',mode:'lines',x:section.time,y:section.wind_direction,
+       name:'Wind direction',line:{width:1.2,color:'#0072B2'}},
+      {type:'scattergl',mode:'lines',x:section.time,y:section.heading,
+       name:'Heading',line:{width:1.1,color:'#D55E00'},opacity:.85},
+      {type:'scattergl',mode:'lines',x:section.time,y:section.track,
+       name:'Track',line:{width:1.1,color:'#009E73'},opacity:.85}
+    ], qcLayout(
+      `Wind direction, heading and ground track · circular r ${qcNumber(section.wind_track_correlation)} (track), `
+      + `${qcNumber(section.wind_heading_correlation)} (heading)`,
+      'Direction [deg]',
+      {yaxis:{title:'Direction [deg]',range:[0,360],tickvals:[0,90,180,270,360],
+              gridcolor:'#dfe7ec',automargin:true}}), qcConfig);
+  }
+  function renderQcVertical(section) {
+    Plotly.react('qcVertical', [
+      {type:'scattergl',mode:'lines',x:section.time,y:section.vertical_wind,
+       name:'Instantaneous',line:{width:1,color:'#8c9aa5'},opacity:.55},
+      {type:'scattergl',mode:'lines',x:section.time,y:section.rolling_mean,
+       name:'10-minute mean',line:{width:1.8,color:'#CC2936'}}
+    ], qcLayout(
+      `Vertical wind speed · mean ${qcNumber(section.mean)} m/s, sd ${qcNumber(section.standard_deviation)} m/s`,
+      'Vertical wind [m s⁻¹]'), qcConfig);
+  }
+  function qcValidationTraces(section, name) {
+    const airport = section.airport;
+    const label = airport ? `${airport.icao} · ${airport.name}` : 'Airport METAR';
+    const traces = [{type:'scattergl',mode:'lines',x:section.time,y:section.noseboom,
+      name:'Noseboom',line:{width:1.2,color:'#0072B2'}}];
+    if ((section.report_time || []).length) {
+      traces.push({type:'scatter',mode:'markers',x:section.report_time,y:section.report_value,
+        name:label,marker:{size:7,color:'#D55E00',symbol:'circle'}});
+    }
+    return traces;
+  }
+  function qcValidationTitle(section, quantity, unit) {
+    const airport = section.airport;
+    if (!(section.report_time || []).length) {
+      return `${quantity} · no METAR report from ${airport ? airport.icao : 'any airport'} in this window`;
+    }
+    return `${quantity} vs ${airport.icao} ${airport.name} (${airport.distance_km.toFixed(1)} km) · `
+      + `bias ${qcNumber(section.bias)} ${unit}, MAE ${qcNumber(section.mae)} ${unit}`;
+  }
+  function renderQcWindSpeed(section) {
+    Plotly.react('qcWindSpeed', qcValidationTraces(section),
+      qcLayout(qcValidationTitle(section,'Wind speed','m/s'), 'Wind speed [m s⁻¹]'), qcConfig);
+  }
+  function renderQcWindDirection(section) {
+    Plotly.react('qcWindDirection', qcValidationTraces(section),
+      qcLayout(qcValidationTitle(section,'Wind direction','deg'), 'Direction [deg]',
+        {yaxis:{title:'Direction [deg]',range:[0,360],tickvals:[0,90,180,270,360],
+                gridcolor:'#dfe7ec',automargin:true}}), qcConfig);
+  }
+  async function renderQualityControl() {
+    byId('statsView').hidden = true;
+    byId('qcView').hidden = false;
+    if (!qcPayload) {
+      const response = await api('/api/noseboom/qc');
+      if (!response.ready) {
+        byId('qcNote').textContent = response.message || 'Quality control data are not available.';
+        QC_PLOTS.forEach(id => Plotly.purge(id));
+        return;
+      }
+      qcPayload = response.data;
+    }
+    const data = qcPayload;
+    renderQcFlow(data.flow_uncertainty);
+    renderQcDirection(data.direction_heading_track);
+    renderQcVertical(data.vertical_wind);
+    renderQcWindSpeed(data.wind_speed_validation);
+    renderQcWindDirection(data.wind_direction_validation);
+    const airport = data.metar?.airport;
+    const reports = data.metar?.reports ?? 0;
+    byId('qcNote').textContent =
+      `${data.record_count.toLocaleString()} records evaluated. `
+      + (airport
+          ? `Wind validated against ${airport.icao} ${airport.name}, `
+            + `${airport.distance_km.toFixed(1)} km from the flight's median position; `
+            + `${reports} METAR report(s) in the window`
+            + (data.metar.error ? ` (${data.metar.error})` : '')
+            + `. Source: ${data.metar.source}.`
+          : 'No configured airport could be selected, so the wind comparison has no reference.');
+    QC_PLOTS.forEach(id => Plotly.Plots.resize(byId(id)));
+  }
+
+  async function renderStats(kind='hist', shouldUpdateUrl=true, manageBusy=true) {
+    if(!payload?.data?.available)return; const token=++renderToken; activeStat=kind;
+    if(kind==='qc'){
+      document.querySelectorAll('[data-stat]').forEach(button=>button.classList.toggle('active',button.dataset.stat===kind));
+      if(shouldUpdateUrl)updateViewUrl(statRoutes[kind]);
+      if(manageBusy)showBusy('Preparing quality control','Reading the stored Noseboom checks.');
+      try{ await renderQualityControl(); } finally { if(manageBusy)hideBusy(); }
+      return;
+    }
+    byId('qcView').hidden=true; byId('statsView').hidden=false; document.querySelectorAll('[data-stat]').forEach(button=>button.classList.toggle('active',button.dataset.stat===kind)); if(shouldUpdateUrl)updateViewUrl(statRoutes[kind]); if(manageBusy)showBusy('Preparing scientific plots','Rendering the selected Noseboom statistical view.'); await nextFrame();
     try {
       if(!window.Plotly)throw new Error('The scientific plotting library is unavailable'); const view=byId('statsView'); Plotly.purge(view); view.innerHTML=''; view.className='chart';
       if(kind==='hist'){
@@ -216,7 +348,7 @@
 
   function showViewMenu(event,panel,path,straight=false){event.preventDefault();viewMenuContext={panel,path};const menu=byId('viewMenu');byId('menuCurrentSettings').hidden=!straight;byId('menuChangeSettings').hidden=!straight;menu.style.left=`${Math.min(event.clientX,window.innerWidth-270)}px`;menu.style.top=`${Math.min(event.clientY,window.innerHeight-190)}px`;menu.classList.add('show');}
   function closeViewMenu(){byId('viewMenu').classList.remove('show');}
-  async function openFullscreen(panelName){closeViewMenu();const target=panelName==='map'?byId('mapCard'):byId('statsCard');if(!document.fullscreenElement)await target.requestFullscreen();else await document.exitFullscreen();setTimeout(()=>{if(map)map.invalidateSize(false);document.querySelectorAll('#statsView .js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));},180);}
+  async function openFullscreen(panelName){closeViewMenu();const target=panelName==='map'?byId('mapCard'):byId('statsCard');if(!document.fullscreenElement)await target.requestFullscreen();else await document.exitFullscreen();setTimeout(()=>{if(map)map.invalidateSize(false);document.querySelectorAll('#statsView .js-plotly-plot, #qcView .js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));},180);}
   function showSettings(editable){const settings=payload?.data?.straight_settings||{},body=byId('settingsBody');body.innerHTML=`<p>These thresholds are applied to the preserved 1 Hz straight-flight classifier. Recalculation first creates a temporary visualization; you decide afterward whether it is saved in the Flight Project.</p><div class="settings-grid">${Object.entries(settingInfo).map(([key,[name,unit,help,defaultValue]])=>`<div class="setting"><label>${escapeHtml(name)} [${escapeHtml(unit)}]</label><input data-setting="${key}" type="number" step="any" value="${escapeHtml(settings[key]??defaultValue)}" ${editable?'':'disabled'} /><small>${escapeHtml(help)}</small></div>`).join('')}</div>`;byId('settingsActions').innerHTML=editable?'<button class="btn" id="settingsCancel">Cancel</button><button class="btn" id="settingsReset">Reset settings</button><button class="btn primary" id="settingsSave">Save settings and Proceed</button>':'';byId('settingsModal').classList.add('show');if(editable){byId('settingsCancel').onclick=closeSettings;byId('settingsReset').onclick=resetSettings;byId('settingsSave').onclick=saveSettingsAndProceed;}}
   function closeSettings(){byId('settingsModal').classList.remove('show');}
   function readSettings(){const settings={};for(const input of document.querySelectorAll('[data-setting]')){const value=Number(input.value);if(!Number.isFinite(value)||value<=0)throw new Error(`${settingInfo[input.dataset.setting][0]} must be greater than zero`);settings[input.dataset.setting]=value;}return settings;}
@@ -400,7 +532,7 @@
   byId('resetMapBtn').onclick=()=>resetMap();byId('mapFullscreenBtn').onclick=()=>openFullscreen('map');byId('menuFullscreen').onclick=()=>openFullscreen(viewMenuContext.panel);byId('menuNewTab').onclick=()=>{closeViewMenu();window.open(viewMenuContext.path, '_blank', 'noopener');};byId('menuCurrentSettings').onclick=()=>showSettings(false);byId('menuChangeSettings').onclick=()=>showSettings(true);byId('settingsClose').onclick=closeSettings;byId('settingsModal').onclick=event=>{if(event.target===byId('settingsModal'))closeSettings();};
   byId('bufferInput').oninput=()=>resetMap(false);byId('lineWidthInput').onchange=async()=>{showBusy('Updating map','Rebuilding bounded route layers.');try{await makeLayers(points());showLayer(activeLayer,false,false);}finally{hideBusy();}};byId('colorScheme').onchange=byId('lineWidthInput').onchange;
   byId('dataExportBtn').onclick=openDownload;byId('downloadClose').onclick=closeDownload;byId('downloadCancel').onclick=closeDownload;byId('downloadStart').onclick=startDataDownload;byId('downloadVariables').onchange=syncDownloadOptions;byId('downloadProgressClose').onclick=()=>byId('downloadProgressModal').classList.remove('show');syncDownloadOptions();byId('statisticsExportBtn').onclick=openExport;byId('exportClose').onclick=closeExport;byId('exportCancel').onclick=closeExport;byId('exportStart').onclick=startStatisticsExport;
-  document.addEventListener('click',event=>{if(!event.target.closest('#viewMenu'))closeViewMenu();});window.addEventListener('popstate',()=>{const view=viewFromPath();if(view.layer)showLayer(view.layer,false,false);if(view.stat)renderStats(view.stat,false);});window.addEventListener('fullscreenchange',()=>setTimeout(()=>{if(map)map.invalidateSize(false);document.querySelectorAll('#statsView .js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));},180));
+  document.addEventListener('click',event=>{if(!event.target.closest('#viewMenu'))closeViewMenu();});window.addEventListener('popstate',()=>{const view=viewFromPath();if(view.layer)showLayer(view.layer,false,false);if(view.stat)renderStats(view.stat,false);});window.addEventListener('fullscreenchange',()=>setTimeout(()=>{if(map)map.invalidateSize(false);document.querySelectorAll('#statsView .js-plotly-plot, #qcView .js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));},180));
   let resizeTimer=null;new ResizeObserver(()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>document.querySelectorAll('#statsView .js-plotly-plot').forEach(plot=>window.Plotly&&Plotly.Plots.resize(plot)),120);}).observe(byId('statsView'));
   byId('logBtn').onclick=async()=>{const panel=byId('logPanel');panel.classList.toggle('show');if(!panel.classList.contains('show'))return;try{const result=await api('/api/logs');panel.innerHTML=(result.records||[]).map(record=>`${escapeHtml(record.timestamp)} [${escapeHtml(record.severity)}] ${escapeHtml(record.message)}`).join('<br>')||'No log entries.';panel.scrollTop=panel.scrollHeight;}catch(error){panel.textContent=error.message;}};
   refresh();

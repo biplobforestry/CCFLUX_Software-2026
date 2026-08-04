@@ -3722,6 +3722,96 @@ class DashboardScanBackend:
         )
         return target
 
+    def _write_noseboom_qc(
+        self,
+        project: FlightProject,
+        paths: Sequence[Path],
+        selected_start: datetime,
+        selected_end: datetime,
+    ) -> Path | None:
+        """Compute the quality control checks and store them with the project.
+
+        The checks read instrument columns the browser loader does not keep, so
+        they are run once here, while the raw delivery is still at hand, and the
+        workspace then opens them straight from the project.
+        """
+        from core.noseboom_qc import build_qc_payload, load_qc_window
+
+        target = project.flight_output_root / "quicklooks" / "noseboom_qc.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            frame = load_qc_window(
+                tuple(paths),
+                int(selected_start.timestamp() * 1_000_000_000),
+                int(selected_end.timestamp() * 1_000_000_000),
+            )
+            payload = build_qc_payload(frame)
+            target.write_text(
+                json.dumps(payload, ensure_ascii=False, allow_nan=False) + "\n",
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            # The flight stays processed and reviewable; only the QC section is
+            # missing, so say why rather than failing the whole instrument.
+            self.logger.capture_exception(
+                "noseboom-qc",
+                "Noseboom quality control could not be prepared",
+                exc,
+                instrument="noseboom",
+                processing_step="quality-control",
+            )
+            return None
+        airport = (payload.get("metar") or {}).get("airport") or {}
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "noseboom-qc",
+            "Noseboom quality control prepared"
+            + (
+                f"; wind compared with {airport.get('icao')} {airport.get('name')}"
+                if airport else "; no airport was near enough to compare"
+            ),
+            instrument="noseboom",
+            file_path=target,
+            processing_step="quality-control",
+        )
+        return target
+
+    def noseboom_qc_view(self) -> dict[str, object]:
+        """The stored quality control checks for the active project."""
+        with self._lock:
+            project = self._flight_project
+            status = self._instruments["noseboom"].processing_status
+            recorded = project.output_locations.get("noseboom_qc") if project else None
+        candidates = [recorded] if recorded else []
+        if project is not None:
+            candidates.append(
+                project.flight_output_root / "quicklooks" / "noseboom_qc.json"
+            )
+        for candidate in candidates:
+            if candidate and Path(candidate).is_file():
+                try:
+                    return {
+                        "ready": True,
+                        "data": json.loads(
+                            Path(candidate).read_text(encoding="utf-8")
+                        ),
+                    }
+                except (OSError, json.JSONDecodeError) as exc:
+                    return {
+                        "ready": False,
+                        "message": f"Saved Noseboom QC data is unreadable: {exc}",
+                    }
+        return {
+            "ready": False,
+            "message": (
+                "Process Noseboom from the Main GUI to prepare the quality "
+                "control checks."
+                if status is not ProcessingStatus.COMPLETE
+                else "This project was processed before the quality control "
+                "checks existed. Process Noseboom again to prepare them."
+            ),
+        }
+
     def _noseboom_source_paths(self) -> tuple[Path, ...]:
         """Noseboom sources from the live scan, or from the saved project.
 
@@ -3878,6 +3968,11 @@ class DashboardScanBackend:
                 project.flight_output_root / "reports" / "noseboom_statistics"
             )
             flight_name = project.flight_id
+        # The quality control figure is rendered from the stored checks, so an
+        # export carries them alongside the statistical overview.
+        qc = self.noseboom_qc_view()
+        if qc.get("ready"):
+            payload["quality_control"] = qc.get("data")
         raw_formats = options.get("formats", ["pdf"])
         if not isinstance(raw_formats, list):
             raise ValueError("Export formats must be a list")
@@ -5560,6 +5655,8 @@ class DashboardScanBackend:
         outputs = adapter.export_results(
             result, adapter.output_root, ("csv",)
         )
+        context.report_progress(94.0, "Running the Noseboom quality control checks")
+        qc_path = self._write_noseboom_qc(project, paths, selected_start, selected_end)
         context.report_progress(96.0, "Archiving the 10 Hz Noseboom table")
         archive = self._archive_noseboom_10hz(project, paths, selected_start, selected_end)
         quicklook = dict(result.metadata.get("map", {}))
@@ -5581,10 +5678,13 @@ class DashboardScanBackend:
                     *(Path(value.path) for value in outputs),
                     quicklook_path,
                     *([archive] if archive is not None else []),
+                    *([qc_path] if qc_path is not None else []),
                 ]
             project.output_locations["noseboom_quicklook"] = quicklook_path
             if archive is not None:
                 project.output_locations["noseboom_10hz"] = archive
+            if qc_path is not None:
+                project.output_locations["noseboom_qc"] = qc_path
             project.output_locations["processing_log"] = (
                 project.flight_output_root / "logs" / "processing.jsonl"
             )

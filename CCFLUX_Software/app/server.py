@@ -215,6 +215,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             )
         elif path == "/api/noseboom":
             self._send_json(HTTPStatus.OK, self.server.backend.noseboom_view())
+        elif path == "/api/noseboom/qc":
+            self._send_json(HTTPStatus.OK, self.server.backend.noseboom_qc_view())
         elif path == "/api/gopro":
             self._send_json(HTTPStatus.OK, self.server.backend.gopro_view())
         elif path.startswith("/api/gopro/image/"):
