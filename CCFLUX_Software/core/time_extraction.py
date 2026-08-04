@@ -28,10 +28,47 @@ from .time_manager import (
 
 MAX_SOURCE_FILE_SAMPLES = 20
 MAX_QUALITY_SAMPLES = 100
+# Coverage is recorded per source file so a gap between files stays visible.
+# A camera delivers one segment per frame, so the list is capped by merging the
+# narrowest gaps first; that only ever widens coverage, never invents it.
+MAX_COVERAGE_SEGMENTS = 256
 FLIR_EDGE_SCAN_BYTES = 16 * 1024 * 1024
 FLIR_TIMESTAMP_BYTES_RE = re.compile(
     rb'"timestamp"\s*:\s*(?:\{\s*"\$date"\s*:\s*)?"([^"\\]+)"'
 )
+
+
+def merge_coverage_segments(
+    segments: Iterable[tuple[datetime, datetime]],
+    *,
+    limit: int = MAX_COVERAGE_SEGMENTS,
+) -> tuple[tuple[datetime, datetime], ...]:
+    """Overlapping and touching segments become one, then the list is capped.
+
+    Capping closes the narrowest gaps first, so the widest gaps - the ones that
+    can leave a selected interval with no data - are the last to disappear.
+    """
+    ordered = sorted(
+        (pair for pair in segments if pair[0] is not None and pair[1] is not None),
+        key=lambda pair: (pair[0], pair[1]),
+    )
+    if not ordered:
+        return ()
+    merged: list[list[datetime]] = [[ordered[0][0], ordered[0][1]]]
+    for start, end in ordered[1:]:
+        if start <= merged[-1][1]:
+            if end > merged[-1][1]:
+                merged[-1][1] = end
+        else:
+            merged.append([start, end])
+    while len(merged) > max(1, limit):
+        narrowest = min(
+            range(1, len(merged)),
+            key=lambda index: merged[index][0] - merged[index - 1][1],
+        )
+        merged[narrowest - 1][1] = max(merged[narrowest - 1][1], merged[narrowest][1])
+        del merged[narrowest]
+    return tuple((start, end) for start, end in merged)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,12 +113,23 @@ class _Accumulator:
     naive_max: tuple[datetime, str] | None = None
     previous_in_file: datetime | None = None
     applied_time_offsets: set[timedelta] = field(default_factory=set)
+    coverage_segments: list[tuple[datetime, datetime]] = field(default_factory=list)
+    file_aware_min: datetime | None = None
+    file_aware_max: datetime | None = None
 
     def begin_file(self, path: Path) -> None:
+        self._close_file_segment()
         self.source_file_count += 1
         if len(self.source_file_samples) < MAX_SOURCE_FILE_SAMPLES:
             self.source_file_samples.append(path)
         self.previous_in_file = None
+
+    def _close_file_segment(self) -> None:
+        """Record what the file just read actually covered."""
+        if self.file_aware_min is not None and self.file_aware_max is not None:
+            self.coverage_segments.append((self.file_aware_min, self.file_aware_max))
+        self.file_aware_min = None
+        self.file_aware_max = None
 
     def observe(self, raw: _RawTimestamp) -> None:
         self.records_examined += 1
@@ -143,6 +191,10 @@ class _Accumulator:
         else:
             self.aware_min = _minimum(self.aware_min, normalized, original)
             self.aware_max = _maximum(self.aware_max, normalized, original)
+            if self.file_aware_min is None or normalized < self.file_aware_min:
+                self.file_aware_min = normalized
+            if self.file_aware_max is None or normalized > self.file_aware_max:
+                self.file_aware_max = normalized
         self._sample(raw, value, tuple(flags))
 
     def _sample(
@@ -164,6 +216,7 @@ class _Accumulator:
         )
 
     def result(self) -> TimeRangeResult:
+        self._close_file_segment()
         warnings = list(self.warnings)
         if self.duplicates:
             warnings.append(f"{self.duplicates} duplicated timestamp(s) detected.")
@@ -221,6 +274,7 @@ class _Accumulator:
             records_examined=self.records_examined,
             missing_timestamp_columns=tuple(self.missing_timestamp_columns),
             quality_samples=tuple(self.quality_samples),
+            coverage_segments=merge_coverage_segments(self.coverage_segments),
         )
 
 

@@ -70,6 +70,11 @@ class TimeRangeResult:
     records_examined: int
     missing_timestamp_columns: tuple[Path, ...]
     quality_samples: tuple[TimestampQualitySample, ...]
+    # What the source files actually cover, per file, so that a gap between
+    # them stays visible. The start and end above are only the envelope: SIF
+    # reported 07:19 - 16:54 while nothing at all was recorded from 11:05 to
+    # 13:21, and a selection inside that gap was shown as fully available.
+    coverage_segments: tuple[tuple[datetime, datetime], ...] = ()
 
     @property
     def has_valid_timestamps(self) -> bool:

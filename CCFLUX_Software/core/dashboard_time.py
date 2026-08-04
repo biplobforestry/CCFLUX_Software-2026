@@ -31,6 +31,9 @@ class InstrumentTimeSelection:
     override_end: datetime | None = None
     outside_selected_range: bool = False
     availability_percentage: float | None = None
+    # The intervals the source files actually cover. Empty means the coverage
+    # was never measured per file, and the envelope below is all there is.
+    coverage_segments: tuple[tuple[datetime, datetime], ...] = ()
 
     @property
     def effective_start(self) -> datetime | None:
@@ -39,6 +42,40 @@ class InstrumentTimeSelection:
     @property
     def effective_end(self) -> datetime | None:
         return self.override_end or self.available_end
+
+    def intersects(self, start: datetime, end: datetime) -> bool:
+        """Whether any recorded coverage falls inside the interval.
+
+        A capture is an instant, so the comparison is closed at both ends: a
+        single MicaSense frame taken inside the window counts as coverage.
+        """
+        if not self.coverage_segments:
+            first, last = self.effective_start, self.effective_end
+            return first is not None and last is not None and first <= end and last >= start
+        return any(
+            segment_start <= end and segment_end >= start
+            for segment_start, segment_end in self.coverage_segments
+        )
+
+    def covered_seconds_within(self, start: datetime, end: datetime) -> float:
+        """Seconds of real coverage inside the interval, gaps excluded."""
+        window_start = start
+        window_end = end
+        if self.effective_start is not None:
+            window_start = max(window_start, self.effective_start)
+        if self.effective_end is not None:
+            window_end = min(window_end, self.effective_end)
+        if window_start >= window_end:
+            return 0.0
+        if not self.coverage_segments:
+            return (window_end - window_start).total_seconds()
+        total = 0.0
+        for segment_start, segment_end in self.coverage_segments:
+            overlap_start = max(segment_start, window_start)
+            overlap_end = min(segment_end, window_end)
+            if overlap_end > overlap_start:
+                total += (overlap_end - overlap_start).total_seconds()
+        return total
 
 
 @dataclass(slots=True)
@@ -60,7 +97,11 @@ class DashboardTimeState:
         ],
         *,
         analysis_anchor_id: str | None = None,
+        coverage_segments: Mapping[
+            str, Iterable[tuple[datetime, datetime]]
+        ] | None = None,
     ) -> "DashboardTimeState":
+        segments_by_instrument = dict(coverage_segments or {})
         instruments: dict[str, InstrumentTimeSelection] = {}
         for instrument_id, (start, end, warnings) in ranges.items():
             normalized_start, normalized_end = _utc(start), _utc(end)
@@ -87,6 +128,14 @@ class DashboardTimeState:
                 _utc(start),
                 _utc(end),
                 tuple(dict.fromkeys(messages)),
+                coverage_segments=tuple(
+                    (utc_start, utc_end)
+                    for utc_start, utc_end in (
+                        (_utc(first), _utc(last))
+                        for first, last in segments_by_instrument.get(instrument_id, ())
+                    )
+                    if utc_start is not None and utc_end is not None
+                ),
             )
         valid = [
             item
@@ -251,6 +300,10 @@ class DashboardTimeState:
                     "outside_selected_range": value.outside_selected_range,
                     "availability_percentage": value.availability_percentage,
                     "timezone_warnings": list(value.timezone_warnings),
+                    "coverage_segments": [
+                        [_iso(first), _iso(last)]
+                        for first, last in value.coverage_segments
+                    ],
                 }
                 for key, value in self.instruments.items()
             },
@@ -283,8 +336,25 @@ class DashboardTimeState:
                 instrument.availability_percentage = None
                 continue
             overlap_seconds = max(0.0, (overlap_end - overlap_start).total_seconds())
-            instrument.availability_percentage = round(
-                100.0 * overlap_seconds / selected_seconds, 1
+            envelope_percentage = round(100.0 * overlap_seconds / selected_seconds, 1)
+            if not instrument.coverage_segments:
+                instrument.availability_percentage = envelope_percentage
+                continue
+            # The envelope spans the gaps between source files. SIF ran from
+            # 07:19 to 16:54 but recorded nothing between 11:05 and 13:21, and a
+            # selection inside that gap was offered as fully available, so
+            # processing accepted it and then failed with no file covering it.
+            if not instrument.intersects(selected_start, selected_end):
+                instrument.outside_selected_range = True
+                instrument.availability_percentage = 0.0
+                continue
+            covered = instrument.covered_seconds_within(selected_start, selected_end)
+            # A camera's coverage is a set of instants, so measuring it as a
+            # duration reads as nothing at all; the envelope is what it has.
+            instrument.availability_percentage = (
+                round(100.0 * covered / selected_seconds, 1)
+                if covered > 0
+                else envelope_percentage
             )
 
 
