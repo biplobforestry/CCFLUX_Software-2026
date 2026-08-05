@@ -1,6 +1,6 @@
 {
   "latest_version": "1.0.2",
   "released_utc": "2026-08-05T00:00:00Z",
-  "notice": "SIF timestamps are corrected: an AirFloX GPS time is now trusted only where the receiver reported a position, so FLOX and FULL are read as UTC. Reprocess SIF, and reprocess Noseboom so the project carries its 10 Hz navigation table.",
+  "notice": "Noseboom processing is updated. Straight-flight legs are found by a moving-window stability test with new criteria (ground speed, segment duration, heading stability and rate, roll, altitude range, vertical speed), a Quality Check section is added, and a project now carries a 10 Hz navigation table so downloads at 1-10 Hz and changes to the criteria work from the .ccflux alone. SIF timestamps are corrected: an AirFloX GPS time is trusted only where the receiver reported a position, so FLOX and FULL are read as UTC. Reprocess Noseboom and SIF.",
   "download_url": "https://github.com/biplobforestry/CCFLUX_Software-2026"
 }
