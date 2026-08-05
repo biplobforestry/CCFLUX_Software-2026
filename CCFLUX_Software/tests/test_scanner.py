@@ -480,3 +480,27 @@ class CameraSampleSpansDeliveryTests(unittest.TestCase):
         picarro = [c for c in report.candidates if c.instrument_id == "picarro"]
         if picarro:
             self.assertEqual(len(picarro[0].all_matching_files), 30)
+
+
+class DiscoverySkipsItsOwnOutputTests(unittest.TestCase):
+    """An output tree inside the flight folder is not raw input.
+
+    Flight_CCT0803 held processed/ beside its instrument folders, so the scan
+    offered a Noseboom export back as a Noseboom source and the job failed
+    reading it: "missing timestamp column".
+    """
+
+    def test_the_product_directory_names_are_declared(self) -> None:
+        from core.scanner import PRODUCT_DIRECTORY_NAMES
+
+        for name in ("processed", "quicklooks", "reports", "exports"):
+            self.assertIn(name, PRODUCT_DIRECTORY_NAMES)
+
+    def test_discovery_does_not_descend_into_them(self) -> None:
+        import inspect
+
+        from core import scanner
+
+        source = inspect.getsource(scanner)
+        self.assertIn("entry.name.casefold() in PRODUCT_DIRECTORY_NAMES", source)
+        self.assertIn("Skipped a previous output folder during", source)

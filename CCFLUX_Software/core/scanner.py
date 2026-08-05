@@ -36,6 +36,13 @@ DEFAULT_CANDIDATE_FILE_SAMPLES = 20
 # Cameras keep a bounded sample rather than every file; their adapters expand
 # the delivery lazily when they process it.
 BOUNDED_SAMPLE_INSTRUMENTS = frozenset({"micasense", "flir", "gopro"})
+
+# Directory names this software writes its own products into. Discovery never
+# descends into them: a flight folder that also holds an output tree would
+# otherwise offer every product back as raw input.
+PRODUCT_DIRECTORY_NAMES = frozenset(
+    {"processed", "quicklooks", "reports", "exports"}
+)
 DEFAULT_DIAGNOSTIC_SAMPLES = 50
 DEFAULT_PROGRESS_INTERVAL_SECONDS = 0.10
 DEFAULT_EAGER_PROGRESS_FILES = 5
@@ -323,6 +330,18 @@ class FlightFolderScanner:
                                 )
                                 continue
                             if entry.is_dir(follow_symlinks=False):
+                                if entry.name.casefold() in PRODUCT_DIRECTORY_NAMES:
+                                    # An output tree left inside the flight
+                                    # folder is this software's own work. Read
+                                    # as input it becomes a rival candidate for
+                                    # the instrument that produced it, which is
+                                    # how a Noseboom export came to be offered
+                                    # as a Noseboom source and failed the job.
+                                    global_warnings.append(
+                                        f"Skipped a previous output folder during "
+                                        f"discovery: {path}"
+                                    )
+                                    continue
                                 stack.append(path)
                                 continue
                             if not entry.is_file(follow_symlinks=False):
