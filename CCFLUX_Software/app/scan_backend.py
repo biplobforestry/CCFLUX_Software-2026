@@ -174,7 +174,17 @@ INSTRUMENT_ORDER = (
     "partector", "ins_gimbal", "sif", "gopro", "flir", "micasense",
 )
 
+# What the AirFloX record clock is set to. FLOX and FULL write campaign local
+# time and their GPS often never locks, so nothing in the files says how far
+# that is from UTC; the operator declares it when the scan finds SIF. None
+# means undeclared, and the scan asks.
+SIF_RECORD_CLOCK_TIMEZONES: dict[str, dict[str, object]] = {
+    "utc": {"label": "UTC", "offset_seconds": 0},
+    "cest": {"label": "CEST (UTC+2)", "offset_seconds": 7200},
+}
+
 DEFAULT_SIF_OPTIONS: dict[str, object] = {
+    "record_clock_timezone": None,
     "modes": ["FULL", "FLUO"],
     "position_mode": "uav_airship",
     "raw_min_kb": 100.0,
@@ -3160,6 +3170,71 @@ class DashboardScanBackend:
                 f"{self._work_package.worker_name} and cannot be changed on this "
                 "computer. Only the data, camera and output folders are local."
             )
+
+    def sif_timezone_prompt(self) -> dict[str, object]:
+        """Whether the scan still needs the SIF record-clock timezone.
+
+        Asked as soon as SIF is detected, because every timestamp the flight
+        stores depends on the answer and correcting them afterwards would mean
+        reprocessing.
+        """
+        with self._lock:
+            detected = self._instruments["sif"].detection_status is not DetectionStatus.NOT_DETECTED
+            chosen = self._sif_options.get("record_clock_timezone")
+        return {
+            "required": bool(detected) and chosen is None,
+            "chosen": chosen,
+            "choices": [
+                {"key": key, "label": value["label"],
+                 "offset_seconds": value["offset_seconds"]}
+                for key, value in SIF_RECORD_CLOCK_TIMEZONES.items()
+            ],
+            "message": (
+                "FLOX and FULL record in campaign local time. Choose the "
+                "timezone their clock is set to; every SIF timestamp is "
+                "converted to UTC from it."
+            ),
+        }
+
+    def set_sif_timezone(self, key: str) -> dict[str, object]:
+        """Record the operator's declaration and apply it to the SIF reader."""
+        normalized = str(key).strip().casefold()
+        if normalized not in SIF_RECORD_CLOCK_TIMEZONES:
+            raise ValueError(
+                "SIF record-clock timezone must be one of: "
+                + ", ".join(sorted(SIF_RECORD_CLOCK_TIMEZONES))
+            )
+        with self._lock:
+            self._sif_options["record_clock_timezone"] = normalized
+        self._apply_sif_timezone()
+        self.logger.log(
+            LogLevel.INFO,
+            "sif-timezone",
+            "AirFloX record clock declared as "
+            f"{SIF_RECORD_CLOCK_TIMEZONES[normalized]['label']}; SIF timestamps "
+            "are converted to UTC from it.",
+            instrument="sif",
+            processing_step="scan-timezone",
+        )
+        return self.sif_timezone_prompt()
+
+    def _apply_sif_timezone(self) -> None:
+        """Hand the declaration to the preserved SIF reader."""
+        with self._lock:
+            chosen = self._sif_options.get("record_clock_timezone")
+        if chosen is None:
+            return
+        selection = SIF_RECORD_CLOCK_TIMEZONES[chosen]
+        try:
+            from instruments.sif.legacy import airflox_sif_automation as module
+        except ImportError:  # the preserved module is optional in tests
+            return
+        module.RECORD_CLOCK_TIMEZONE.update(
+            {
+                "offset_seconds": selection["offset_seconds"],
+                "label": selection["label"],
+            }
+        )
 
     def update_sif_options(
         self, request: Mapping[str, object] | None
@@ -6200,6 +6275,9 @@ class DashboardScanBackend:
         return JobOutcome()
 
     def _sif_task(self, context: ProcessingContext) -> JobOutcome | None:
+        # The operator's declaration decides every SIF timestamp, so it is
+        # applied before the reader runs rather than left to import order.
+        self._apply_sif_timezone()
         from instruments.sif import SifAdapter
         with self._lock:
             report, project = self._report, self._flight_project

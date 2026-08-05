@@ -231,6 +231,13 @@ GPS_FIX_MAX_DATE_GAP_SECONDS=2*86400
 # so an offset measured on the channel that got a fix is the offset for the one
 # that did not. run_flight() resolves the channels in whichever order gives an
 # anchor and clears this between flights.
+# The timezone the AirFloX record clock is set to, declared by the operator
+# when the scan finds SIF. FLOX and FULL write campaign local time, and with no
+# GPS fix nothing in the file says how far that is from UTC. "offset_seconds"
+# is what to subtract to reach UTC: 7200 for CEST, 0 when the clock is UTC.
+RECORD_CLOCK_TIMEZONE: dict = {"offset_seconds": None, "label": None}
+
+
 RECORD_CLOCK_OFFSET_HINT={}
 
 def gps_position_mask(raw):
@@ -318,6 +325,20 @@ def get_gps_utc(raw):
     # the record clock runs; elsewhere, correct the record clock by that amount.
     offset,fixes,spread=measure_record_clock_offset(utc,record_clock,raw)
     if _gps_is_unusable(utc,record_clock):
+        # FLOX and FULL write their record clock in campaign local time, and a
+        # receiver that never locks cannot say how far that is from UTC. The
+        # operator declares it once for the flight, and that declaration is
+        # authoritative: it is the only reliable source when there is no fix.
+        declared=RECORD_CLOCK_TIMEZONE.get('offset_seconds')
+        if declared is not None:
+            label=RECORD_CLOCK_TIMEZONE.get('label') or f'{declared:+.0f} s'
+            if declared:
+                print(f'warning=AirFloX GPS never acquired a fix. The record clock is read as '
+                      f'{label} and converted to UTC by {declared:.0f} s, as declared for this flight.')
+            else:
+                print('warning=AirFloX GPS never acquired a fix. The record clock is read as UTC, '
+                      'as declared for this flight.')
+            return _apply_record_clock_offset(record_clock,declared)
         hint=getattr(raw,'record_clock_offset_seconds',None)
         if hint is None: hint=RECORD_CLOCK_OFFSET_HINT.get('seconds')
         if hint is not None:

@@ -301,6 +301,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     path.removeprefix("/api/micasense/thumbnail/")
                 )
             )
+        elif path == "/api/sif/timezone":
+            self._send_json(HTTPStatus.OK, self.server.backend.sif_timezone_prompt())
         elif path == "/api/sif":
             self._send_json(HTTPStatus.OK, self.server.backend.hatchbox_view("sif"))
         elif path == "/api/miro-rack/bootstrap":
@@ -514,6 +516,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 body = self._json_body()
                 self._send_file(
                     self.server.backend.export_noseboom_data(body), download=True
+                )
+            elif path == "/api/sif/timezone":
+                body = self._json_body()
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.backend.set_sif_timezone(str(body.get("timezone", ""))),
                 )
             elif path == "/api/noseboom/statistics/export":
                 body = self._json_body()

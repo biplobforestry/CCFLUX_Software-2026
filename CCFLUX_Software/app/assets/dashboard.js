@@ -945,6 +945,7 @@
       if (!state.running && ['complete', 'cancelled', 'failed'].includes(state.phase)) {
         clearInterval(scanPoll);
         scanPoll = null;
+        await askSifTimezone();
       }
     } catch (error) {
       clearInterval(scanPoll);
@@ -2129,6 +2130,53 @@
     showModal();
   }
 
+
+
+  // FLOX and FULL write campaign local time, and their GPS often never locks,
+  // so nothing in the files says how far that is from UTC. The operator is
+  // asked as soon as the scan finds SIF, because every stored timestamp
+  // depends on the answer and correcting it later means reprocessing.
+  let sifTimezoneAsked = false;
+  async function askSifTimezone() {
+    if (sifTimezoneAsked) return;
+    let prompt;
+    try {
+      prompt = await api('/api/sif/timezone');
+    } catch (error) {
+      return;
+    }
+    if (!prompt.required) return;
+    sifTimezoneAsked = true;
+    const choices = (prompt.choices || [])
+      .map(choice => `<label class="format-choice"><input type="radio" name="sifTimezone"
+            value="${escapeHtml(choice.key)}"${choice.key === 'cest' ? ' checked' : ''}>
+            ${escapeHtml(choice.label)}</label>`)
+      .join('');
+    modalTitle.textContent = 'SIF record-clock timezone';
+    modalBody.innerHTML = `
+      <p>${escapeHtml(prompt.message)}</p>
+      <div class="format-grid">${choices}</div>
+      <p class="muted">Gimbal and Noseboom are recorded in UTC and are not changed.
+      SIF timestamps are converted to UTC from the timezone you choose and stored that way.</p>
+      <div class="modal-actions">
+        <button class="btn primary" id="sifTimezoneUse">Use this timezone</button>
+      </div>`;
+    showModal();
+    document.getElementById('sifTimezoneUse').onclick = async () => {
+      const picked = document.querySelector('[name=sifTimezone]:checked');
+      if (!picked) return;
+      try {
+        await api('/api/sif/timezone', {
+          method: 'POST',
+          body: JSON.stringify({ timezone: picked.value })
+        });
+        modal.classList.remove('show');
+        showToast(`SIF record clock read as ${picked.parentElement.textContent.trim()}.`);
+      } catch (error) {
+        showToast(`Could not set the SIF timezone: ${error.message}`);
+      }
+    };
+  }
 
   async function announceCameraCoverage(state) {
     // The camera scan runs on its own. When it finishes, show what it found and
