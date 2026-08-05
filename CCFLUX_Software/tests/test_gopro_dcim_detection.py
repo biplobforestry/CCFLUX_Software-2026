@@ -26,9 +26,15 @@ def test_dcim_is_a_gopro_folder(gopro_patterns):
     assert "DCIM" in gopro_patterns.likely_folder_names
 
 
-def test_a_numbered_card_folder_is_a_gopro_folder(gopro_patterns):
-    """100GOPRO, 101GOPRO and so on, which sit below DCIM."""
-    assert "*GOPRO" in gopro_patterns.likely_folder_names
+def test_the_numbered_card_folders_are_not_separate_deliveries(gopro_patterns):
+    """100GOPRO, 101GOPRO and 102GOPRO are one card, not three.
+
+    Matching them individually made each its own candidate, so the scan asked
+    which to use and the instrument never loaded. DCIM is their single parent,
+    so matching DCIM gathers the whole card as one delivery.
+    """
+    assert "*GOPRO" not in gopro_patterns.likely_folder_names
+    assert "DCIM" in gopro_patterns.likely_folder_names
 
 
 def test_the_named_folders_still_match(gopro_patterns):
@@ -50,12 +56,51 @@ class TestFolderChainMatching:
         root = tmp_path
         folder = root / "camera_system" / "card_01" / "DCIM" / "100GOPRO"
         folder.mkdir(parents=True)
-        matches = _folder_matches(folder, root, ("GoPro", "DCIM", "*GOPRO"))
-        assert {name for _path, name in matches} >= {"DCIM", "*GOPRO"}
+        matches = _folder_matches(folder, root, ("GoPro", "DCIM"))
+        # The innermost match becomes the candidate: one DCIM, one delivery.
+        assert [name for _path, name in matches] == ["DCIM"]
 
     def test_an_unrelated_tree_does_not_match(self, tmp_path):
         from core.scanner import _folder_matches
 
         folder = tmp_path / "influxdb" / "Nose_Boom_Windpy"
         folder.mkdir(parents=True)
-        assert _folder_matches(folder, tmp_path, ("GoPro", "DCIM", "*GOPRO")) == ()
+        assert _folder_matches(folder, tmp_path, ("GoPro", "DCIM")) == ()
+
+
+class TestMicaSenseWorkspace:
+    """MicaSense processed but had nowhere to be seen: no page, no route."""
+
+    from pathlib import Path as _Path
+
+    ASSETS = _Path(__file__).resolve().parents[1] / "app" / "assets"
+    APP = _Path(__file__).resolve().parents[1] / "app"
+
+    def test_the_workspace_page_exists(self):
+        assert (self.ASSETS / "micasense.html").is_file()
+        assert (self.ASSETS / "micasense.js").is_file()
+
+    def test_the_page_and_its_data_are_served(self):
+        server = (self.APP / "server.py").read_text(encoding="utf-8")
+        assert 'path == "/micasense"' in server
+        assert 'path == "/api/micasense"' in server
+        assert '/api/micasense/thumbnail/' in server
+
+    def test_processing_writes_what_the_page_reads(self):
+        backend = (self.APP / "scan_backend.py").read_text(encoding="utf-8")
+        assert "_micasense_browser_payload" in backend
+        assert '"micasense": "micasense_browser",' in backend
+
+    def test_the_dashboard_card_opens_it(self):
+        markup = (self.ASSETS / "dashboard.html").read_text(encoding="utf-8")
+        assert 'href="/micasense"' in markup
+
+    def test_a_thumbnail_cannot_escape_its_folder(self):
+        backend = (self.APP / "scan_backend.py").read_text(encoding="utf-8")
+        assert "safe = Path(str(name)).name" in backend
+
+    def test_unreadable_files_are_reported_not_fatal(self):
+        """A camera file written badly must not hide the rest of the delivery."""
+        script = (self.ASSETS / "micasense.js").read_text(encoding="utf-8")
+        assert "could not be read and were skipped" in script
+        assert "onerror=" in script

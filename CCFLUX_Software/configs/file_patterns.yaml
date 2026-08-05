@@ -203,7 +203,7 @@
     },
     {
       "pattern_id": "gopro",
-      "likely_folder_names": ["GoPro", "GOPRO", "gopro", "DCIM", "*GOPRO"],
+      "likely_folder_names": ["GoPro", "GOPRO", "gopro", "DCIM"],
       "filename_prefixes": [],
       "filename_suffixes": [],
       "file_extensions": [".jpg", ".jpeg", ".png", ".mp4", ".mov"],

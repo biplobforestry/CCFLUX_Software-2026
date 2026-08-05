@@ -125,6 +125,13 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 "ins_gimbal", f"INS Gimbal browser view opened: {path}"
             )
             self._send_file(self.server.dashboard_file.with_name("ins_gimbal.html"))
+        elif path == "/micasense" or path.startswith("/micasense/"):
+            self.server.backend.log_hatchbox_view_event(
+                "micasense", f"MicaSense browser view opened: {path}"
+            )
+            self._send_file(self.server.dashboard_file.with_name("micasense.html"))
+        elif path == "/micasense.js":
+            self._send_file(self.server.dashboard_file.with_name("micasense.js"))
         elif path == "/sif" or path.startswith("/sif/"):
             self.server.backend.log_hatchbox_view_event(
                 "sif", f"SIF / FLOX browser view opened: {path}"
@@ -286,6 +293,14 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, self.server.backend.hatchbox_view("partector"))
         elif path == "/api/ins-gimbal":
             self._send_json(HTTPStatus.OK, self.server.backend.hatchbox_view("ins_gimbal"))
+        elif path == "/api/micasense":
+            self._send_json(HTTPStatus.OK, self.server.backend.hatchbox_view("micasense"))
+        elif path.startswith("/api/micasense/thumbnail/"):
+            self._send_file(
+                self.server.backend.micasense_thumbnail_file(
+                    path.removeprefix("/api/micasense/thumbnail/")
+                )
+            )
         elif path == "/api/sif":
             self._send_json(HTTPStatus.OK, self.server.backend.hatchbox_view("sif"))
         elif path == "/api/miro-rack/bootstrap":

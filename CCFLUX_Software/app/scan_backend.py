@@ -2799,13 +2799,14 @@ class DashboardScanBackend:
     def hatchbox_view(self, page: str) -> dict[str, object]:
         """Return a saved, precomputed Hatchbox instrument browser payload."""
         normalized = page.casefold()
-        if normalized not in {"opc", "partector", "ins_gimbal", "sif"}:
+        if normalized not in {"opc", "partector", "ins_gimbal", "sif", "micasense"}:
             raise ValueError(f"Unknown Hatchbox page: {page}")
         key = {
             "opc": "opc_browser",
             "partector": "partector_browser",
             "ins_gimbal": "ins_gimbal_browser",
             "sif": "sif_browser",
+            "micasense": "micasense_browser",
         }[normalized]
         with self._lock:
             project = self._flight_project
@@ -2815,6 +2816,7 @@ class DashboardScanBackend:
                 "partector": ("partector",),
                 "ins_gimbal": ("ins_gimbal",),
                 "sif": ("sif",),
+                "micasense": ("micasense",),
             }[normalized]
             exports = [
                 value
@@ -2852,6 +2854,7 @@ class DashboardScanBackend:
                         if sif_scan_ready else
                         "Configure and process SIF / FLOX from the Main GUI first."
                     ),
+                    "micasense": "Process MicaSense from the Main GUI first.",
                 }[normalized],
                 "status": status,
                 "exports": exports,
@@ -2986,6 +2989,20 @@ class DashboardScanBackend:
             processing_step="size-distribution-map-export",
         )
         return filename, pdf
+
+    def micasense_thumbnail_file(self, name: str) -> Path:
+        """One saved MicaSense thumbnail, by file name only."""
+        safe = Path(str(name)).name
+        with self._lock:
+            project = self._flight_project
+        if project is None:
+            raise FileNotFoundError("No Flight Project is open")
+        candidate = (
+            project.flight_output_root / "processed" / "micasense" / "thumbnails" / safe
+        )
+        if not candidate.is_file():
+            raise FileNotFoundError(f"No MicaSense thumbnail named {safe}")
+        return candidate
 
     def log_hatchbox_view_event(self, page: str, message: str) -> None:
         self.logger.log(
@@ -6308,12 +6325,50 @@ class DashboardScanBackend:
             result, adapter.output_root, ("csv", "json")
         )
         adapter.create_plots(result, adapter.output_root)
+        # The workspace reads this, so the metadata check has somewhere to be
+        # seen instead of only landing in files beside the project.
+        quicklook = self._micasense_browser_payload(project, result, outputs)
         with self._lock:
             state = self._instruments["micasense"]
             state.output_files = [
                 str(value.path) for value in outputs
             ] + [str(value.path) for value in result.figures]
+            state.quicklook = quicklook
         return JobOutcome(warning=result.warnings[0] if result.warnings else None)
+
+    def _micasense_browser_payload(
+        self, project: FlightProject, result: Any, outputs: Sequence[Any]
+    ) -> dict[str, Any]:
+        """Write and return what the MicaSense workspace shows."""
+        from instruments.hatchbox_payload import write_json_atomic
+
+        metadata = dict(result.metadata or {})
+        thumbnails = [
+            {
+                "name": Path(figure.path).name,
+                "url": "/api/micasense/thumbnail/" + Path(figure.path).name,
+            }
+            for figure in result.figures
+        ]
+        payload = {
+            "schema": "ccflux-micasense-browser-v1",
+            "available": True,
+            "flight_id": project.flight_id,
+            "summary": metadata,
+            "warnings": list(result.warnings or ()),
+            "thumbnails": thumbnails,
+            "exports": [str(value.path) for value in outputs],
+            "captures": [dict(row) for row in getattr(result, "captures", ()) or ()],
+        }
+        target = project.flight_output_root / "quicklooks" / "micasense_browser.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(target, payload)
+        with self._lock:
+            project.output_locations["micasense_browser"] = target
+            saved = project.detected_instruments.get("micasense")
+            if saved is not None and target not in saved.output_locations:
+                saved.output_locations.append(target)
+        return payload
 
     def _flir_quick_task(self, context: ProcessingContext) -> JobOutcome | None:
         """Run FLIR Level 1 without invoking any temperature conversion."""
