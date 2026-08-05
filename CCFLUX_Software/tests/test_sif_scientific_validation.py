@@ -198,6 +198,15 @@ def test_bundled_science_differs_from_the_original_only_where_recorded():
         "get_gps_utc",           # record-clock fallback, and DateTimeFloX parsing
         "_record_clock_datetime",  # new helper
         "_gps_is_unusable",        # new helper
+        # A receiver that never locks still emits GPS_TIME_UTC. On
+        # Flight_CCT0803 both AirFloX channels read GPS_lat=0.00000 while
+        # a few rows carried a time two hours from the record clock, and
+        # judging a fix by the timestamp alone shifted the flight by
+        # 7219 s. A time is now trusted only where a position was
+        # reported; with none, the record clock is UTC.
+        "gps_position_mask",       # new helper
+        "real_gps_fix_mask",       # a fix now needs a position, not only a plausible date
+        "measure_record_clock_offset",  # measured only from rows with a position
         # Corrections made after comparing against AIRFLOX_GUI_30.9.R, each one
         # proven against the R output in test_sif_r_reference_validation.py.
         "spline_gapfill_matrix",   # R smooth.spline(df=80), not a regression spline
