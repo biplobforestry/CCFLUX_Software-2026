@@ -1,6 +1,6 @@
 {
-  "latest_version": "1.0.1",
-  "released_utc": "2026-07-31T00:00:00Z",
-  "notice": "",
+  "latest_version": "1.1.0",
+  "released_utc": "2026-08-05T00:00:00Z",
+  "notice": "SIF timestamps are corrected: an AirFloX GPS time is now trusted only where the receiver reported a position, so FLOX and FULL are read as UTC. Reprocess SIF, and reprocess Noseboom so the project carries its 10 Hz navigation table.",
   "download_url": "https://github.com/biplobforestry/CCFLUX_Software-2026"
 }
