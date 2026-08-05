@@ -123,7 +123,7 @@ class MiroRackBridge:
         )
         html = html.replace(
             '<footer class="app-footer"><span>&copy; Biplob Dey, 2026</span><span class="version">Version 1.0_26_07</span></footer>',
-            '<footer class="app-footer"><span>&copy; 2026 Biplob Dey &middot; Forschungszentrum J&uuml;lich GmbH &middot; Version 1.1.0</span></footer>',
+            '<footer class="app-footer"><span>&copy; 2026 Biplob Dey &middot; Forschungszentrum J&uuml;lich GmbH &middot; Version 1.0.2</span></footer>',
         )
         html = html.replace(
             "</head>",

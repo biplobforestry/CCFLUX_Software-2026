@@ -6,7 +6,7 @@ match, because an update check comparing the wrong number is worse than none.
 
 from __future__ import annotations
 
-SOFTWARE_VERSION = "1.1.0"
+SOFTWARE_VERSION = "1.0.2"
 
 # The manifest is served from the repository over raw.githubusercontent.com, so
 # publishing a release is a commit rather than separate hosting.
