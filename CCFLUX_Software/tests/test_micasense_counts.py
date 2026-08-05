@@ -76,3 +76,60 @@ def test_the_summary_counts_what_the_time_filter_left(tmp_path):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOneBandPerCaptureIsRead:
+    """A capture's bands share a trigger, so one read answers for all six.
+
+    Reading every band cost six times the decompression for the same
+    acquisition time, position and exposure: 80 minutes on a 2,371-archive
+    delivery. Presence and size come from the archive's own file list.
+    """
+
+    def test_only_one_band_of_an_archive_is_opened(self, tmp_path):
+        import zipfile
+
+        from PIL import Image
+
+        from instruments.micasense.adapter import ArchiveImage, _all_images
+
+        archive = tmp_path / "IMG_0001.zip"
+        with zipfile.ZipFile(archive, "w") as bundle:
+            for band in range(1, 7):
+                image = tmp_path / f"IMG_0001_{band}.tif"
+                Image.new("L", (16, 12), color=10 * band).save(image, format="TIFF")
+                bundle.write(image, f"IMG_0001_{band}.tif")
+        images = [i for i in _all_images((archive,)) if isinstance(i, ArchiveImage)]
+        assert len(images) == 6
+        assert sum(1 for i in images if i.read_metadata) == 1
+
+    def test_band_one_is_the_one_read(self, tmp_path):
+        import zipfile
+
+        from PIL import Image
+
+        from instruments.micasense.adapter import ArchiveImage, _all_images
+
+        archive = tmp_path / "IMG_0002.zip"
+        with zipfile.ZipFile(archive, "w") as bundle:
+            for band in (3, 1, 5):
+                image = tmp_path / f"IMG_0002_{band}.tif"
+                Image.new("L", (16, 12)).save(image, format="TIFF")
+                bundle.write(image, f"IMG_0002_{band}.tif")
+        read = [i for i in _all_images((archive,))
+                if isinstance(i, ArchiveImage) and i.read_metadata]
+        assert len(read) == 1
+        assert read[0].name.endswith("_1.tif")
+
+    def test_every_band_still_reports_the_capture_metadata(self, tmp_path):
+        """Sharing keyed on the wrong id left every capture looking incomplete."""
+        from tests.test_micasense_level1_adapter import _adapter, _candidate, _image
+
+        folder = tmp_path / "images"
+        for band in range(1, 7):
+            _image(folder / f"IMG_0001_{band}.tif")
+        adapter = _adapter(tmp_path)
+        result = adapter.process_quicklook(adapter.load(_candidate(folder)), {})
+        assert result.metadata["capture_count"] == 1
+        assert result.metadata["complete_capture_count"] == 1
+        assert result.metadata["gps_present_count"] == 6

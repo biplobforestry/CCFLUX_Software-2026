@@ -59,6 +59,12 @@ class ArchiveImage:
     archive: Path
     member: str
     size_bytes: int
+    # Only one band of a capture is decompressed for its metadata. The other
+    # bands were written by the same trigger, so their acquisition time, GPS
+    # and exposure are the same; what differs between them - that the band is
+    # present, and how large it is - the archive's own file list already says.
+    # Decompressing all six cost six times the work for the same answer.
+    read_metadata: bool = True
 
     @property
     def name(self) -> str:
@@ -234,6 +240,7 @@ class MicaSenseLevel1Adapter(InstrumentBase):
                 f"Metadata batch {batch_number}: {completed}/{len(files)} images",
             )
 
+        self._share_capture_metadata()
         # Every instrument processes only what falls inside the operator's
         # selected interval. MicaSense previously evaluated the whole delivery
         # regardless of the Time Filter, so its capture counts and completeness
@@ -443,10 +450,64 @@ class MicaSenseLevel1Adapter(InstrumentBase):
     def report_progress(self, callback: ProgressCallback | None) -> None:
         self._callback = callback
 
+    def _share_capture_metadata(self) -> None:
+        """Give every band of a capture the metadata its read band carries.
+
+        The bands of one capture were written by a single trigger, so they
+        share an acquisition time, a position and an exposure. Reading one and
+        sharing it costs a sixth of the decompression and reports the same
+        thing; only presence and size, which come from the archive's file list,
+        differ between them.
+        """
+        read: dict[str, Mapping[str, Any]] = {}
+        for record in self._records:
+            if not record.get("listed_only") and record.get("_filename_capture"):
+                read.setdefault(str(record["_filename_capture"]), record)
+        for record in self._records:
+            if not record.get("listed_only"):
+                continue
+            source = read.get(str(record.get("_filename_capture")))
+            if source is None:
+                continue
+            # The capture id too: the read band takes it from EXIF, and a
+            # listed band that kept its filename id would land in a capture of
+            # its own, leaving every capture looking incomplete.
+            for field in (
+                "capture_id", "timestamp", "gps_present", "gps_latitude",
+                "gps_longitude", "gps_altitude", "exposure_present",
+                "exposure_time", "iso_speed",
+            ):
+                record[field] = source[field]
+
     def _inspect_one(self, path: Any) -> dict[str, Any]:
         capture_id, band = _filename_parts(path)
         corrupt = False
         metadata: Mapping[str, Any] = {}
+        if isinstance(path, ArchiveImage) and not path.read_metadata:
+            # A band whose capture is read elsewhere. Its presence and its size
+            # come from the archive's file list, which needs no decompression;
+            # its acquisition metadata is filled in from the capture below.
+            size = _asset_size(path)
+            return {
+                "source_file": _asset_source(path),
+                "file_name": path.name,
+                "capture_id": capture_id,
+                "band_number": band,
+                "band_name": None,
+                "timestamp": None,
+                "gps_present": None,
+                "gps_latitude": None,
+                "gps_longitude": None,
+                "gps_altitude": None,
+                "exposure_present": None,
+                "exposure_time": None,
+                "iso_speed": None,
+                "size_bytes": size,
+                "unusually_small": size < self.unusually_small_bytes,
+                "corrupt": False,
+                "listed_only": True,
+                "_filename_capture": capture_id,
+            }
         try:
             # Decompress the band once and share it, rather than paying for it
             # again in verification.
@@ -481,6 +542,8 @@ class MicaSenseLevel1Adapter(InstrumentBase):
             "size_bytes": size,
             "unusually_small": size < self.unusually_small_bytes,
             "corrupt": corrupt,
+            "listed_only": False,
+            "_filename_capture": capture_id,
         }
 
     def _create_limited_thumbnails(self, files: tuple[Any, ...]) -> list[Path]:
@@ -570,9 +633,29 @@ def _all_images(paths: Sequence[Path]) -> tuple[Any, ...]:
     for archive in sorted(dict.fromkeys(archives), key=lambda item: str(item).casefold()):
         try:
             with zipfile.ZipFile(archive) as bundle:
-                for info in bundle.infolist():
-                    if not info.is_dir() and Path(info.filename).suffix.casefold() in IMAGE_SUFFIXES:
-                        images.append(ArchiveImage(archive, info.filename, info.file_size))
+                members = [
+                    info for info in bundle.infolist()
+                    if not info.is_dir()
+                    and Path(info.filename).suffix.casefold() in IMAGE_SUFFIXES
+                ]
+                # Band 1 carries the metadata for the capture; where a delivery
+                # has no band 1, the first member stands in for it.
+                metadata_member = next(
+                    (
+                        info for info in members
+                        if _filename_parts(Path(info.filename))[1] == 1
+                    ),
+                    members[0] if members else None,
+                )
+                for info in members:
+                    images.append(
+                        ArchiveImage(
+                            archive,
+                            info.filename,
+                            info.file_size,
+                            read_metadata=info is metadata_member,
+                        )
+                    )
         except (OSError, zipfile.BadZipFile):
             images.append(ArchiveImage(archive, "__CORRUPT_ARCHIVE__.tif", 0))
     return tuple(images)
