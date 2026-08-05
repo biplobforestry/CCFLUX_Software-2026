@@ -187,3 +187,41 @@ def test_a_session_with_neither_analyzer_is_refused(tmp_path):
 
     with pytest.raises(RuntimeError, match="MIRO or Picarro"):
         module.save_project_worker(str(tmp_path / "empty.hdf"), {})
+
+
+def _rack_source():
+    from pathlib import Path
+
+    return (Path(__file__).resolve().parents[1] / "legacy_integration" / "MIRO_Rack"
+            / "MIRO_Rack_GUI.py").read_text(encoding="utf-8")
+
+
+class TestOverviewWithOneAnalyzer:
+    """Flight_CCT0803 flew Picarro without MIRO. Its map was drawn, but the
+    overview - the time series and the distribution - stayed empty."""
+
+    source = _rack_source()
+
+    def test_the_analysis_runs_with_one_analyzer(self):
+        assert 'if mdata is None and pdata is None: raise RuntimeError("Load MIRO or Picarro data first.")' in self.source
+
+    def test_each_analyzer_is_analysed_only_when_present(self):
+        assert "if mdata is not None:" in self.source
+        assert "if pdata is not None:" in self.source
+
+    def test_a_reopened_project_plots_whichever_it_holds(self):
+        """The path that runs when a .ccflux is opened."""
+        assert "if(result?.miro?.series?.time?.length)await renderMiro(result.miro);" in self.source
+        assert "if(result?.picarro?.series?.time?.length)await renderPicarro(result.picarro);" in self.source
+
+    def test_a_fresh_analysis_plots_whichever_it_produced(self):
+        assert "if(!hasMiro&&!hasPicarro)throw new Error(" in self.source
+        assert "if(hasPicarro)await renderPicarro(result.picarro);" in self.source
+
+    def test_the_old_both_or_nothing_refusals_are_gone(self):
+        assert "MIRO analysis returned no plottable values" not in self.source
+        assert 'raise RuntimeError("Load MIRO and Picarro data first.")' not in self.source
+
+    def test_a_comparison_still_needs_both(self):
+        """One analyzer has nothing to compare against."""
+        assert "A MIRO-Picarro comparison needs both analyzers" in self.source
