@@ -106,13 +106,27 @@
     const key=$('diagnosticMetric').value,[title,ytitle]=labels[key];
     Plotly.react('diagnosticPlot',independentTraces(key),dualAxisLayout(`${title} · independent recorded scales`,ytitle),config);
   }
+
+  const sizeMap=window.CCFLUX.createSizeMap({
+    dataUrl:'/api/opc/map', exportUrl:'/api/opc/map/export', viewPath:'/opc/map',
+    ids:{map:'opcMap', channel:'mapChannel'}
+  });
+  const VIEW_PATHS={size:'size-distribution',diagnostics:'diagnostics',map:'map',overview:'overview'};
   function showView(view,push=true){
     document.querySelectorAll('[data-section]').forEach(card=>card.hidden=card.dataset.section!==view);
     document.querySelectorAll('[data-view]').forEach(link=>link.classList.toggle('active',link.dataset.view===view));
-    if(push)history.pushState({view},'',`/opc/${view==='size'?'size-distribution':view==='diagnostics'?'diagnostics':'overview'}`);
+    if(push)history.pushState({view},'',`/opc/${VIEW_PATHS[view]||'overview'}`);
     setTimeout(resizePlots,50);
+    // Leaflet measures the container, so it can only lay out once the card is
+    // on screen; a map built while its card was hidden renders as grey tiles.
+    if(view==='map')setTimeout(()=>sizeMap.show(),60);
   }
-  function pathView(){return location.pathname.includes('size-distribution')?'size':location.pathname.includes('diagnostics')?'diagnostics':'overview';}
+  function pathView(){
+    const path=location.pathname;
+    return path.includes('size-distribution')?'size'
+      :path.includes('diagnostics')?'diagnostics'
+      :path.endsWith('/map')?'map':'overview';
+  }
   function resizePlots(){document.querySelectorAll('.js-plotly-plot').forEach(p=>Plotly.Plots.resize(p));}
   async function load(){
     $('busy').classList.add('show');
@@ -125,6 +139,17 @@
     finally{$('busy').classList.remove('show');}
   }
   $('refreshBtn').onclick=load;$('timeMetric').onchange=renderTime;$('heatSensor').onchange=renderHeat;$('heatLog').onchange=renderHeat;$('diagnosticMetric').onchange=renderDiagnostics;
+  $('mapSensor').onchange=()=>sizeMap.onSensorChange();
+  ['mapChannel','mapPalette','mapLog'].forEach(id=>$(id).onchange=()=>sizeMap.draw());
+  ['mapResetBtn','mapResetTopBtn'].forEach(id=>$(id).onclick=()=>sizeMap.resetPosition());
+  $('mapUpdateBtn').onclick=()=>sizeMap.show();
+  $('mapNewTabBtn').onclick=()=>window.open(sizeMap.permalink(),'_blank','noopener');
+  $('mapFullscreenBtn').onclick=async()=>{
+    await $('opcMap').closest('.chart-card').requestFullscreen();
+    setTimeout(()=>sizeMap.invalidate(),150);
+  };
+  $('mapPdfBtn').onclick=event=>sizeMap.exportPdf(event.currentTarget);
+
   document.querySelectorAll('[data-view]').forEach(a=>a.onclick=e=>{e.preventDefault();showView(a.dataset.view);});
   document.querySelectorAll('[data-fullscreen]').forEach(b=>b.onclick=async()=>{const card=$(b.dataset.fullscreen).closest('.chart-card');await card.requestFullscreen();setTimeout(resizePlots,120);});
   addEventListener('popstate',()=>showView(pathView(),false));addEventListener('resize',resizePlots);addEventListener('fullscreenchange',()=>setTimeout(resizePlots,120));load();

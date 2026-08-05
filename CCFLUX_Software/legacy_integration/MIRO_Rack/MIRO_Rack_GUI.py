@@ -219,24 +219,39 @@ def comparison_payload(mdata,pdata,gas,mstart,mend,pstart,pend):
 
 
 def analyze_worker(params):
+    """Analyse whichever analyzer this flight carried.
+
+    A flight can fly one of the two. Requiring both meant that a Picarro-only
+    flight produced no results at all, so its overview - the time series and
+    the distribution - stayed empty while the map, which reads the analyzers
+    separately, was drawn.
+    """
     with LOCK:
         mdata,pdata=STORE["miro"],STORE["picarro"]
-    if mdata is None or pdata is None: raise RuntimeError("Load MIRO and Picarro data first.")
-    set_job(.08,"MIRO: applying valve stabilization and trace-gas analysis")
-    mresult=miro.analyze(mdata,params["miro_gas"],float(params.get("smooth_seconds",300)),params.get("miro_start"),params.get("miro_end"),30.0)
-    for warning in mresult.get("warnings", []):
-        add_log("WARNING", "MIRO analysis", warning)
-    set_job(.55,"Picarro: preparing time series and distribution")
-    presult=picarro.analyze(pdata,params["picarro_gas"],params.get("picarro_start"),params.get("picarro_end"))
+    if mdata is None and pdata is None: raise RuntimeError("Load MIRO or Picarro data first.")
+    mresult=None; presult=None
+    if mdata is not None:
+        set_job(.08,"MIRO: applying valve stabilization and trace-gas analysis")
+        mresult=miro.analyze(mdata,params["miro_gas"],float(params.get("smooth_seconds",300)),params.get("miro_start"),params.get("miro_end"),30.0)
+        for warning in mresult.get("warnings", []):
+            add_log("WARNING", "MIRO analysis", warning)
+    else:
+        add_log("INFO", "MIRO analysis", "This flight carries no MIRO data; analysing Picarro alone.")
+    if pdata is not None:
+        set_job(.55,"Picarro: preparing time series and distribution")
+        presult=picarro.analyze(pdata,params["picarro_gas"],params.get("picarro_start"),params.get("picarro_end"))
+    else:
+        add_log("INFO", "Picarro analysis", "This flight carries no Picarro data; analysing MIRO alone.")
     with LOCK: STORE["results"]={"miro":mresult,"picarro":presult,"comparison":{},"parameters":params}
-    set_job(.97,"Rendering MIRO and Picarro plots")
+    set_job(.97,"Rendering the available trace-gas plots")
 
 
 def comparison_worker(params):
     with LOCK:
         mdata,pdata=STORE["miro"],STORE["picarro"]
         existing=STORE.get("results")
-    if mdata is None or pdata is None: raise RuntimeError("Load MIRO and Picarro data first.")
+    # A comparison genuinely needs both; one analyzer has nothing to compare to.
+    if mdata is None or pdata is None: raise RuntimeError("A MIRO-Picarro comparison needs both analyzers; this flight carries one.")
     if not existing: raise RuntimeError("Run the MIRO and Picarro analysis before comparison.")
     comparisons={}
     for index,gas in enumerate(("CO2","CH4","H2O"),start=1):
@@ -722,7 +737,7 @@ async function startOperation(url,payload,title,onDone){if(app.busy)return;showP
 function enableLoadedControls(){app.loaded=true;filterBtn.className='status-green';setBusy(false)}function metaSummary(prefix=''){const m=app.meta;if(!m)return;const status=[String(prefix).replace(/\s*\|\s*$/,''),app.filterMessage].filter(Boolean).join(' | ');metaText.innerHTML=`<div class="meta-grid"><div class="meta-item"><b>MIRO</b><span>${m.miro.files_used??'project'} files &middot; ${m.miro.rows.toLocaleString()} rows</span><span>${filterInput(m.miro.start)} &rarr; ${filterInput(m.miro.end)}</span></div><div class="meta-item"><b>Picarro</b><span>${m.picarro.files_used??'project'} files &middot; ${m.picarro.rows.toLocaleString()} rows</span><span>${filterInput(m.picarro.start)} &rarr; ${filterInput(m.picarro.end)}</span></div>${status?`<div class="filter-status">${status}</div>`:''}</div>`}async function afterLoad(){app.meta=await getJsonWithRetry('/api/meta');app.resultsCurrent=false;app.comparisonCurrent=false;app.filterMessage='';app.filtersApplied=false;clearInstrumentPlots();fillSelect(miroGas,app.meta.miro.gases,'NO2 wet');fillSelect(picarroGas,app.meta.picarro.gases,'CO2 raw');resetFilters();resetComparisonPlots('Apply the DateTime Filter, run Analyze, then click Proceed.');enableLoadedControls();metaSummary()}
 function markAnalysisDirty(){app.resultsCurrent=false;app.comparisonCurrent=false;resetComparisonPlots('Analysis settings changed. Run Analyze, then click Proceed.');updateSetupState()}
 function currentState(){return {flight_no:flightNo.value.trim(),miro_path:miroPath.value,picarro_path:picarroPath.value,output_path:outputPath.value,miro_gas:miroGas.value,picarro_gas:picarroGas.value,smooth_seconds:Number(smoothSeconds.value),filters:{...app.filters},results_current:app.resultsCurrent,comparison_current:app.comparisonCurrent}}
-async function afterProjectLoad(){app.meta=await getJsonWithRetry('/api/meta');app.filterMessage='';clearInstrumentPlots();resetComparisonPlots('Project loaded. Run Analyze, then click Proceed.');const project=await getJsonWithRetry('/api/project-state');const state=project.state||{};flightNo.value=state.flight_no||'';miroPath.value=state.miro_path||app.meta.paths?.miro||'';picarroPath.value=state.picarro_path||app.meta.paths?.picarro||'';outputPath.value=state.output_path||'';outputSummary.textContent=outputPath.value?`Output: ${outputPath.value}`:'Output: not selected';outputSummary.title=outputPath.value||'No output directory selected';fillSelect(miroGas,app.meta.miro.gases,state.miro_gas||'NO2 wet');fillSelect(picarroGas,app.meta.picarro.gases,state.picarro_gas||'CO2 raw');smoothSeconds.value=state.smooth_seconds||300;resetFilters();if(state.filters){for(const [key,value] of Object.entries(state.filters)){const el=document.getElementById(key.replace(/_([a-z])/g,(_,c)=>c.toUpperCase()));if(el&&value)el.value=normaliseFilter(value)}app.filters={miro_start:miroStart.value,miro_end:miroEnd.value,picarro_start:picarroStart.value,picarro_end:picarroEnd.value};app.mismatchAccepted=false;app.filtersApplied=true}enableLoadedControls();metaSummary('Project loaded | ');app.resultsCurrent=Boolean(project.results_available);app.comparisonCurrent=false;if(project.results_available){const result=await getJsonWithRetry('/api/results');await renderMiro(result.miro);await renderPicarro(result.picarro);if(result.comparison&&['CO2','CH4','H2O'].every(gas=>result.comparison[gas])){for(const gas of ['CO2','CH4','H2O'])await renderComparison(gas,result.comparison[gas]);app.comparisonCurrent=true}else resetComparisonPlots('Project analysis loaded. Click Proceed to calculate comparisons.')}updateSetupState()}
+async function afterProjectLoad(){app.meta=await getJsonWithRetry('/api/meta');app.filterMessage='';clearInstrumentPlots();resetComparisonPlots('Project loaded. Run Analyze, then click Proceed.');const project=await getJsonWithRetry('/api/project-state');const state=project.state||{};flightNo.value=state.flight_no||'';miroPath.value=state.miro_path||app.meta.paths?.miro||'';picarroPath.value=state.picarro_path||app.meta.paths?.picarro||'';outputPath.value=state.output_path||'';outputSummary.textContent=outputPath.value?`Output: ${outputPath.value}`:'Output: not selected';outputSummary.title=outputPath.value||'No output directory selected';fillSelect(miroGas,app.meta.miro.gases,state.miro_gas||'NO2 wet');fillSelect(picarroGas,app.meta.picarro.gases,state.picarro_gas||'CO2 raw');smoothSeconds.value=state.smooth_seconds||300;resetFilters();if(state.filters){for(const [key,value] of Object.entries(state.filters)){const el=document.getElementById(key.replace(/_([a-z])/g,(_,c)=>c.toUpperCase()));if(el&&value)el.value=normaliseFilter(value)}app.filters={miro_start:miroStart.value,miro_end:miroEnd.value,picarro_start:picarroStart.value,picarro_end:picarroEnd.value};app.mismatchAccepted=false;app.filtersApplied=true}enableLoadedControls();metaSummary('Project loaded | ');app.resultsCurrent=Boolean(project.results_available);app.comparisonCurrent=false;if(project.results_available){const result=await getJsonWithRetry('/api/results');if(result?.miro?.series?.time?.length)await renderMiro(result.miro);if(result?.picarro?.series?.time?.length)await renderPicarro(result.picarro);if(result.comparison&&['CO2','CH4','H2O'].every(gas=>result.comparison[gas])){for(const gas of ['CO2','CH4','H2O'])await renderComparison(gas,result.comparison[gas]);app.comparisonCurrent=true}else resetComparisonPlots('Project analysis loaded. Click Proceed to calculate comparisons.')}updateSetupState()}
 function projectFilename(){const now=new Date(),part=value=>String(value).padStart(2,'0'),flight=flightNo.value.trim().replace(/[<>:"/\\|?*\x00-\x1F]/g,'_').replace(/\s+/g,'_').replace(/[. ]+$/g,'').slice(0,60),stamp=`${now.getFullYear()}${part(now.getMonth()+1)}${part(now.getDate())}_${part(now.getHours())}${part(now.getMinutes())}${part(now.getSeconds())}`;return `Trace_Gas_Project${flight?'_'+flight:''}_${stamp}.hdf`}
 function projectPath(){const directory=outputPath.value.replace(/[\\/]+$/,'');return directory+'\\'+projectFilename()}
 async function backendDataReady(){try{const response=await fetchWithTimeout('/api/meta',{},8000);if(!response.ok)return false;const meta=await response.json();return Boolean(meta?.miro?.rows&&meta?.picarro?.rows)}catch(error){return false}}
@@ -757,7 +772,7 @@ function resetFilters(){if(!app.meta)return;miroStart.value=filterInput(app.meta
 function applyFilters(){const next={miro_start:miroStart.value.trim(),miro_end:miroEnd.value.trim(),picarro_start:picarroStart.value.trim(),picarro_end:picarroEnd.value.trim()};const state=filterWindowState(next);if(state.error){alert(state.error);return}app.mismatchAccepted=false;if(!confirmMismatch(state))return;app.filters=next;app.filtersApplied=true;markAnalysisDirty();filterDialog.close();app.filterMessage=state.comparable?'Comparable filters applied (+/-2 min)':'Different timeframes accepted; correlations will be hidden';metaSummary();updateSetupState()}
 function analysisPayload(){return {flight_no:flightNo.value.trim(),miro_gas:miroGas.value,picarro_gas:picarroGas.value,smooth_seconds:Number(smoothSeconds.value),...app.filters}}
 async function runAnalysis(){if(!app.loaded||app.busy||!app.filtersApplied)return;const filterState=filterWindowState();if(filterState.error){alert(filterState.error);return}if(!confirmMismatch(filterState))return;markAnalysisDirty();const smoothing=Number(smoothSeconds.value);if(!Number.isFinite(smoothing)||smoothing<=0){alert('Smooth / cutoff must be a positive number of seconds.');return}await startOperation('/api/analyze',analysisPayload(),'Analyzing MIRO and Picarro measurements',afterAnalyze)}
-async function afterAnalyze(){const result=await getJsonWithRetry('/api/results');if(!result?.miro?.series?.time?.length)throw new Error('MIRO analysis returned no plottable values for the selected timeframe.');if(!result?.picarro?.series?.time?.length)throw new Error('Picarro analysis returned no plottable values for the selected timeframe.');app.resultsCurrent=false;app.comparisonCurrent=false;await renderMiro(result.miro);await renderPicarro(result.picarro);app.resultsCurrent=true;resetComparisonPlots('MIRO and Picarro analyses are ready. Click Proceed to calculate correlations.');updateSetupState()}
+async function afterAnalyze(){const result=await getJsonWithRetry('/api/results');const hasMiro=Boolean(result?.miro?.series?.time?.length);const hasPicarro=Boolean(result?.picarro?.series?.time?.length);if(!hasMiro&&!hasPicarro)throw new Error('Neither MIRO nor Picarro returned plottable values for the selected timeframe.');app.resultsCurrent=false;app.comparisonCurrent=false;if(hasMiro)await renderMiro(result.miro);if(hasPicarro)await renderPicarro(result.picarro);app.resultsCurrent=true;resetComparisonPlots('MIRO and Picarro analyses are ready. Click Proceed to calculate correlations.');updateSetupState()}
 async function runComparison(){if(!app.loaded||!app.resultsCurrent||app.busy)return;const filterState=filterWindowState();if(filterState.error){alert(filterState.error);return}if(!confirmMismatch(filterState))return;app.comparisonCurrent=false;await startOperation('/api/compare',analysisPayload(),'Analyzing MIRO vs Picarro comparison',afterComparison)}
 async function afterComparison(){const result=await getJsonWithRetry('/api/results');for(const gas of ['CO2','CH4','H2O'])await renderComparison(gas,result.comparison[gas]);app.comparisonCurrent=true;updateSetupState()}
 function clearInstrumentPlots(){app.miroResult=null;for(const id of ['miroRaw','miroResidual','miroAllan','miroPsd','picarroTime','picarroHist']){const element=document.getElementById(id);if(!element)continue;if(window.Plotly)Plotly.purge(id);element.innerHTML=''}}

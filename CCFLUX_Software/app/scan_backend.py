@@ -593,6 +593,21 @@ class FolderDialog:
         )
 
 
+# The straight-flight criteria, as the moving-window stability test names
+# them. Changing this tuple is what adds or removes a setting the operator can
+# edit; the defaults live with the detection itself.
+STRAIGHT_LEG_SETTINGS = (
+    "minimum_ground_speed_mps",
+    "minimum_segment_duration_s",
+    "heading_window_s",
+    "maximum_heading_std_deg",
+    "maximum_heading_rate_dps",
+    "maximum_roll_angle_deg",
+    "maximum_altitude_range_m",
+    "maximum_vertical_speed_mps",
+)
+
+
 class DashboardScanBackend:
     """Own one cancellable scan while exposing thread-safe dashboard snapshots."""
 
@@ -1003,17 +1018,22 @@ class DashboardScanBackend:
         resolved = Path(folder).expanduser().resolve()
         with self._lock:
             flight = self._selected_folder
-        if flight and (
+        # A delivery that keeps the camera data inside the flight folder is a
+        # normal layout, not a mistake. The two only have to be scanned once,
+        # which the scan arranges, so overlapping folders are accepted here.
+        overlapping = bool(flight) and (
             resolved == flight
             or resolved.is_relative_to(flight)
             or flight.is_relative_to(resolved)
-        ):
-            raise ValueError("Camera Folder and Flight Folder must be independent")
+        )
         with self._lock:
             self._selected_camera_folder = resolved
             camera_channel = self._new_scan_channel("camera", resolved)
             camera_channel["phase"] = "folder-selected"
             camera_channel["message"] = (
+                "Camera Folder sits inside the Flight Folder; one scan covers "
+                "both. Click Initial Check to discover every instrument."
+                if overlapping else
                 "Camera Folder selected. Click Initial Check and choose whether "
                 "to include camera scanning."
             )
@@ -1052,29 +1072,54 @@ class DashboardScanBackend:
                 raise ValueError(
                     f"Camera System Folder does not exist: {selected_camera_root}"
                 )
-            if (
-                selected_camera_root == root
-                or selected_camera_root.is_relative_to(root)
-                or root.is_relative_to(selected_camera_root)
-            ):
-                raise ValueError(
-                    "Flight Folder and Camera System Folder must be independent"
-                )
-        camera_root = selected_camera_root if include_camera else None
+        # One tree, one scan: reading the same files twice would double every
+        # count and every warning, so an overlapping camera folder is covered
+        # by the flight scan rather than scanned again beside it.
+        camera_inside_flight = selected_camera_root is not None and (
+            selected_camera_root == root
+            or selected_camera_root.is_relative_to(root)
+            or root.is_relative_to(selected_camera_root)
+        )
+        camera_root = (
+            None if camera_inside_flight else
+            (selected_camera_root if include_camera else None)
+        )
+        if camera_inside_flight and include_camera:
+            self.logger.log(
+                LogLevel.INFO,
+                "flight-scan",
+                f"Camera Folder {selected_camera_root} lies within the Flight "
+                f"Folder {root}; one scan covers both.",
+                processing_step="scan-start",
+            )
         if camera_root is not None:
             _assert_directory_responsive(camera_root)
         with self._lock:
             if self._worker is not None and self._worker.is_alive():
                 raise RuntimeError("A Flight Folder scan is already running")
-            existing_project = (
-                self._flight_project
-                if self._flight_project is not None
-                and self._flight_project.flight_folder_path.resolve(
+            # The same flight, wherever its raw data now sit. Matching only on
+            # the recorded path meant that scanning a project processed on
+            # another machine - where the flight folder was D:\Flight_X and is
+            # now /Volumes/SSD/Flight_X - started a new project and silently
+            # dropped every processed product the open one carried.
+            existing_project = None
+            if self._flight_project is not None:
+                recorded = self._flight_project.flight_folder_path.resolve(
                     strict=False
                 )
-                == root.resolve(strict=False)
-                else None
-            )
+                if recorded == root.resolve(strict=False):
+                    existing_project = self._flight_project
+                elif self._flight_project.flight_id == root.name:
+                    existing_project = self._flight_project
+                    existing_project.flight_folder_path = root
+                    self.logger.log(
+                        LogLevel.INFO,
+                        "flight-project",
+                        f"Flight {root.name} rescanned from {root}; the open "
+                        f"project recorded {recorded}. Keeping its processed "
+                        "products and adopting the folder now being scanned.",
+                        processing_step="scan-start",
+                    )
             incremental = bool(
                 existing_project is not None
                 and existing_project.completed_jobs
@@ -2344,10 +2389,27 @@ class DashboardScanBackend:
         }
 
     def noseboom_view(self) -> dict[str, object]:
+        # What this machine can actually serve, so the download dialog offers
+        # only the frequencies that will work rather than failing on Prepare.
+        raw_available = any(
+            Path(path).is_file() for path in self._noseboom_source_paths()
+        )
+        archived = None if raw_available else self._archived_noseboom_table()
         with self._lock:
             state = self._instruments["noseboom"]
             project = self._flight_project
             return {
+                "download": {
+                    "source": "original" if raw_available
+                    else "project" if archived is not None else "none",
+                    "maximum_frequency_hz": (
+                        None if raw_available
+                        else self.ARCHIVED_EXPORT_HZ if archived is not None
+                        else 0.0
+                    ),
+                    "full_variables_available": raw_available,
+                    "custodians": self.DATA_CUSTODIANS,
+                },
                 "ready": bool(state.quicklook.get("available")),
                 "flight_id": project.flight_id if project else None,
                 "project_file": str(project.project_file) if project else None,
@@ -2819,6 +2881,112 @@ class DashboardScanBackend:
             "options": dict(self._sif_options) if normalized == "sif" else None,
         }
 
+    SIZE_MAP_PAGES = {
+        "opc": ("OPC", "OPC_Size_Distribution_Map"),
+        "partector": ("Partector Pro", "Partector_Size_Distribution_Map"),
+    }
+
+    def size_distribution_map_view(self, page: str) -> dict[str, object]:
+        """Return an instrument's size distribution on the Noseboom track.
+
+        Built when asked for rather than during processing, so a flight
+        processed before this map existed shows it without being run again.
+        """
+        from core.size_distribution_map import build_map_payload
+
+        normalized = page.casefold()
+        if normalized not in self.SIZE_MAP_PAGES:
+            raise ValueError(f"No size distribution map for: {page}")
+        instrument_name = self.SIZE_MAP_PAGES[normalized][0]
+        view = self.hatchbox_view(normalized)
+        if not view.get("ready"):
+            return {
+                "ready": False,
+                "flight_id": view.get("flight_id"),
+                "message": view.get("message"),
+            }
+        with self._lock:
+            noseboom = self._instruments["noseboom"]
+            points = tuple(noseboom.quicklook.get("points", ()))
+            noseboom_status = noseboom.processing_status
+            flight_id = self._flight_project.flight_id if self._flight_project else ""
+        if not points:
+            return {
+                "ready": False,
+                "flight_id": flight_id,
+                "message": (
+                    "Noseboom is the navigation reference for the payload. "
+                    f"Process Noseboom from the Main GUI to place the "
+                    f"{instrument_name} samples on a map."
+                    if noseboom_status is not ProcessingStatus.COMPLETE
+                    else "Processed Noseboom data carries no position fix, so "
+                    f"the {instrument_name} samples cannot be placed on a map."
+                ),
+            }
+        payload = build_map_payload(
+            view.get("data") or {},
+            points,
+            flight_id=str(flight_id or ""),
+            instrument_name=instrument_name,
+        )
+        self.logger.log(
+            LogLevel.SUCCESS if payload["available"] else LogLevel.WARNING,
+            "hatchbox-view",
+            f"{instrument_name} size distribution paired with Noseboom positions: "
+            + ", ".join(
+                f"{name} {sensor['matched_count']}/{sensor['sampled_from']}"
+                for name, sensor in payload["sensors"].items()
+            ),
+            processing_step="size-distribution-map",
+        )
+        return {
+            "ready": bool(payload["available"]),
+            "flight_id": flight_id,
+            "message": payload["message"],
+            "data": payload,
+        }
+
+    def export_size_distribution_map_pdf(
+        self, page: str, request: Mapping[str, Any]
+    ) -> tuple[str, bytes]:
+        """Convert the visible map, as the browser drew it, to a PDF."""
+        from core.map_pdf_export import render_map_pdf
+
+        normalized = page.casefold()
+        if normalized not in self.SIZE_MAP_PAGES:
+            raise ValueError(f"No size distribution map for: {page}")
+        instrument_name, tag = self.SIZE_MAP_PAGES[normalized]
+        with self._lock:
+            project = self._flight_project
+            flight_id = project.flight_id if project else "Flight"
+        filename, pdf = render_map_pdf(
+            str(request.get("image") or ""),
+            flight_name=str(request.get("flight_name") or flight_id or "Flight"),
+            map_name=f"{instrument_name} size distribution map",
+            subject=str(request.get("subject") or "")
+            or f"{instrument_name} size-resolved concentration on the flight track",
+            filename_tag=tag,
+        )
+        destination: Path | None = None
+        if project is not None:
+            export_root = (
+                project.flight_output_root / "exports" / f"{normalized}_map"
+            )
+            export_root.mkdir(parents=True, exist_ok=True)
+            destination = export_root / filename
+            destination.write_bytes(pdf)
+            with self._lock:
+                project.output_locations[f"{normalized}_map_exports"] = export_root
+            self._checkpoint_project()
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "hatchbox-view",
+            f"{instrument_name} size distribution map exported as PDF",
+            file_path=destination,
+            processing_step="size-distribution-map-export",
+        )
+        return filename, pdf
+
     def log_hatchbox_view_event(self, page: str, message: str) -> None:
         self.logger.log(
             LogLevel.INFO, "hatchbox-view", message,
@@ -3201,13 +3369,7 @@ class DashboardScanBackend:
 
         report_progress(2.0, "Validating straight-flight settings.")
 
-        allowed = {
-            "min_speed_mps", "max_turn_rate_dps", "max_roll_deg",
-            "heading_window_s", "max_heading_range_deg", "min_leg_seconds",
-            "min_leg_distance_m", "target_leg_distance_m",
-            "max_leg_heading_drift_deg", "max_cross_track_m",
-            "max_altitude_deviation_m",
-        }
+        allowed = set(STRAIGHT_LEG_SETTINGS)
         if not isinstance(settings, dict) or not settings:
             raise ValueError("Straight-flight settings must be a non-empty object")
         parsed: dict[str, float] = {}
@@ -3228,16 +3390,21 @@ class DashboardScanBackend:
             selected_start = self._time_state.selected_analysis_start
             selected_end = self._time_state.selected_analysis_end
             current_view = dict(self._instruments["noseboom"].quicklook)
-        if report is None or project is None or selected_start is None or selected_end is None:
-            raise RuntimeError("Complete Initial Check, apply the Time Filter, and process Noseboom first")
-        paths = tuple(dict.fromkeys(
-            path
-            for candidate in report.candidates
-            if candidate.instrument_id == "noseboom"
-            for path in candidate.all_matching_files
-        ))
-        if not paths:
-            raise RuntimeError("No selected Noseboom source files are available")
+        if project is None:
+            raise RuntimeError("Open or scan a flight before changing the criteria")
+        if selected_start is None or selected_end is None:
+            raise RuntimeError("Apply the Time Filter before changing the criteria")
+        paths = tuple(
+            path for path in self._noseboom_source_paths() if Path(path).is_file()
+        )
+        archive = None if paths else self._archived_noseboom_table()
+        if not paths and archive is None:
+            raise RuntimeError(
+                "This project carries no Noseboom navigation table and the "
+                "original CSV is not reachable from this computer, so the "
+                "straight-flight criteria cannot be reapplied. Process "
+                "Noseboom again where the raw data are held."
+            )
         report_progress(10.0, "Preparing the selected Noseboom source interval.")
 
         self.logger.log(
@@ -3248,17 +3415,25 @@ class DashboardScanBackend:
             processing_step="straight-flight-recalculation",
         )
         bridge = LegacyNoseboomBridge()
-        data = bridge.load_csv_window(
-            paths,
-            int(selected_start.timestamp() * 1_000_000_000),
-            int(selected_end.timestamp() * 1_000_000_000),
-            progress=lambda percent, message: report_progress(
-                min(58.0, 12.0 + 1.15 * float(percent)), message
-            ),
-        )
-        report_progress(60.0, f"Loaded {len(data):,} selected Noseboom rows.")
-        report_progress(65.0, "Resampling the selected interval to validated 1 Hz navigation.")
-        one_hz = bridge.module.one_hz(data)
+        if archive is not None:
+            report_progress(
+                25.0,
+                f"Reading the {self.ARCHIVED_EXPORT_HZ:g} Hz navigation table held in the project.",
+            )
+            one_hz = self._one_hz_from_archive(archive, selected_start, selected_end)
+            report_progress(65.0, f"Prepared {len(one_hz):,} seconds of navigation.")
+        else:
+            data = bridge.load_csv_window(
+                paths,
+                int(selected_start.timestamp() * 1_000_000_000),
+                int(selected_end.timestamp() * 1_000_000_000),
+                progress=lambda percent, message: report_progress(
+                    min(58.0, 12.0 + 1.15 * float(percent)), message
+                ),
+            )
+            report_progress(60.0, f"Loaded {len(data):,} selected Noseboom rows.")
+            report_progress(65.0, "Resampling the selected interval to validated 1 Hz navigation.")
+            one_hz = bridge.module.one_hz(data)
         report_progress(75.0, "Detecting candidate straight-flight legs.")
         straight = bridge.module.detect_straight(one_hz, parsed)
         report_progress(88.0, "Preparing recalculated leg geometry and statistics.")
@@ -3373,20 +3548,48 @@ class DashboardScanBackend:
                 "filename": None,
             })
         with self._lock:
-            report = self._report
             project = self._flight_project
             selected_start = self._time_state.selected_analysis_start
             selected_end = self._time_state.selected_analysis_end
-        if report is None or project is None or selected_start is None or selected_end is None:
-            raise RuntimeError("Complete Initial Check and apply the Time Filter before downloading")
-        paths = tuple(dict.fromkeys(
-            path
-            for candidate in report.candidates
-            if candidate.instrument_id == "noseboom"
-            for path in candidate.all_matching_files
-        ))
-        if not paths:
-            raise RuntimeError("No selected Noseboom source files are available")
+        if project is None:
+            raise RuntimeError("Open or scan a flight before downloading")
+        if selected_start is None or selected_end is None:
+            raise RuntimeError("Apply the Time Filter before downloading")
+        # The original CSV stays on the acquisition machine. When it is out of
+        # reach - a project opened on another computer - the 10 Hz table the
+        # project carries answers anything from 1 to 10 Hz.
+        paths = tuple(
+            path for path in self._noseboom_source_paths() if Path(path).is_file()
+        )
+        archive = None if paths else self._archived_noseboom_table()
+        if not paths and archive is None:
+            with self._lock:
+                self._noseboom_export_progress.update(
+                    {"running": False, "error": "No Noseboom source", "step": "Failed"}
+                )
+            raise RuntimeError(
+                "This project carries no Noseboom download table and the "
+                "original CSV is not reachable from this computer. Reprocess "
+                "the flight where the raw data are held, or contact "
+                f"{self.DATA_CUSTODIANS}."
+            )
+        if archive is not None:
+            if variables == "full" or original_resolution or (
+                frequency_hz is not None and frequency_hz > self.ARCHIVED_EXPORT_HZ
+            ):
+                with self._lock:
+                    self._noseboom_export_progress.update(
+                        {"running": False, "step": "Failed",
+                         "error": "Above the resolution this project carries"}
+                    )
+                raise ValueError(
+                    "This project carries the Noseboom data at "
+                    f"{self.ARCHIVED_EXPORT_HZ:g} Hz, so the limited variable "
+                    "set can be downloaded at any frequency from 1 to "
+                    f"{self.ARCHIVED_EXPORT_HZ:g} Hz. For the full variable set "
+                    "or a higher resolution, please contact "
+                    f"{self.DATA_CUSTODIANS}."
+                )
         destination = project.flight_output_root / "exports" / "noseboom"
         destination.mkdir(parents=True, exist_ok=True)
         safe_flight = "".join(
@@ -3442,15 +3645,30 @@ class DashboardScanBackend:
             return target
 
         bridge = LegacyNoseboomBridge()
-        self._report_noseboom_export(5.0, "Reading the selected interval")
-        data = bridge.load_csv_window(
-            paths, start_ns, end_ns,
-            progress=lambda percent, step: self._report_noseboom_export(
-                5.0 + 0.75 * percent, step
-            ),
-        )
+        if archive is not None:
+            self._report_noseboom_export(
+                20.0, f"Reading the {self.ARCHIVED_EXPORT_HZ:g} Hz table held in the project"
+            )
+            import pandas as pd
+
+            source = pd.read_csv(archive)
+            window = pd.to_numeric(source.get("time_ns"), errors="coerce")
+            source = source.loc[window.between(start_ns, end_ns)]
+            if source.empty:
+                raise RuntimeError(
+                    "The Time Filter selects no part of the Noseboom table "
+                    "this project carries"
+                )
+        else:
+            self._report_noseboom_export(5.0, "Reading the selected interval")
+            data = bridge.load_csv_window(
+                paths, start_ns, end_ns,
+                progress=lambda percent, step: self._report_noseboom_export(
+                    5.0 + 0.75 * percent, step
+                ),
+            )
+            source = bridge.module.make_export_source(data)
         self._report_noseboom_export(85.0, "Resampling the selected variables")
-        source = bridge.module.make_export_source(data)
         table = bridge.module.resample_export_data(source, frequency_hz)
         target = destination / f"{safe_flight}_noseboom_{frequency_label}_{stamp}.{format_name}"
         self._report_noseboom_export(95.0, f"Writing {len(table):,} rows")
@@ -3483,14 +3701,267 @@ class DashboardScanBackend:
         )
         self._persist_project_logs()
         return target
-    def update_noseboom_straight_settings(self, settings: dict[str, object]) -> dict[str, float]:
-        allowed = {
-            "min_speed_mps", "max_turn_rate_dps", "max_roll_deg",
-            "heading_window_s", "max_heading_range_deg", "min_leg_seconds",
-            "min_leg_distance_m", "target_leg_distance_m",
-            "max_leg_heading_drift_deg", "max_cross_track_m",
-            "max_altitude_deviation_m",
+    # A project must be able to answer a download on its own. The raw Noseboom
+    # CSV is tens of gigabytes and stays on the acquisition machine, so the
+    # project carries a 10 Hz table of the plotted variables instead: enough
+    # for any request between 1 and 10 Hz, and small enough to travel.
+    ARCHIVED_EXPORT_HZ = 10.0
+    DATA_CUSTODIANS = (
+        "Eva Y. Pfannerstill, Georgios I. Gkatzelis or Biplob Dey"
+    )
+
+    def _archive_noseboom_10hz(
+        self,
+        project: FlightProject,
+        paths: Sequence[Path],
+        selected_start: datetime,
+        selected_end: datetime,
+    ) -> Path | None:
+        """Write the 10 Hz table the project travels with."""
+        import pandas as pd
+
+        from instruments.noseboom.legacy_bridge import LegacyNoseboomBridge
+
+        # Under "processed" so the archive travels inside the .ccflux and is
+        # relocated with every other product when the project moves machine.
+        target = (
+            project.flight_output_root / "processed" / "noseboom" / "noseboom_10hz.csv"
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            bridge = LegacyNoseboomBridge()
+            data = bridge.load_csv_window(
+                tuple(paths),
+                int(selected_start.timestamp() * 1_000_000_000),
+                int(selected_end.timestamp() * 1_000_000_000),
+            )
+            module = bridge.module
+            table = module.resample_export_data(
+                module.make_export_source(data), self.ARCHIVED_EXPORT_HZ
+            )
+            # Resampling renames the columns for the operator's download. The
+            # archive keeps the internal names, because it is read back as a
+            # source: renamed once here, it could not be resampled again.
+            table = table.rename(
+                columns={value: key for key, value in module.EXPORT_COLUMNS.items()}
+            )
+            # The navigation columns travel with the download columns, so the
+            # straight-flight criteria can be changed from the project alone
+            # without the raw delivery.
+            rule = f"{int(round(1000 / self.ARCHIVED_EXPORT_HZ))}ms"
+            navigation = module.resample_navigation(data, rule)
+            stamps = pd.to_datetime(
+                pd.to_numeric(table["time_ns"], errors="coerce"), unit="ns", utc=True
+            )
+            navigation.index = (
+                navigation.index.tz_localize("UTC")
+                if navigation.index.tz is None
+                else navigation.index.tz_convert("UTC")
+            )
+            joined = navigation.reindex(stamps, method="nearest", tolerance=pd.Timedelta(rule))
+            for column in joined.columns:
+                if column not in table.columns:
+                    table[column] = joined[column].to_numpy()
+            table.to_csv(target, index=False, encoding="utf-8")
+        except Exception as exc:
+            # The flight is still processed and reviewable; only the offline
+            # download loses its source, so say so and carry on.
+            self.logger.capture_exception(
+                "noseboom-export",
+                "The 10 Hz Noseboom table could not be archived; downloads from "
+                "this project will need the original CSV",
+                exc,
+                instrument="noseboom",
+                processing_step="archive-10hz",
+            )
+            return None
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "noseboom-export",
+            f"Archived {len(table):,} rows of Noseboom at "
+            f"{self.ARCHIVED_EXPORT_HZ:g} Hz for downloads from the project",
+            instrument="noseboom",
+            file_path=target,
+            processing_step="archive-10hz",
+        )
+        return target
+
+    def _write_noseboom_qc(
+        self,
+        project: FlightProject,
+        paths: Sequence[Path],
+        selected_start: datetime,
+        selected_end: datetime,
+    ) -> Path | None:
+        """Compute the quality control checks and store them with the project.
+
+        The checks read instrument columns the browser loader does not keep, so
+        they are run once here, while the raw delivery is still at hand, and the
+        workspace then opens them straight from the project.
+        """
+        from core.noseboom_qc import build_qc_payload, load_qc_window
+
+        target = project.flight_output_root / "quicklooks" / "noseboom_qc.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            frame = load_qc_window(
+                tuple(paths),
+                int(selected_start.timestamp() * 1_000_000_000),
+                int(selected_end.timestamp() * 1_000_000_000),
+            )
+            payload = build_qc_payload(frame)
+            target.write_text(
+                json.dumps(payload, ensure_ascii=False, allow_nan=False) + "\n",
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            # The flight stays processed and reviewable; only the QC section is
+            # missing, so say why rather than failing the whole instrument.
+            self.logger.capture_exception(
+                "noseboom-qc",
+                "Noseboom quality control could not be prepared",
+                exc,
+                instrument="noseboom",
+                processing_step="quality-control",
+            )
+            return None
+        airport = (payload.get("metar") or {}).get("airport") or {}
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "noseboom-qc",
+            "Noseboom quality control prepared"
+            + (
+                f"; wind compared with {airport.get('icao')} {airport.get('name')}"
+                if airport else "; no airport was near enough to compare"
+            ),
+            instrument="noseboom",
+            file_path=target,
+            processing_step="quality-control",
+        )
+        return target
+
+    def noseboom_qc_view(self) -> dict[str, object]:
+        """The stored quality control checks for the active project."""
+        with self._lock:
+            project = self._flight_project
+            status = self._instruments["noseboom"].processing_status
+            recorded = project.output_locations.get("noseboom_qc") if project else None
+        candidates = [recorded] if recorded else []
+        if project is not None:
+            candidates.append(
+                project.flight_output_root / "quicklooks" / "noseboom_qc.json"
+            )
+        for candidate in candidates:
+            if candidate and Path(candidate).is_file():
+                try:
+                    return {
+                        "ready": True,
+                        "data": json.loads(
+                            Path(candidate).read_text(encoding="utf-8")
+                        ),
+                    }
+                except (OSError, json.JSONDecodeError) as exc:
+                    return {
+                        "ready": False,
+                        "message": f"Saved Noseboom QC data is unreadable: {exc}",
+                    }
+        return {
+            "ready": False,
+            "message": (
+                "Process Noseboom from the Main GUI to prepare the quality "
+                "control checks."
+                if status is not ProcessingStatus.COMPLETE
+                else "This project was processed before the quality control "
+                "checks existed. Process Noseboom again to prepare them."
+            ),
         }
+
+    def _one_hz_from_archive(
+        self, archive: Path, selected_start: datetime, selected_end: datetime
+    ):
+        """The 1 Hz navigation table the leg detection reads, from the archive.
+
+        The stored table is at 10 Hz, so the seconds it resamples to are the
+        same ones the raw delivery would have produced.
+        """
+        import pandas as pd
+
+        frame = pd.read_csv(archive)
+        stamps = pd.to_numeric(frame.get("time_ns"), errors="coerce")
+        window = frame.loc[
+            stamps.between(
+                int(selected_start.timestamp() * 1_000_000_000),
+                int(selected_end.timestamp() * 1_000_000_000),
+            )
+        ].copy()
+        if window.empty:
+            raise RuntimeError(
+                "The Time Filter selects no part of the Noseboom navigation "
+                "table this project carries"
+            )
+        window["time"] = pd.to_datetime(
+            pd.to_numeric(window["time_ns"], errors="coerce"), unit="ns", utc=True
+        )
+        missing = [
+            name
+            for name in ("plot_lat", "plot_lon", "ground_speed_mps", "heading_deg",
+                         "roll_deg", "altitude_m", "vertical_speed_mps")
+            if name not in window.columns
+        ]
+        if missing:
+            raise RuntimeError(
+                "The Noseboom table in this project was written before the "
+                "navigation columns were archived, so the straight-flight "
+                "criteria cannot be reapplied from it. Process Noseboom again "
+                f"to store them (missing: {', '.join(missing)})."
+            )
+        from instruments.noseboom.legacy_bridge import LegacyNoseboomBridge
+
+        return LegacyNoseboomBridge().module.resample_navigation(window, "1s")
+
+    def _noseboom_source_paths(self) -> tuple[Path, ...]:
+        """Noseboom sources from the live scan, or from the saved project.
+
+        Reopening a project restores no scan report, so a download that only
+        consulted the report failed on a project the operator had just opened.
+        """
+        with self._lock:
+            report = self._report
+            project = self._flight_project
+        if report is not None:
+            paths = tuple(
+                dict.fromkeys(
+                    path
+                    for candidate in report.candidates
+                    if candidate.instrument_id == "noseboom"
+                    for path in candidate.all_matching_files
+                )
+            )
+            if paths:
+                return paths
+        if project is None:
+            return ()
+        saved = project.detected_instruments.get("noseboom")
+        if saved is None:
+            return ()
+        return tuple(Path(value) for value in (saved.selected_source_files or ()))
+
+    def _archived_noseboom_table(self) -> Path | None:
+        with self._lock:
+            project = self._flight_project
+        if project is None:
+            return None
+        recorded = project.output_locations.get("noseboom_10hz")
+        for candidate in (
+            recorded,
+            project.flight_output_root / "processed" / "noseboom" / "noseboom_10hz.csv",
+        ):
+            if candidate and Path(candidate).is_file():
+                return Path(candidate)
+        return None
+
+    def update_noseboom_straight_settings(self, settings: dict[str, object]) -> dict[str, float]:
+        allowed = set(STRAIGHT_LEG_SETTINGS)
         if not isinstance(settings, dict) or not settings:
             raise ValueError("Straight-flight settings must be a non-empty object")
         parsed: dict[str, float] = {}
@@ -3598,6 +4069,11 @@ class DashboardScanBackend:
                 project.flight_output_root / "reports" / "noseboom_statistics"
             )
             flight_name = project.flight_id
+        # The quality control figure is rendered from the stored checks, so an
+        # export carries them alongside the statistical overview.
+        qc = self.noseboom_qc_view()
+        if qc.get("ready"):
+            payload["quality_control"] = qc.get("data")
         raw_formats = options.get("formats", ["pdf"])
         if not isinstance(raw_formats, list):
             raise ValueError("Export formats must be a list")
@@ -5280,6 +5756,10 @@ class DashboardScanBackend:
         outputs = adapter.export_results(
             result, adapter.output_root, ("csv",)
         )
+        context.report_progress(94.0, "Running the Noseboom quality control checks")
+        qc_path = self._write_noseboom_qc(project, paths, selected_start, selected_end)
+        context.report_progress(96.0, "Archiving the 10 Hz Noseboom table")
+        archive = self._archive_noseboom_10hz(project, paths, selected_start, selected_end)
         quicklook = dict(result.metadata.get("map", {}))
         quicklook_path = project.flight_output_root / "quicklooks" / "noseboom_browser.json"
         quicklook_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5298,8 +5778,14 @@ class DashboardScanBackend:
                 saved_state.output_locations = [
                     *(Path(value.path) for value in outputs),
                     quicklook_path,
+                    *([archive] if archive is not None else []),
+                    *([qc_path] if qc_path is not None else []),
                 ]
             project.output_locations["noseboom_quicklook"] = quicklook_path
+            if archive is not None:
+                project.output_locations["noseboom_10hz"] = archive
+            if qc_path is not None:
+                project.output_locations["noseboom_qc"] = qc_path
             project.output_locations["processing_log"] = (
                 project.flight_output_root / "logs" / "processing.jsonl"
             )

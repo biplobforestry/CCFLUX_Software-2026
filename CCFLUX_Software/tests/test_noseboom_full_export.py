@@ -304,8 +304,13 @@ def test_original_resolution_is_offered_first():
 
 
 def test_original_is_disabled_for_the_limited_set():
-    """The limited table is resampled by definition, so it has no original."""
-    assert "original.disabled=!full" in SCRIPT
+    """The limited table is resampled by definition, so it has no original.
+
+    Original resolution is also unavailable from a project, which carries a
+    10 Hz table rather than the raw CSV.
+    """
+    assert "option.disabled=!full||fromProject" in SCRIPT
+    assert "if(!chosen||chosen.disabled)frequency.value='1'" in SCRIPT
 
 
 def test_the_download_reports_progress_while_it_writes():

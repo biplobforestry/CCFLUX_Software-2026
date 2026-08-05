@@ -18,7 +18,7 @@
   const nextFrame = () => new Promise(resolve => requestAnimationFrame(() => resolve()));
   const points = () => browserPoints;
   const layerRoutes = { route: '/noseboom/flight-route', wind: '/noseboom/wind-speed', straight: '/noseboom/straight-flight' };
-  const statRoutes = { hist: '/noseboom/statistics/histogram', freq: '/noseboom/statistics/frequency', alt: '/noseboom/statistics/altitude-profile', spectra: '/noseboom/statistics/wind-spectra' };
+  const statRoutes = { hist: '/noseboom/statistics/histogram', freq: '/noseboom/statistics/frequency', qc: '/noseboom/statistics/qc', alt: '/noseboom/statistics/altitude-profile', spectra: '/noseboom/statistics/wind-spectra' };
   const schemes = {
     turbo: [[48,18,59],[70,98,215],[53,171,248],[26,228,182],[162,252,60],[249,186,56],[233,75,53],[122,4,3]],
     viridis: [[68,1,84],[59,82,139],[33,145,140],[94,201,98],[253,231,37]],
@@ -26,17 +26,14 @@
     cividis: [[0,34,78],[40,75,112],[101,105,112],[160,137,91],[253,234,69]]
   };
   const settingInfo = {
-    min_speed_mps: ['Minimum aircraft speed', 'm/s', 'Samples below this ground speed are excluded.', 8],
-    max_turn_rate_dps: ['Maximum turn rate', '°/s', 'Limits rapid heading changes in candidate samples.', 1.5],
-    max_roll_deg: ['Maximum absolute roll', '°', 'Limits aircraft bank angle.', 8],
-    heading_window_s: ['Heading stability window', 's', 'Window used for heading-range stability.', 20],
-    max_heading_range_deg: ['Maximum heading range', '°', 'Maximum heading variation inside the stability window.', 12],
-    min_leg_seconds: ['Minimum leg duration', 's', 'Minimum accepted duration for one straight-flight leg.', 60],
-    min_leg_distance_m: ['Minimum leg distance', 'm', 'Minimum accepted ground-track distance.', 1000],
-    target_leg_distance_m: ['Target leg distance', 'm', 'Target distance used to divide long candidate runs.', 2000],
-    max_leg_heading_drift_deg: ['Maximum leg heading drift', '°', 'Maximum unwrapped heading spread over a leg.', 20],
-    max_cross_track_m: ['Maximum cross-track deviation', 'm', 'Maximum distance from the endpoint-defined reference line.', 80],
-    max_altitude_deviation_m: ['Maximum altitude deviation', 'm', 'Maximum altitude departure from the leg mean.', 50]
+    minimum_ground_speed_mps: ['Minimum ground speed', 'm/s', 'Forward motion the Zeppelin must hold; slower samples are not a transect.', 8],
+    minimum_segment_duration_s: ['Minimum segment duration', 's', 'Shortest continuous period accepted as one straight-flight leg.', 60],
+    heading_window_s: ['Heading stability window', 's', 'Centred window over which heading steadiness and altitude range are measured.', 30],
+    maximum_heading_std_deg: ['Maximum heading standard deviation', '°', 'Circular standard deviation of heading inside the window.', 10],
+    maximum_heading_rate_dps: ['Maximum heading rate', '°/s', 'How fast the heading may change between samples.', 3],
+    maximum_roll_angle_deg: ['Maximum absolute roll', '°', 'Bank angle limit, so a turning airship is not counted as straight.', 10],
+    maximum_altitude_range_m: ['Maximum altitude range', 'm', 'Altitude spread allowed inside the stability window.', 100],
+    maximum_vertical_speed_mps: ['Maximum absolute vertical speed', 'm/s', 'Climb or descent rate limit for quasi-level flight.', 2.2]
   };
   const plotConfig = { responsive: true, scrollZoom: true, displayModeBar: true, displaylogo: false, doubleClick: 'reset', toImageButtonOptions: { format: 'png', scale: 2 } };
   const plotFont = { family: 'Times New Roman, Times, serif', size: 14, color: '#102534' };
@@ -66,6 +63,7 @@
     if (path.endsWith('/straight-flight')) return { layer: 'straight' };
     if (path.endsWith('/flight-route') || path.endsWith('/flightroot')) return { layer: 'route' };
     if (path.endsWith('/statistics/frequency')) return { stat: 'freq' };
+    if (path.endsWith('/statistics/qc')) return { stat: 'qc' };
     if (path.endsWith('/statistics/altitude-profile')) return { stat: 'alt' };
     if (path.endsWith('/statistics/wind-spectra')) return { stat: 'spectra' };
     if (path.includes('/statistics/')) return { stat: 'hist' };
@@ -142,7 +140,7 @@
     if (!legInfoControl) { legInfoControl = L.control({position:'topright'}); legInfoControl.onAdd = () => L.DomUtil.create('div','leg-info'); legInfoControl.addTo(map); }
     const element = legInfoControl.getContainer(); L.DomEvent.disableClickPropagation(element);
     const display = value => finite(value) ? Number(value).toFixed(2) : 'n/a';
-    element.innerHTML = `<h3>Straight Flight leg ${escapeHtml(leg.id)}</h3><table><tr><td>Length</td><td>${display(leg.distance_km)} km</td></tr><tr><td>Duration</td><td>${display(leg.duration_s)} s</td></tr><tr><td>Mean aircraft speed</td><td>${display(leg.mean_speed_mps)} m/s</td></tr><tr><td>Mean wind</td><td>${display(leg.mean_wind_mps)} m/s</td></tr><tr><td>Mean heading</td><td>${display(leg.mean_heading_deg)}°</td></tr><tr><td>Heading drift</td><td>${display(leg.heading_drift_deg)}°</td></tr><tr><td>Maximum cross-track</td><td>${display(leg.max_cross_track_m)} m</td></tr></table>${windRoseSvg(leg.windSamples)}<small>Click this leg again to hide the Wind Rose.</small>`;
+    element.innerHTML = `<h3>Straight Flight leg ${escapeHtml(leg.id)}</h3><table><tr><td>Length</td><td>${display(leg.distance_km)} km</td></tr><tr><td>Duration</td><td>${display(leg.duration_s)} s</td></tr><tr><td>Mean aircraft speed</td><td>${display(leg.mean_speed_mps)} m/s</td></tr><tr><td>Mean wind</td><td>${display(leg.mean_wind_mps)} m/s</td></tr><tr><td>Mean heading</td><td>${display(leg.mean_heading_deg)}°</td></tr><tr><td>Heading SD</td><td>${display(leg.heading_std_deg)}°</td></tr><tr><td>Maximum roll</td><td>${display(leg.max_roll_deg)}°</td></tr><tr><td>Altitude range</td><td>${display(leg.altitude_range_m)} m</td></tr><tr><td>Maximum vertical speed</td><td>${display(leg.max_vertical_speed_mps)} m/s</td></tr></table>${windRoseSvg(leg.windSamples)}<small>Click this leg again to hide the Wind Rose.</small>`;
   }
   async function makeLayers(route) {
     const width = Math.max(1, Math.min(20, Number(byId('lineWidthInput').value) || 5));
@@ -180,8 +178,139 @@
     return {tickmode:'array',tickvals,ticktext};
   }
   function percentile(values, percent) { const sorted=values.filter(Number.isFinite).sort((a,b)=>a-b); if(!sorted.length)return null; const position=(sorted.length-1)*percent/100, lower=Math.floor(position), upper=Math.ceil(position); return sorted[lower]+(sorted[upper]-sorted[lower])*(position-lower); }
-  function frequencyDistribution(values, bins=48) { const clean=values.filter(Number.isFinite); if(clean.length<2)return {centers:[],curve:[],start:0,end:1,size:1}; let start=Math.min(...clean),end=Math.max(...clean); if(start===end){start-=.5;end+=.5;} const size=(end-start)/bins,counts=Array(bins).fill(0); clean.forEach(value=>{const index=Math.min(bins-1,Math.max(0,Math.floor((value-start)/size)));counts[index]+=1;}); const sigma=1.35,radius=4,kernel=[]; for(let offset=-radius;offset<=radius;offset+=1)kernel.push(Math.exp(-.5*(offset/sigma)**2)); const scale=kernel.reduce((a,b)=>a+b,0); const curve=counts.map((_,index)=>kernel.reduce((sum,weight,k)=>sum+weight*(counts[index+k-radius]||0),0)/scale); return {centers:counts.map((_,index)=>start+(index+.5)*size),curve,start,end,size}; }  async function renderStats(kind='hist', shouldUpdateUrl=true, manageBusy=true) {
-    if(!payload?.data?.available)return; const token=++renderToken; activeStat=kind; document.querySelectorAll('[data-stat]').forEach(button=>button.classList.toggle('active',button.dataset.stat===kind)); if(shouldUpdateUrl)updateViewUrl(statRoutes[kind]); if(manageBusy)showBusy('Preparing scientific plots','Rendering the selected Noseboom statistical view.'); await nextFrame();
+  function frequencyDistribution(values, bins=48) { const clean=values.filter(Number.isFinite); if(clean.length<2)return {centers:[],curve:[],start:0,end:1,size:1}; let start=Math.min(...clean),end=Math.max(...clean); if(start===end){start-=.5;end+=.5;} const size=(end-start)/bins,counts=Array(bins).fill(0); clean.forEach(value=>{const index=Math.min(bins-1,Math.max(0,Math.floor((value-start)/size)));counts[index]+=1;}); const sigma=1.35,radius=4,kernel=[]; for(let offset=-radius;offset<=radius;offset+=1)kernel.push(Math.exp(-.5*(offset/sigma)**2)); const scale=kernel.reduce((a,b)=>a+b,0); const curve=counts.map((_,index)=>kernel.reduce((sum,weight,k)=>sum+weight*(counts[index+k-radius]||0),0)/scale); return {centers:counts.map((_,index)=>start+(index+.5)*size),curve,start,end,size}; }
+  // --- Quality Check -----------------------------------------------------
+  // The checks follow the campaign evaluation script: the flow-uncertainty
+  // limit test, wind direction against heading and ground track, the vertical
+  // wind, and wind speed and direction against the nearest airport's METAR
+  // reports. The airport is always named, so a reader knows whose observations
+  // the comparison used.
+  let qcPayload = null;
+  const QC_PLOTS = ['qcFlow','qcDirection','qcVertical','qcWindSpeed','qcWindDirection'];
+  const qcConfig = {responsive:true,displaylogo:false,
+    toImageButtonOptions:{format:'png',scale:3}};
+  function qcLayout(title, yTitle, extra={}) {
+    return {
+      title:{text:title,x:.5,y:1,yanchor:'top',pad:{t:8},font:{size:14}},
+      paper_bgcolor:'#ffffff', plot_bgcolor:'#ffffff',
+      font:{family:'Arial, sans-serif',size:11,color:'#172431'},
+      margin:{l:64,r:18,t:64,b:52},
+      xaxis:{title:'UTC time',gridcolor:'#dfe7ec',automargin:true},
+      yaxis:{title:yTitle,gridcolor:'#dfe7ec',automargin:true},
+      legend:{orientation:'h',y:1.02,yanchor:'bottom',x:0,font:{size:10}},
+      hovermode:'x unified', ...extra
+    };
+  }
+  const qcNumber = (value, digits=3) =>
+    Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : '—';
+
+  function renderQcFlow(section) {
+    Plotly.react('qcFlow', [
+      {type:'scattergl',mode:'lines',x:section.time,y:section.alpha,name:'alpha',
+       line:{width:1.2,color:'#0072B2'}},
+      {type:'scattergl',mode:'lines',x:section.time,y:section.beta,name:'beta',
+       line:{width:1.2,color:'#D55E00',dash:'dash'}}
+    ], qcLayout(
+      `Flow-uncertainty angles · ${section.samples_at_limit.toLocaleString()} sample(s) at the 90° limit `
+      + `(${section.percentage_at_limit.toFixed(4)}%)`,
+      'Uncertainty [deg]'), qcConfig);
+  }
+  function renderQcDirection(section) {
+    Plotly.react('qcDirection', [
+      {type:'scattergl',mode:'lines',x:section.time,y:section.wind_direction,
+       name:'Wind direction',line:{width:1.2,color:'#0072B2'}},
+      {type:'scattergl',mode:'lines',x:section.time,y:section.heading,
+       name:'Heading',line:{width:1.1,color:'#D55E00'},opacity:.85},
+      {type:'scattergl',mode:'lines',x:section.time,y:section.track,
+       name:'Track',line:{width:1.1,color:'#009E73'},opacity:.85}
+    ], qcLayout(
+      `Wind direction, heading and ground track · circular r ${qcNumber(section.wind_track_correlation)} (track), `
+      + `${qcNumber(section.wind_heading_correlation)} (heading)`,
+      'Direction [deg]',
+      {yaxis:{title:'Direction [deg]',range:[0,360],tickvals:[0,90,180,270,360],
+              gridcolor:'#dfe7ec',automargin:true}}), qcConfig);
+  }
+  function renderQcVertical(section) {
+    Plotly.react('qcVertical', [
+      {type:'scattergl',mode:'lines',x:section.time,y:section.vertical_wind,
+       name:'Instantaneous',line:{width:1,color:'#8c9aa5'},opacity:.55},
+      {type:'scattergl',mode:'lines',x:section.time,y:section.rolling_mean,
+       name:'10-minute mean',line:{width:1.8,color:'#CC2936'}}
+    ], qcLayout(
+      `Vertical wind speed · mean ${qcNumber(section.mean)} m/s, sd ${qcNumber(section.standard_deviation)} m/s`,
+      'Vertical wind [m s⁻¹]'), qcConfig);
+  }
+  function qcValidationTraces(section, name) {
+    const airport = section.airport;
+    const label = airport ? `${airport.icao} · ${airport.name}` : 'Airport METAR';
+    const traces = [{type:'scattergl',mode:'lines',x:section.time,y:section.noseboom,
+      name:'Noseboom',line:{width:1.2,color:'#0072B2'}}];
+    if ((section.report_time || []).length) {
+      traces.push({type:'scatter',mode:'markers',x:section.report_time,y:section.report_value,
+        name:label,marker:{size:7,color:'#D55E00',symbol:'circle'}});
+    }
+    return traces;
+  }
+  function qcValidationTitle(section, quantity, unit) {
+    const airport = section.airport;
+    if (!(section.report_time || []).length) {
+      return `${quantity} · no METAR report from ${airport ? airport.icao : 'any airport'} in this window`;
+    }
+    return `${quantity} vs ${airport.icao} ${airport.name} (${airport.distance_km.toFixed(1)} km) · `
+      + `bias ${qcNumber(section.bias)} ${unit}, MAE ${qcNumber(section.mae)} ${unit}`;
+  }
+  function renderQcWindSpeed(section) {
+    Plotly.react('qcWindSpeed', qcValidationTraces(section),
+      qcLayout(qcValidationTitle(section,'Wind speed','m/s'), 'Wind speed [m s⁻¹]'), qcConfig);
+  }
+  function renderQcWindDirection(section) {
+    Plotly.react('qcWindDirection', qcValidationTraces(section),
+      qcLayout(qcValidationTitle(section,'Wind direction','deg'), 'Direction [deg]',
+        {yaxis:{title:'Direction [deg]',range:[0,360],tickvals:[0,90,180,270,360],
+                gridcolor:'#dfe7ec',automargin:true}}), qcConfig);
+  }
+  async function renderQualityControl() {
+    byId('statsView').hidden = true;
+    byId('qcView').hidden = false;
+    if (!qcPayload) {
+      const response = await api('/api/noseboom/qc');
+      if (!response.ready) {
+        byId('qcNote').textContent = response.message || 'Quality Check data are not available.';
+        QC_PLOTS.forEach(id => Plotly.purge(id));
+        return;
+      }
+      qcPayload = response.data;
+    }
+    const data = qcPayload;
+    renderQcFlow(data.flow_uncertainty);
+    renderQcDirection(data.direction_heading_track);
+    renderQcVertical(data.vertical_wind);
+    renderQcWindSpeed(data.wind_speed_validation);
+    renderQcWindDirection(data.wind_direction_validation);
+    const airport = data.metar?.airport;
+    const reports = data.metar?.reports ?? 0;
+    byId('qcNote').textContent =
+      `${data.record_count.toLocaleString()} records evaluated. `
+      + (airport
+          ? `Wind validated against ${airport.icao} ${airport.name}, `
+            + `${airport.distance_km.toFixed(1)} km from the flight's median position; `
+            + `${reports} METAR report(s) in the window`
+            + (data.metar.error ? ` (${data.metar.error})` : '')
+            + `. Source: ${data.metar.source}.`
+          : 'No configured airport could be selected, so the wind comparison has no reference.');
+    QC_PLOTS.forEach(id => Plotly.Plots.resize(byId(id)));
+  }
+
+  async function renderStats(kind='hist', shouldUpdateUrl=true, manageBusy=true) {
+    if(!payload?.data?.available)return; const token=++renderToken; activeStat=kind;
+    if(kind==='qc'){
+      document.querySelectorAll('[data-stat]').forEach(button=>button.classList.toggle('active',button.dataset.stat===kind));
+      if(shouldUpdateUrl)updateViewUrl(statRoutes[kind]);
+      if(manageBusy)showBusy('Preparing Quality Check','Reading the stored Noseboom checks.');
+      try{ await renderQualityControl(); } finally { if(manageBusy)hideBusy(); }
+      return;
+    }
+    byId('qcView').hidden=true; byId('statsView').hidden=false; document.querySelectorAll('[data-stat]').forEach(button=>button.classList.toggle('active',button.dataset.stat===kind)); if(shouldUpdateUrl)updateViewUrl(statRoutes[kind]); if(manageBusy)showBusy('Preparing scientific plots','Rendering the selected Noseboom statistical view.'); await nextFrame();
     try {
       if(!window.Plotly)throw new Error('The scientific plotting library is unavailable'); const view=byId('statsView'); Plotly.purge(view); view.innerHTML=''; view.className='chart';
       if(kind==='hist'){
@@ -216,7 +345,50 @@
 
   function showViewMenu(event,panel,path,straight=false){event.preventDefault();viewMenuContext={panel,path};const menu=byId('viewMenu');byId('menuCurrentSettings').hidden=!straight;byId('menuChangeSettings').hidden=!straight;menu.style.left=`${Math.min(event.clientX,window.innerWidth-270)}px`;menu.style.top=`${Math.min(event.clientY,window.innerHeight-190)}px`;menu.classList.add('show');}
   function closeViewMenu(){byId('viewMenu').classList.remove('show');}
-  async function openFullscreen(panelName){closeViewMenu();const target=panelName==='map'?byId('mapCard'):byId('statsCard');if(!document.fullscreenElement)await target.requestFullscreen();else await document.exitFullscreen();setTimeout(()=>{if(map)map.invalidateSize(false);document.querySelectorAll('#statsView .js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));},180);}
+  async function openFullscreen(panelName){closeViewMenu();const target=panelName==='map'?byId('mapCard'):byId('statsCard');if(!document.fullscreenElement)await target.requestFullscreen();else await document.exitFullscreen();setTimeout(()=>{if(map)map.invalidateSize(false);document.querySelectorAll('#statsView .js-plotly-plot, #qcView .js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));},180);}
+
+  // The methods statement is written from the settings in force at the moment
+  // it is opened, so a reader copying it always quotes the thresholds that
+  // produced the legs on screen rather than the defaults.
+  function straightSettingValue(key) {
+    const settings = payload?.data?.straight_settings || {};
+    const value = settings[key];
+    const fallback = settingInfo[key] ? settingInfo[key][3] : null;
+    const number = Number(value ?? fallback);
+    return Number.isFinite(number) ? number : fallback;
+  }
+  function methodsStatement() {
+    const value = key => {
+      const number = straightSettingValue(key);
+      return Number.isFinite(Number(number))
+        ? String(Number(number)).replace(/\.0$/, '') : '—';
+    };
+    return 'Straight-flight legs were identified using a moving-window stability test '
+      + 'applied to the 1 Hz resampled noseboom/INS data. A flight segment was accepted '
+      + 'as a straight leg when the Zeppelin maintained sufficient forward motion and '
+      + 'quasi-steady attitude over a continuous period. The criteria were: ground speed '
+      + `≥ ${value('minimum_ground_speed_mps')} m s⁻¹, segment duration `
+      + `≥ ${value('minimum_segment_duration_s')} s, heading-stability window = `
+      + `${value('heading_window_s')} s, circular heading standard deviation ≤ `
+      + `${value('maximum_heading_std_deg')}°, heading-rate ≤ `
+      + `${value('maximum_heading_rate_dps')}° s⁻¹, absolute roll angle ≤ `
+      + `${value('maximum_roll_angle_deg')}°, altitude range within the window ≤ `
+      + `${value('maximum_altitude_range_m')} m, and absolute vertical speed ≤ `
+      + `${value('maximum_vertical_speed_mps')} m s⁻¹. `
+      + 'Consecutive samples satisfying all criteria were merged into one straight-flight '
+      + 'leg. Leg distance was calculated from consecutive latitude/longitude and leg '
+      + 'duration was calculated from Airflow_UTCcorr_Nanoseconds_ns.';
+  }
+  function showMethods() {
+    const legs = (payload?.data?.straight_metrics || []).length;
+    byId('methodsText').textContent = methodsStatement();
+    byId('methodsNote').textContent = legs
+      ? `${legs} straight-flight leg(s) met these criteria in the selected interval.`
+      : 'No straight-flight leg met these criteria in the selected interval.';
+    byId('methodsModal').classList.add('show');
+  }
+  function closeMethods() { byId('methodsModal').classList.remove('show'); }
+
   function showSettings(editable){const settings=payload?.data?.straight_settings||{},body=byId('settingsBody');body.innerHTML=`<p>These thresholds are applied to the preserved 1 Hz straight-flight classifier. Recalculation first creates a temporary visualization; you decide afterward whether it is saved in the Flight Project.</p><div class="settings-grid">${Object.entries(settingInfo).map(([key,[name,unit,help,defaultValue]])=>`<div class="setting"><label>${escapeHtml(name)} [${escapeHtml(unit)}]</label><input data-setting="${key}" type="number" step="any" value="${escapeHtml(settings[key]??defaultValue)}" ${editable?'':'disabled'} /><small>${escapeHtml(help)}</small></div>`).join('')}</div>`;byId('settingsActions').innerHTML=editable?'<button class="btn" id="settingsCancel">Cancel</button><button class="btn" id="settingsReset">Reset settings</button><button class="btn primary" id="settingsSave">Save settings and Proceed</button>':'';byId('settingsModal').classList.add('show');if(editable){byId('settingsCancel').onclick=closeSettings;byId('settingsReset').onclick=resetSettings;byId('settingsSave').onclick=saveSettingsAndProceed;}}
   function closeSettings(){byId('settingsModal').classList.remove('show');}
   function readSettings(){const settings={};for(const input of document.querySelectorAll('[data-setting]')){const value=Number(input.value);if(!Number.isFinite(value)||value<=0)throw new Error(`${settingInfo[input.dataset.setting][0]} must be greater than zero`);settings[input.dataset.setting]=value;}return settings;}
@@ -277,18 +449,36 @@
   async function saveSettingsAndProceed(){try{await applyStraightSettings(readSettings(),false);}catch(error){window.alert(error.message);}}
   async function resetSettings(){await applyStraightSettings(defaultSettings(),true);}
 
-  function openDownload(){byId('downloadModal').classList.add('show');}
+  function openDownload(){syncDownloadOptions();byId('downloadModal').classList.add('show');}
   function closeDownload(){byId('downloadModal').classList.remove('show');}
   // Original resolution writes the recorded rows, which only the full variable
   // set offers; the limited set is a resampled table by definition.
   function syncDownloadOptions(){
+    // A project opened away from the acquisition machine carries a 10 Hz
+    // table rather than the raw CSV, so only what it can serve is offered
+    // and the rest names who to ask.
+    const download=payload?.download||{};
+    const fromProject=download.source==='project';
+    const ceiling=Number(download.maximum_frequency_hz);
+    const variables=byId('downloadVariables').value;
+    const fullOption=byId('downloadVariables').querySelector('option[value="full"]');
+    fullOption.disabled=fromProject;
+    if(fromProject&&variables==='full')byId('downloadVariables').value='limited';
     const full=byId('downloadVariables').value==='full';
-    const original=byId('downloadFrequency').querySelector('option[value="original"]');
-    original.disabled=!full;
-    if(!full&&byId('downloadFrequency').value==='original')byId('downloadFrequency').value='1';
-    byId('downloadVariablesNote').textContent=full
-      ?'Full writes every recorded column, plus EVENT and Flight ID. CSV or text only.'
-      :'Limited writes the 14 columns shown on this page.';
+    const frequency=byId('downloadFrequency');
+    frequency.querySelectorAll('option').forEach(option=>{
+      if(option.value==='original'){option.disabled=!full||fromProject;return;}
+      option.disabled=fromProject&&Number.isFinite(ceiling)&&Number(option.value)>ceiling;
+    });
+    const chosen=frequency.querySelector(`option[value="${frequency.value}"]`);
+    if(!chosen||chosen.disabled)frequency.value='1';
+    byId('downloadVariablesNote').textContent=fromProject
+      ?`This project carries the Noseboom data at ${ceiling} Hz. Any frequency `
+        +`from 1 to ${ceiling} Hz is available. For the full variable set or a `
+        +`higher resolution, please contact ${download.custodians||'the data custodians'}.`
+      :full
+        ?'Full writes every recorded column, plus EVENT and Flight ID. CSV or text only.'
+        :'Limited writes the 14 columns shown on this page.';
   }
 
   let downloadPolling=false;
@@ -373,16 +563,16 @@
   async function startStatisticsExport(){const formats=Array.from(document.querySelectorAll('[name=exportFormat]:checked')).map(input=>input.value);if(!formats.length){alert('Select at least one export format.');return;}const dpi=Number(byId('exportDpi').value);closeExport();showBusy('Exporting publication figures','Starting the background renderer.',1);try{await api('/api/noseboom/statistics/export',{method:'POST',body:JSON.stringify({formats,dpi})});await pollStatisticsExport();}catch(error){hideBusy();alert(error.message);log(`Noseboom statistics export failed to start: ${error.message}`);}}
   async function pollStatisticsExport(){for(;;){await new Promise(resolve=>setTimeout(resolve,350));const state=await api('/api/noseboom/statistics/export/progress');showBusy('Exporting publication figures',state.step||'Rendering figures',state.progress||0);if(state.status==='running')continue;if(state.status==='failed'){hideBusy();throw new Error(state.error||'Publication export failed');}hideBusy();byId('exportResults').innerHTML=`<h3>Export complete</h3>${(state.files||[]).map(file=>`<a href="${escapeHtml(file.url)}">Download ${escapeHtml(file.name)}</a>`).join('')}`;byId('exportModal').classList.add('show');log(`Noseboom statistics export complete: ${(state.files||[]).length} files`);return;}}
 
-  async function refresh(){showBusy('Loading Noseboom workspace','Reading the active Flight Project and bounded scientific browser data.');try{payload=await api('/api/noseboom');const rawPoints=(payload?.data?.points||[]).filter(point=>finite(point.lat)&&finite(point.lon)),pointLimit=Math.max(500,Number(payload?.data?.browser_limits?.map_points)||6000),pointStep=Math.max(1,Math.ceil(rawPoints.length/pointLimit));browserPoints=rawPoints.filter((_,index)=>index%pointStep===0);byId('flightName').textContent=payload.flight_id||'No project';if(!payload.ready||!payload.data?.available){byId('statusText').textContent=payload.processing_status==='processing'?payload.processing_step:'Noseboom processing has not produced a map yet.';showMapError(payload.data?.reason||'Noseboom processing has not produced a valid route.');byId('statisticsExportBtn').disabled=true;return;}byId('statusDot').classList.add('ready');byId('statusText').textContent='Processed Noseboom data loaded from the active Flight Project';byId('mapMessage').hidden=true;byId('statisticsExportBtn').disabled=false;const route=points();if(ensureMap()){await makeLayers(route);showLayer(activeLayer,false,false);resetMap(false);setTimeout(()=>map.invalidateSize(false),120);}showBusy('Preparing scientific plots','Rendering the selected Noseboom statistical view.',62);await renderStats(activeStat,false,false);byId('dataExportBtn').style.display='';log('Noseboom browser data rendered successfully');}catch(error){byId('statusText').textContent=`Noseboom view failed: ${error.message}`;showMapError(error.message);log(`Noseboom browser error: ${error.message}`);}finally{hideBusy();}}
+  async function refresh(){showBusy('Loading Noseboom workspace','Reading the active Flight Project and bounded scientific browser data.');try{payload=await api('/api/noseboom');const rawPoints=(payload?.data?.points||[]).filter(point=>finite(point.lat)&&finite(point.lon)),pointLimit=Math.max(500,Number(payload?.data?.browser_limits?.map_points)||6000),pointStep=Math.max(1,Math.ceil(rawPoints.length/pointLimit));browserPoints=rawPoints.filter((_,index)=>index%pointStep===0);byId('flightName').textContent=payload.flight_id||'No project';if(!payload.ready||!payload.data?.available){byId('statusText').textContent=payload.processing_status==='processing'?payload.processing_step:'Noseboom processing has not produced a map yet.';showMapError(payload.data?.reason||'Noseboom processing has not produced a valid route.');byId('statisticsExportBtn').disabled=true;return;}byId('statusDot').classList.add('ready');byId('statusText').textContent='Processed Noseboom data loaded from the active Flight Project';byId('mapMessage').hidden=true;byId('statisticsExportBtn').disabled=false;const route=points();if(ensureMap()){await makeLayers(route);showLayer(activeLayer,false,false);resetMap(false);setTimeout(()=>map.invalidateSize(false),120);}showBusy('Preparing scientific plots','Rendering the selected Noseboom statistical view.',62);await renderStats(activeStat,false,false);byId('dataExportBtn').style.display='';syncDownloadOptions();log('Noseboom browser data rendered successfully');}catch(error){byId('statusText').textContent=`Noseboom view failed: ${error.message}`;showMapError(error.message);log(`Noseboom browser error: ${error.message}`);}finally{hideBusy();}}
 
   const initial=viewFromPath();if(initial.layer)activeLayer=initial.layer;if(initial.stat)activeStat=initial.stat;
   byId('mainGuiBtn').onclick=()=>{window.location.href='/';};byId('refreshBtn').onclick=refresh;
   ['route','wind','straight'].forEach(layer=>{const button=byId(`${layer}Btn`);button.addEventListener('click',event=>activateLinkedView(event,()=>showLayer(layer)));button.addEventListener('contextmenu',event=>showViewMenu(event,'map',layerRoutes[layer],layer==='straight'));});
   document.querySelectorAll('[data-stat]').forEach(button=>{button.addEventListener('click',event=>activateLinkedView(event,()=>renderStats(button.dataset.stat)));button.addEventListener('contextmenu',event=>showViewMenu(event,'stats',statRoutes[button.dataset.stat],false));});
-  byId('resetMapBtn').onclick=()=>resetMap();byId('mapFullscreenBtn').onclick=()=>openFullscreen('map');byId('menuFullscreen').onclick=()=>openFullscreen(viewMenuContext.panel);byId('menuNewTab').onclick=()=>{closeViewMenu();window.open(viewMenuContext.path, '_blank', 'noopener');};byId('menuCurrentSettings').onclick=()=>showSettings(false);byId('menuChangeSettings').onclick=()=>showSettings(true);byId('settingsClose').onclick=closeSettings;byId('settingsModal').onclick=event=>{if(event.target===byId('settingsModal'))closeSettings();};
+  byId('resetMapBtn').onclick=()=>resetMap();byId('mapFullscreenBtn').onclick=()=>openFullscreen('map');byId('menuFullscreen').onclick=()=>openFullscreen(viewMenuContext.panel);byId('menuNewTab').onclick=()=>{closeViewMenu();window.open(viewMenuContext.path, '_blank', 'noopener');};byId('menuCurrentSettings').onclick=()=>showSettings(false);byId('menuChangeSettings').onclick=()=>showSettings(true);byId('methodsBtn').onclick=showMethods;byId('methodsClose').onclick=closeMethods;byId('methodsDone').onclick=closeMethods;byId('methodsCopy').onclick=()=>navigator.clipboard?.writeText(methodsStatement());byId('settingsClose').onclick=closeSettings;byId('settingsModal').onclick=event=>{if(event.target===byId('settingsModal'))closeSettings();};
   byId('bufferInput').oninput=()=>resetMap(false);byId('lineWidthInput').onchange=async()=>{showBusy('Updating map','Rebuilding bounded route layers.');try{await makeLayers(points());showLayer(activeLayer,false,false);}finally{hideBusy();}};byId('colorScheme').onchange=byId('lineWidthInput').onchange;
   byId('dataExportBtn').onclick=openDownload;byId('downloadClose').onclick=closeDownload;byId('downloadCancel').onclick=closeDownload;byId('downloadStart').onclick=startDataDownload;byId('downloadVariables').onchange=syncDownloadOptions;byId('downloadProgressClose').onclick=()=>byId('downloadProgressModal').classList.remove('show');syncDownloadOptions();byId('statisticsExportBtn').onclick=openExport;byId('exportClose').onclick=closeExport;byId('exportCancel').onclick=closeExport;byId('exportStart').onclick=startStatisticsExport;
-  document.addEventListener('click',event=>{if(!event.target.closest('#viewMenu'))closeViewMenu();});window.addEventListener('popstate',()=>{const view=viewFromPath();if(view.layer)showLayer(view.layer,false,false);if(view.stat)renderStats(view.stat,false);});window.addEventListener('fullscreenchange',()=>setTimeout(()=>{if(map)map.invalidateSize(false);document.querySelectorAll('#statsView .js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));},180));
+  document.addEventListener('click',event=>{if(!event.target.closest('#viewMenu'))closeViewMenu();});window.addEventListener('popstate',()=>{const view=viewFromPath();if(view.layer)showLayer(view.layer,false,false);if(view.stat)renderStats(view.stat,false);});window.addEventListener('fullscreenchange',()=>setTimeout(()=>{if(map)map.invalidateSize(false);document.querySelectorAll('#statsView .js-plotly-plot, #qcView .js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));},180));
   let resizeTimer=null;new ResizeObserver(()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>document.querySelectorAll('#statsView .js-plotly-plot').forEach(plot=>window.Plotly&&Plotly.Plots.resize(plot)),120);}).observe(byId('statsView'));
   byId('logBtn').onclick=async()=>{const panel=byId('logPanel');panel.classList.toggle('show');if(!panel.classList.contains('show'))return;try{const result=await api('/api/logs');panel.innerHTML=(result.records||[]).map(record=>`${escapeHtml(record.timestamp)} [${escapeHtml(record.severity)}] ${escapeHtml(record.message)}`).join('<br>')||'No log entries.';panel.scrollTop=panel.scrollHeight;}catch(error){panel.textContent=error.message;}};
   refresh();

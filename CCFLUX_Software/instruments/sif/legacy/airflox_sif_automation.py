@@ -233,20 +233,45 @@ GPS_FIX_MAX_DATE_GAP_SECONDS=2*86400
 # anchor and clears this between flights.
 RECORD_CLOCK_OFFSET_HINT={}
 
-def real_gps_fix_mask(utc,clock):
-    """Which rows carry a genuine GPS date rather than the 1980 default.
+def gps_position_mask(raw):
+    """Which rows carry a position, and so a receiver that actually locked.
 
-    Compared against the record clock rather than by hard-coding 1980/2080, so
-    any implausible date is caught whatever the receiver stamps.
+    A receiver that never acquires a fix still emits a GPS_TIME_UTC field. On
+    Flight_CCT0803 every AirFloX row of both channels reads GPS_lat=0.00000
+    while GPS_TIME_UTC sits at the 23:59:5x/00:00:xx rollover, with a handful
+    of rows two hours from the record clock. Judging a fix by the timestamp
+    alone accepted those rows and shifted the whole flight by two hours.
+    A time is only trusted where the receiver reported where it was.
+    """
+    if raw is None:
+        return None
+    latitude=parse_gps_coord(getattr(raw,'gps_lat',[]),'N','S')
+    longitude=parse_gps_coord(getattr(raw,'gps_lon',[]),'E','W')
+    if latitude.size==0 or longitude.size!=latitude.size:
+        return None
+    return (np.isfinite(latitude)&np.isfinite(longitude)
+            &(np.abs(latitude)>1e-6)&(np.abs(longitude)>1e-6)
+            &(np.abs(latitude)<=90)&(np.abs(longitude)<=180))
+
+def real_gps_fix_mask(utc,clock,raw=None):
+    """Which rows carry a genuine GPS fix rather than the 1980 default.
+
+    The date is compared against the record clock rather than hard-coding
+    1980/2080, so any implausible date is caught whatever the receiver stamps;
+    and where the file carries coordinates, a row must also report a position.
     """
     mask=[]
     for a,b in zip(utc,clock):
         if pd.isna(a) or pd.isna(b):
             mask.append(False); continue
         mask.append(abs((a-b).total_seconds())<=GPS_FIX_MAX_DATE_GAP_SECONDS)
-    return np.asarray(mask,dtype=bool)
+    mask=np.asarray(mask,dtype=bool)
+    position=gps_position_mask(raw)
+    if position is not None and position.size==mask.size:
+        mask&=position
+    return mask
 
-def measure_record_clock_offset(utc,clock):
+def measure_record_clock_offset(utc,clock,raw=None):
     """Seconds the AirFloX record clock runs ahead of GPS UTC.
 
     The record clock is set to campaign local time and is not disciplined, so
@@ -256,7 +281,7 @@ def measure_record_clock_offset(utc,clock):
 
     Returns (median_offset_seconds, count, spread_seconds) or (None, 0, 0.0).
     """
-    fix=real_gps_fix_mask(utc,clock)
+    fix=real_gps_fix_mask(utc,clock,raw)
     offsets=[(clock[i]-utc[i]).total_seconds() for i in np.flatnonzero(fix)]
     if not offsets: return None,0,0.0
     return float(np.median(offsets)),len(offsets),float(np.max(offsets)-np.min(offsets))
@@ -291,7 +316,7 @@ def get_gps_utc(raw):
     # through. Both happen on Flight_2707: FULL never gets one, FLUO gets one
     # after 177 spectra. Where there is a fix, use it and measure how far ahead
     # the record clock runs; elsewhere, correct the record clock by that amount.
-    offset,fixes,spread=measure_record_clock_offset(utc,record_clock)
+    offset,fixes,spread=measure_record_clock_offset(utc,record_clock,raw)
     if _gps_is_unusable(utc,record_clock):
         hint=getattr(raw,'record_clock_offset_seconds',None)
         if hint is None: hint=RECORD_CLOCK_OFFSET_HINT.get('seconds')
@@ -327,7 +352,7 @@ def get_gps_utc(raw):
     # still implausible after R has had its turn are corrected here, using the
     # record-clock offset measured from the rows that do have a fix - so a file
     # R handles correctly is left exactly as R leaves it.
-    still_wrong=np.flatnonzero(~real_gps_fix_mask(utc,record_clock))
+    still_wrong=np.flatnonzero(~real_gps_fix_mask(utc,record_clock,raw))
     if len(still_wrong):
         correction=offset if offset is not None else RECORD_CLOCK_OFFSET_HINT.get('seconds')
         if correction is None:
@@ -869,7 +894,7 @@ def probe_record_clock_offset(raw_path,calibration_path,mode):
     gps_date=[('111111' if len(str(v).strip().split('.')[0]) not in (5,6) else v) for v in raw.gps_date]
     utc=[_r_datetime(t,d) for t,d in zip(gps_time,gps_date)]
     record=[_record_clock_datetime(t,d) for t,d in zip(raw.time,raw.date)]
-    offset,fixes,_spread=measure_record_clock_offset(utc,record)
+    offset,fixes,_spread=measure_record_clock_offset(utc,record,raw)
     return offset,fixes,len(record)
 
 def resolve_flight_root(directory,flight_name):

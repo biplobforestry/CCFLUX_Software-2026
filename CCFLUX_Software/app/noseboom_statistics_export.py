@@ -138,7 +138,7 @@ def export_noseboom_statistics(
                     centers, curve, color=curve_color, linewidth=1.35,
                     label="Frequency distribution curve",
                 )
-                axis.legend(loc="best", fontsize=6, frameon=False)
+                axis.legend(loc="best", fontsize=8, frameon=False)
             else:
                 axis.text(0.5, 0.5, "No valid samples", ha="center", va="center", transform=axis.transAxes)
             axis.set_title(title)
@@ -146,7 +146,7 @@ def export_noseboom_statistics(
             axis.set_ylabel("Count")
             axis.tick_params(direction="out")
         fig.suptitle(flight_name, fontsize=10, y=0.985)
-        fig.text(0.5, 0.008, f"Start Time: {start}    End Time: {end}", ha="center", fontsize=4)
+        fig.text(0.5, 0.008, f"Start Time: {start}    End Time: {end}", ha="center", fontsize=8)
         fig.subplots_adjust(left=0.105, right=0.985, top=0.94, bottom=0.105, hspace=0.72, wspace=0.34)
         for index, output_format in enumerate(valid_formats):
             progress(20 + 15 * index / max(1, len(valid_formats)), f"Writing histogram summary ({output_format.upper()})")
@@ -236,7 +236,130 @@ def export_noseboom_statistics(
             outputs.append(path)
         plt.close(fig)
 
+        qc = payload.get("quality_control") or {}
+        if qc.get("available"):
+            progress(95, "Preparing quality control figure")
+            outputs.extend(
+                _render_quality_control(
+                    qc, destination, flight_name, valid_formats, dpi, progress
+                )
+            )
+
     progress(100, "Publication figures are ready")
+    return outputs
+
+
+def _qc_times(values):
+    import numpy as np
+    import pandas as pd
+
+    return pd.to_datetime(pd.Series(list(values or ())), errors="coerce", utc=True)
+
+
+def _render_quality_control(
+    qc: dict, destination: Path, flight_name: str,
+    formats: tuple[str, ...], dpi: int, progress,
+) -> list[Path]:
+    """The five QC panels, in the three rows the workspace shows them in."""
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # Three rows: the flow uncertainty across the width, then two pairs. The
+    # width stays at seven inches so the figure drops into a manuscript column
+    # without rescaling, which would shrink the labels below eight point.
+    figure = plt.figure(figsize=(7, 8.4), constrained_layout=False)
+    grid = figure.add_gridspec(3, 2, hspace=0.62, wspace=0.32)
+    flow_axis = figure.add_subplot(grid[0, :])
+    axes = [
+        flow_axis,
+        figure.add_subplot(grid[1, 0]),
+        figure.add_subplot(grid[1, 1]),
+        figure.add_subplot(grid[2, 0]),
+        figure.add_subplot(grid[2, 1]),
+    ]
+
+    flow = qc.get("flow_uncertainty") or {}
+    times = _qc_times(flow.get("time"))
+    flow_axis.plot(times, np.asarray(flow.get("alpha", ()), dtype=float), linewidth=0.8, label="alpha")
+    flow_axis.plot(times, np.asarray(flow.get("beta", ()), dtype=float), linewidth=0.8,
+                   linestyle="--", label="beta")
+    flow_axis.set_title(
+        "(a) Flow-uncertainty angles · "
+        f"{flow.get('samples_at_limit', 0):,} at the 90 deg limit"
+    )
+    flow_axis.set_ylabel("Uncertainty [deg]")
+
+    direction = qc.get("direction_heading_track") or {}
+    times = _qc_times(direction.get("time"))
+    axis = axes[1]
+    for key, label in (("wind_direction", "Wind"), ("heading", "Heading"), ("track", "Track")):
+        axis.plot(times, np.asarray(direction.get(key, ()), dtype=float), linewidth=0.7, label=label)
+    axis.set_title("(b) Direction, heading and track")
+    axis.set_ylabel("Direction [deg]")
+    axis.set_ylim(0, 360)
+    axis.set_yticks([0, 90, 180, 270, 360])
+
+    vertical = qc.get("vertical_wind") or {}
+    times = _qc_times(vertical.get("time"))
+    axis = axes[2]
+    axis.plot(times, np.asarray(vertical.get("vertical_wind", ()), dtype=float),
+              color="0.6", linewidth=0.5, alpha=0.6, label="Instantaneous")
+    axis.plot(times, np.asarray(vertical.get("rolling_mean", ()), dtype=float),
+              color="tab:red", linewidth=1.0, label="10-minute mean")
+    axis.set_title(f"(c) Vertical wind · mean {vertical.get('mean', float('nan')):+.3f} m/s")
+    axis.set_ylabel(r"Vertical wind [m s$^{-1}$]")
+
+    for index, (key, letter, quantity, unit, limits) in enumerate((
+        ("wind_speed_validation", "d", "Wind speed", r"[m s$^{-1}$]", None),
+        ("wind_direction_validation", "e", "Wind direction", "[deg]", (0, 360)),
+    )):
+        section = qc.get(key) or {}
+        axis = axes[3 + index]
+        axis.plot(_qc_times(section.get("time")),
+                  np.asarray(section.get("noseboom", ()), dtype=float),
+                  linewidth=0.7, label="Noseboom")
+        airport = section.get("airport") or {}
+        reports = list(section.get("report_time") or ())
+        if reports:
+            axis.plot(_qc_times(reports),
+                      np.asarray(section.get("report_value", ()), dtype=float),
+                      "o", markersize=3,
+                      label=f"{airport.get('icao', '')} {airport.get('name', '')}".strip())
+        bias = section.get("bias")
+        axis.set_title(
+            f"({letter}) {quantity} vs METAR"
+            + (f" · bias {bias:+.2f}" if isinstance(bias, (int, float)) else " · no report")
+        )
+        axis.set_ylabel(f"{quantity} {unit}")
+        if limits:
+            axis.set_ylim(*limits)
+            axis.set_yticks([0, 90, 180, 270, 360])
+
+    for axis in axes:
+        axis.set_xlabel("UTC time")
+        axis.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        axis.grid(alpha=0.24)
+        if axis.get_legend_handles_labels()[0]:
+            axis.legend(loc="best", frameon=False, fontsize=8)
+
+    airport = (qc.get("metar") or {}).get("airport") or {}
+    figure.suptitle(
+        f"{flight_name} - Noseboom quality control"
+        + (f" - reference {airport.get('icao')} {airport.get('name')}" if airport else ""),
+        fontsize=10, y=0.992,
+    )
+    figure.subplots_adjust(left=0.105, right=0.985, top=0.935, bottom=0.06)
+    outputs: list[Path] = []
+    for index, output_format in enumerate(formats):
+        progress(95 + 4 * index / max(1, len(formats)),
+                 f"Writing quality control figure ({output_format.upper()})")
+        path = _available_path(
+            destination / f"{_safe_name(flight_name)}_noseboom_quality_control.{output_format}"
+        )
+        figure.savefig(path, format=output_format, dpi=dpi, facecolor="white")
+        outputs.append(path)
+    plt.close(figure)
     return outputs
 
 

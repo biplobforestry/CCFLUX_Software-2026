@@ -3,7 +3,34 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>OPC HBX-4 / HBX-5 · CC-FLUX Campaign 2026</title>
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
   <link rel="stylesheet" href="/hatchbox_science.css">
+  <style>
+    .map-shell{position:relative}
+    .size-map{height:clamp(460px,66vh,860px);border-radius:10px;overflow:hidden;background:#0a1c2b}
+    .map-shell{display:flex;flex-direction:column;min-height:0}
+    /* Full screen means the whole display: the card becomes the viewport
+       and the map takes every row the toolbar leaves. */
+    .chart-card:fullscreen{height:100vh;max-height:100vh;display:flex;flex-direction:column;border-radius:0;margin:0}
+    .chart-card:fullscreen .card-head{flex:0 0 auto}
+    .chart-card:fullscreen .map-shell{flex:1 1 auto;min-height:0}
+    .chart-card:fullscreen .size-map{height:100%;flex:1 1 auto;min-height:0;border-radius:0}
+    .map-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    .map-toolbar label{display:flex;align-items:center;gap:7px;color:var(--muted);font-weight:700}
+    .map-toolbar select{min-height:40px}
+    .map-legend{position:absolute;z-index:850;right:14px;bottom:24px;max-height:calc(100% - 48px);overflow:auto;padding:12px 14px;border:1px solid #507084;border-radius:10px;background:#071827f2;box-shadow:0 8px 25px #0008}
+    .map-legend .legend-title{display:block;font-size:1rem;font-weight:800;margin-bottom:6px;white-space:nowrap}
+    .map-legend .colorbar{display:flex;gap:9px;height:clamp(200px,38vh,420px);padding:10px 0}
+    .map-legend .ramp{width:26px;border-radius:4px;border:1px solid #7d9db4;flex:0 0 auto}
+    .map-legend .ticks{position:relative;flex:1 1 auto;min-width:84px;font-variant-numeric:tabular-nums}
+    .map-legend .tick{position:absolute;left:0;transform:translateY(-50%);white-space:nowrap;font-size:.86rem;line-height:1;color:#eaf4fb}
+    .map-legend .tick::before{content:'';position:absolute;left:-9px;top:50%;width:6px;height:1px;background:#9ab8cc}
+    .map-legend .legend-note{display:block;margin-top:8px;font-size:.76rem;color:#a9c4d6;max-width:210px}
+    .map-message{position:absolute;z-index:850;left:14px;top:14px;max-width:calc(100% - 260px);padding:9px 12px;border-radius:9px;background:#071827ee;border:1px solid #507084;color:#dbeaf4;font-size:.86rem}
+    .map-reset{position:absolute;z-index:850;left:14px;bottom:24px}
+    .leaflet-popup-content{color:#142735;line-height:1.45}
+    @media(max-width:900px){.map-legend{left:14px;right:auto;width:220px}.map-message{max-width:calc(100% - 28px)}}
+  </style>
 </head>
 <body>
   <header class="topbar">
@@ -13,16 +40,17 @@
   </header>
   <div class="status-strip"><span class="status-dot" id="statusDot"></span><span id="statusText">Reading processed OPC project data…</span><span class="spacer"></span><strong id="flightName">No project</strong></div>
   <main>
-    <nav class="nav-tabs"><a class="btn active" data-view="overview" href="/opc/overview">Overview</a><a class="btn" data-view="size" href="/opc/size-distribution">Size distribution</a><a class="btn" data-view="diagnostics" href="/opc/diagnostics">Diagnostics & QC</a></nav>
+    <nav class="nav-tabs"><a class="btn active" data-view="overview" href="/opc/overview">Overview</a><a class="btn" data-view="size" href="/opc/size-distribution">Size distribution</a><a class="btn" data-view="diagnostics" href="/opc/diagnostics">Diagnostics & QC</a><a class="btn" data-view="map" href="/opc/map">Map view</a></nav>
     <section class="summary-grid two-up" id="summaryGrid"></section>
     <section class="chart-grid">
       <article class="chart-card wide" data-section="overview"><div class="card-head"><h2>Concentration time series</h2><div class="toolbar"><label>Quantity <select id="timeMetric"><option value="number">Total number [#/cm³]</option><option value="pm1">PM1 [µg/m³]</option><option value="pm25">PM2.5 [µg/m³]</option><option value="pm10">PM10 [µg/m³]</option></select></label><button class="btn" data-fullscreen="timePlot">Full screen</button></div></div><div class="plot" id="timePlot"></div></article>
       <article class="chart-card wide" data-section="size"><div class="card-head"><h2>Bin-resolved number concentration</h2><div class="toolbar"><label>Sensor <select id="heatSensor"><option value="hbx4">HBX-4 · without inlet</option><option value="hbx5">HBX-5 · with inlet</option></select></label><label title="A size distribution spans decades between the smallest and largest bin. On a linear colour scale the smallest bin takes the whole range and the coarse bins read as empty."><input type="checkbox" id="heatLog" checked> Logarithmic colour scale</label><button class="btn" data-fullscreen="heatPlot">Full screen</button></div></div><div class="plot" id="heatPlot"></div></article>
       <article class="chart-card wide" data-section="diagnostics"><div class="card-head"><h2>Instrument diagnostics</h2><div class="toolbar"><label>Quantity <select id="diagnosticMetric"><option value="flow">Sample flow [mL/s]</option><option value="sampling_period">Sampling period [s]</option><option value="temperature">Internal temperature [°C]</option><option value="rh">Internal RH [%]</option><option value="laser">Laser status [raw]</option><option value="reject_ratio">Reject ratio [raw]</option></select></label><button class="btn" data-fullscreen="diagnosticPlot">Full screen</button></div></div><div class="plot" id="diagnosticPlot"></div></article>
+      <article class="chart-card wide" data-section="map"><div class="card-head"><h2>Size distribution on the flight track</h2><div class="map-toolbar"><label>Sensor <select id="mapSensor"><option value="hbx4">HBX-4 · without inlet</option><option value="hbx5">HBX-5 · with inlet</option></select></label><label>Size class <select id="mapChannel"></select></label><label>Colours <select id="mapPalette"></select></label><label title="A concentration that spans decades reads as one colour on a linear ramp"><input type="checkbox" id="mapLog" checked> Log</label><button class="btn" id="mapNewTabBtn" type="button" title="Open this map on its own, in a new tab">Open in new tab</button><button class="btn primary" id="mapUpdateBtn" type="button" title="Redraw the map with the selections above">Update</button><button class="btn" id="mapResetTopBtn" type="button" title="Fit the map back to the flight track">Reset position</button><button class="btn" id="mapFullscreenBtn" type="button">Full screen</button><button class="btn" id="mapPdfBtn" type="button" title="Export the map as it is drawn now">Export PDF</button></div></div><div class="map-shell"><div id="opcMap" class="size-map"></div><div class="map-message" id="mapMessage" hidden></div><button class="btn map-reset" id="mapResetBtn" type="button">Reset position</button><div class="map-legend" id="mapLegend" hidden><strong class="legend-title" id="legendTitle"></strong><div class="colorbar"><div class="ramp" id="legendRamp"></div><div class="ticks" id="legendTicks"></div></div><span class="legend-note" id="legendNote"></span></div></div></article>
     </section>
   </main>
   <div class="busy show" id="busy"><div class="busy-card"><div class="spinner"></div><h2>Preparing OPC scientific workspace</h2><p id="busyText">Loading the saved, precomputed flight products.</p></div></div>
-  <footer class="app-footer">© 2026 Biplob Dey · Forschungszentrum Jülich GmbH · <span class="app-version">Version 1.0.1</span></footer>
+  <footer class="app-footer">© 2026 Biplob Dey · Forschungszentrum Jülich GmbH · <span class="app-version">Version 1.0.2</span></footer>
   <script src="/vendor/plotly.min.js"></script><script src="/opc.js"></script>
 </body>
 </html>
