@@ -987,7 +987,7 @@
     renderTimeState(state.time_filter || {});
     renderResources(state.resources || {});
     renderQueue(state.processing_queue || {});
-    renderCameraStatus(state.processing_queue || {});
+    renderCameraStatus(state.processing_queue || {}, state.time_filter || {});
 
     if (!state.running && state.error) showToast(state.error);
   }
@@ -1264,7 +1264,7 @@
         ? 'Flight-data processing is still running. Camera products can be used meanwhile.'
         : 'Please wait! System is busy now!');
   }
-  function renderCameraStatus(queue) {
+  function renderCameraStatus(queue, timeFilter = {}) {
     const jobs = new Map((queue.jobs || []).map(job => [job.job_id, job]));
     const cameraRows = [
       ['micasense_quick', 'micaText', 'micaProgress'],
@@ -1279,8 +1279,19 @@
       if (!row) return;
       const status = job.enabled ? job.status : 'paused';
       if (['queued', 'processing'].includes(status)) active += 1;
+      // How much of the selected interval the camera actually covers, beside
+      // its processing progress: a camera reading OUT cannot be selected, and
+      // the panel used to show only "0%", which reads as "nothing recorded".
+      const coverage = (timeFilter.instruments || {})[job.instrument_id];
+      const available = coverage
+        ? (coverage.outside_selected_range
+            ? 'outside the Time Filter'
+            : Number.isFinite(Number(coverage.availability_percentage))
+              ? `${Number(coverage.availability_percentage).toFixed(1)}% of the interval`
+              : 'coverage unknown')
+        : 'not detected';
       document.getElementById(textId).textContent =
-        `${job.current_step} · ${Number(job.progress).toFixed(0)}% · ${formatElapsed(job.elapsed_seconds)}`;
+        `${available} · ${job.current_step} · ${Number(job.progress).toFixed(0)}% · ${formatElapsed(job.elapsed_seconds)}`;
       document.getElementById(progressId).style.width =
         `${Math.max(0, Math.min(100, Number(job.progress) || 0))}%`;
       const [cssClass, label] = processingPresentation[status] || ['queued', 'Idle'];
