@@ -261,10 +261,16 @@ class TestWorkspaceSection:
 
     def test_the_section_has_three_rows(self):
         rows = re.findall(r'<div class="qc-row (one|two)">', self.markup)
-        assert rows == ["one", "two", "two"]
+        assert rows == ["one", "one", "two"]
+
+    def test_it_does_not_repeat_the_histogram(self):
+        """Vertical wind, wind speed, U, V, temperature and humidity are
+        already distributions on the Histogram view."""
+        assert "qcVertical" not in self.markup
+        assert "renderQcVertical" not in self.script
 
     @pytest.mark.parametrize("plot", [
-        "qcFlow", "qcDirection", "qcVertical", "qcWindSpeed", "qcWindDirection",
+        "qcFlow", "qcDirection", "qcWindSpeed", "qcWindDirection",
     ])
     def test_each_plot_has_a_home(self, plot):
         assert f'id="{plot}"' in self.markup

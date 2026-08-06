@@ -186,7 +186,7 @@
   // reports. The airport is always named, so a reader knows whose observations
   // the comparison used.
   let qcPayload = null;
-  const QC_PLOTS = ['qcFlow','qcDirection','qcVertical','qcWindSpeed','qcWindDirection'];
+  const QC_PLOTS = ['qcFlow','qcDirection','qcWindSpeed','qcWindDirection'];
   const qcConfig = {responsive:true,displaylogo:false,
     toImageButtonOptions:{format:'png',scale:3}};
   function qcLayout(title, yTitle, extra={}) {
@@ -229,16 +229,6 @@
       'Direction [deg]',
       {yaxis:{title:'Direction [deg]',range:[0,360],tickvals:[0,90,180,270,360],
               gridcolor:'#dfe7ec',automargin:true}}), qcConfig);
-  }
-  function renderQcVertical(section) {
-    Plotly.react('qcVertical', [
-      {type:'scattergl',mode:'lines',x:section.time,y:section.vertical_wind,
-       name:'Instantaneous',line:{width:1,color:'#8c9aa5'},opacity:.55},
-      {type:'scattergl',mode:'lines',x:section.time,y:section.rolling_mean,
-       name:'10-minute mean',line:{width:1.8,color:'#CC2936'}}
-    ], qcLayout(
-      `Vertical wind speed · mean ${qcNumber(section.mean)} m/s, sd ${qcNumber(section.standard_deviation)} m/s`,
-      'Vertical wind [m s⁻¹]'), qcConfig);
   }
   function qcValidationTraces(section, name) {
     const airport = section.airport;
@@ -284,7 +274,6 @@
     const data = qcPayload;
     renderQcFlow(data.flow_uncertainty);
     renderQcDirection(data.direction_heading_track);
-    renderQcVertical(data.vertical_wind);
     renderQcWindSpeed(data.wind_speed_validation);
     renderQcWindDirection(data.wind_direction_validation);
     const airport = data.metar?.airport;
