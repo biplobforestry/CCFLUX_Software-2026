@@ -890,19 +890,19 @@ NUMERIC_QA_FIELDS = (
 STATIC_SOLAR_MIN_HOURS = 1.0
 STATIC_SOLAR_MAX_SPREAD_DEG = 1.0
 
-# Solar geometry is written in radians: SolarElevation 0.9744 is 55.8 degrees,
-# right for 13:00 local in August at 51.4 N, where 0.97 degrees would be
-# near-horizon nonsense.
-RADIAN_QA_FIELDS = frozenset({"SolarElevation", "SolarAzimuth"})
-
-# The DLS attitude is already in degrees - across Flight_CCT0803 yaw runs -27 to
-# +32 and roll reaches 89, all inside a degree range. Converting them as radians
-# multiplied everything by 57.3 and put yaw at +/-2000 degrees on the workspace
-# plot, which is what showed the mistake. Named _deg like the converted fields,
-# because that is what they are; they just need no conversion to get there.
-DEGREE_QA_FIELDS = frozenset({
-    "IrradianceYaw", "IrradiancePitch", "IrradianceRoll",
-})
+# Nothing here is converted. The standalone micasense_scientific_overview.py is
+# the reference for this delivery and it stores every one of these raw -
+# as_float(xmp.get(...)) and no arithmetic - so a value on this page and the
+# same value in its CSV are the same number, and a cross-check between them
+# means something.
+#
+# The units are the camera's own and they are not uniform: the DLS attitude is
+# degrees (yaw runs -27 to +32, roll reaches 89 across Flight_CCT0803) while
+# solar geometry is radians (SolarElevation 0.9744, which is 55.8 degrees, right
+# for 13:00 local in August at 51.4 N). Converting the attitude as radians put
+# yaw at +/-2000 degrees on the plot; converting solar geometry to degrees
+# disagreed with the reference CSV. Each axis states its own unit instead.
+RADIANS_AS_RECORDED = frozenset({"SolarElevation", "SolarAzimuth"})
 
 
 # Which camera and light sensor produced the delivery. Reported once rather than
@@ -920,6 +920,16 @@ QA_KEY_OVERRIDES = {
     "GPSXYAccuracy": "gps_xy_accuracy",
     "GPSZAccuracy": "gps_z_accuracy",
     "ImagerTemperatureC": "imager_temperature_c",
+    # The names micasense_scientific_overview.py uses, so a column here and a
+    # column there are the same column.
+    "IrradianceYaw": "dls_yaw",
+    "IrradiancePitch": "dls_pitch",
+    "IrradianceRoll": "dls_roll",
+    "Irradiance": "dls_irradiance",
+    "SpectralIrradiance": "dls_spectral_irradiance",
+    "HorizontalIrradiance": "dls_horizontal_irradiance",
+    "DirectIrradiance": "dls_direct_irradiance",
+    "ScatteredIrradiance": "dls_scattered_irradiance",
 }
 
 
@@ -928,8 +938,6 @@ def _qa_record_key(name: str) -> str:
     snake = QA_KEY_OVERRIDES.get(name)
     if snake is None:
         snake = re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
-    if name in RADIAN_QA_FIELDS or name in DEGREE_QA_FIELDS:
-        return f"{snake}_deg"
     return snake
 
 
@@ -947,13 +955,10 @@ def _optional_number(value: Any) -> float | None:
 
 
 def _qa_fields(metadata: Mapping[str, Any]) -> dict[str, float | None]:
-    """The camera's own QA values, radians converted to degrees for reading."""
+    """The camera's own QA values, exactly as recorded."""
     result: dict[str, float | None] = {}
     for name in NUMERIC_QA_FIELDS:
-        value = _optional_number(metadata.get(name))
-        if value is not None and name in RADIAN_QA_FIELDS:
-            value = degrees(value)
-        result[_qa_record_key(name)] = value
+        result[_qa_record_key(name)] = _optional_number(metadata.get(name))
     return result
 
 
@@ -1140,16 +1145,16 @@ CAPTURE_CONDITION_FIELDS = (
     "gps_z_accuracy",
     "exposure_time",
     "iso_speed",
-    "irradiance",
-    "spectral_irradiance",
-    "horizontal_irradiance",
-    "direct_irradiance",
-    "scattered_irradiance",
-    "irradiance_yaw_deg",
-    "irradiance_pitch_deg",
-    "irradiance_roll_deg",
-    "solar_elevation_deg",
-    "solar_azimuth_deg",
+    "dls_irradiance",
+    "dls_spectral_irradiance",
+    "dls_horizontal_irradiance",
+    "dls_direct_irradiance",
+    "dls_scattered_irradiance",
+    "dls_yaw",
+    "dls_pitch",
+    "dls_roll",
+    "solar_elevation",
+    "solar_azimuth",
     "imager_temperature_c",
 )
 
@@ -1182,15 +1187,17 @@ def _static_solar_geometry_warning(
     that they stopped changing.
     """
     points = [
-        (row["trigger_time"], row["solar_elevation_deg"])
+        (row["trigger_time"], row["solar_elevation"])
         for row in captures
         if row.get("trigger_time") is not None
-        and row.get("solar_elevation_deg") is not None
+        and row.get("solar_elevation") is not None
     ]
     if len(points) < 2:
         return None
     span_hours = (points[-1][0] - points[0][0]).total_seconds() / 3600.0
-    elevations = [value for _, value in points]
+    # Recorded in radians; compared in degrees so the threshold reads as an
+    # angle a person can judge.
+    elevations = [degrees(value) for _, value in points]
     spread = max(elevations) - min(elevations)
     if span_hours < STATIC_SOLAR_MIN_HOURS or spread > STATIC_SOLAR_MAX_SPREAD_DEG:
         return None

@@ -23,7 +23,7 @@ from PIL import Image
 from instruments.micasense.adapter import (
     CAPTURE_CONDITION_FIELDS,
     NUMERIC_QA_FIELDS,
-    RADIAN_QA_FIELDS,
+    RADIANS_AS_RECORDED,
     MINIMUM_CAPTURE_YEAR,
     STATIC_SOLAR_MAX_SPREAD_DEG,
     THUMBNAIL_STRETCH_PERCENTILES,
@@ -118,28 +118,46 @@ class TestTheCameraMetadataIsKept:
         assert values["PressureAlt"] == "136.49"
         assert values["BandName"] == "Blue"
 
-    def test_radian_fields_are_converted_to_degrees(self):
-        """The camera writes solar geometry in radians."""
-        values = _qa_fields({"SolarElevation": "0.97441876"})
-        assert values["solar_elevation_deg"] == pytest.approx(55.83, abs=0.01)
+    def test_nothing_is_converted(self):
+        """micasense_scientific_overview.py stores every one of these raw, so a
+        value here and the same value in its CSV must be the same number."""
+        values = _qa_fields({
+            "SolarElevation": "0.97441876",
+            "IrradianceYaw": "-27.2997",
+            "Irradiance": "9.685",
+        })
+        assert values["solar_elevation"] == pytest.approx(0.97441876)
+        assert values["dls_yaw"] == pytest.approx(-27.2997)
+        assert values["dls_irradiance"] == pytest.approx(9.685)
 
-    def test_non_radian_fields_are_not_converted(self):
-        values = _qa_fields({"Irradiance": "9.685"})
-        assert values["irradiance"] == pytest.approx(9.685)
+    def test_the_names_match_the_reference_script(self):
+        """dls_yaw, solar_elevation and the rest, as the script calls them."""
+        values = _qa_fields({})
+        for name in ("dls_yaw", "dls_pitch", "dls_roll", "dls_irradiance",
+                     "dls_horizontal_irradiance", "dls_direct_irradiance",
+                     "dls_scattered_irradiance", "solar_elevation",
+                     "solar_azimuth"):
+            assert name in values, name
+
+    def test_solar_geometry_is_recorded_in_radians(self):
+        """Documented, not converted: 0.9744 rad is 55.8 deg, which is right for
+        13:00 local in August at 51.4 N."""
+        assert "SolarElevation" in RADIANS_AS_RECORDED
 
     def test_runs_of_capitals_are_one_word_in_the_field_name(self):
         assert _qa_record_key("GPSXYAccuracy") == "gps_xy_accuracy"
         assert _qa_record_key("GPSZAccuracy") == "gps_z_accuracy"
         assert _qa_record_key("ImagerTemperatureC") == "imager_temperature_c"
 
-    def test_every_radian_field_is_named_as_degrees(self):
-        for name in RADIAN_QA_FIELDS:
-            assert _qa_record_key(name).endswith("_deg")
+    def test_no_field_name_claims_a_conversion(self):
+        """A _deg suffix on a radian value would be a lie about the number."""
+        for name in NUMERIC_QA_FIELDS:
+            assert not _qa_record_key(name).endswith("_deg"), name
 
     def test_a_missing_or_unparsable_value_is_none_not_zero(self):
         values = _qa_fields({"Irradiance": "", "SolarElevation": "not a number"})
-        assert values["irradiance"] is None
-        assert values["solar_elevation_deg"] is None
+        assert values["dls_irradiance"] is None
+        assert values["solar_elevation"] is None
 
     def test_every_plotted_field_is_produced_somewhere(self):
         """The page reads CAPTURE_CONDITION_FIELDS; they must all exist."""
@@ -159,13 +177,13 @@ class TestConditionsBelongToTheCapture:
         """Only one band per capture is decompressed; the rest are listed."""
         group = [
             {field: None for field in CAPTURE_CONDITION_FIELDS},
-            {**{field: None for field in CAPTURE_CONDITION_FIELDS}, "irradiance": 9.7},
+            {**{field: None for field in CAPTURE_CONDITION_FIELDS}, "dls_irradiance": 9.7},
         ]
-        assert _capture_conditions(group)["irradiance"] == 9.7
+        assert _capture_conditions(group)["dls_irradiance"] == 9.7
 
     def test_an_absent_condition_stays_none(self):
         group = [{field: None for field in CAPTURE_CONDITION_FIELDS}]
-        assert _capture_conditions(group)["irradiance"] is None
+        assert _capture_conditions(group)["dls_irradiance"] is None
 
 
 class TestCameraIdentity:
@@ -187,12 +205,16 @@ class TestCameraIdentity:
 class TestStaticSolarGeometryIsReported:
     """On Flight_CCT0803 the DLS froze solar elevation at 55.83 degrees."""
 
-    def _captures(self, elevations, hours=4.0):
+    def _captures(self, elevations_deg, hours=4.0):
+        """Recorded in radians, as the camera writes them."""
+        from math import radians
+
         start = datetime(2026, 8, 3, 11, 21, tzinfo=timezone.utc)
-        step = timedelta(hours=hours) / max(1, len(elevations) - 1)
+        step = timedelta(hours=hours) / max(1, len(elevations_deg) - 1)
         return [
-            {"trigger_time": start + step * index, "solar_elevation_deg": value}
-            for index, value in enumerate(elevations)
+            {"trigger_time": start + step * index,
+             "solar_elevation": radians(value)}
+            for index, value in enumerate(elevations_deg)
         ]
 
     def test_a_frozen_elevation_over_hours_is_warned_about(self):
@@ -216,7 +238,7 @@ class TestStaticSolarGeometryIsReported:
     def test_captures_without_geometry_are_not_warned_about(self):
         captures = [
             {"trigger_time": datetime(2026, 8, 3, 11, tzinfo=timezone.utc),
-             "solar_elevation_deg": None}
+             "solar_elevation": None}
         ]
         assert _static_solar_geometry_warning(captures) is None
 
@@ -472,57 +494,153 @@ class TestTheFiguresActuallyDraw:
         assert "{xaxis:{type:'category'},bargap:.6}" in self.script
 
 
-class TestTheDlsAttitudeIsAlreadyInDegrees:
-    """Rendering showed yaw at +/-2000 degrees, which is not a yaw.
+class TestTheValuesMatchTheReferenceScript:
+    """micasense_scientific_overview.py is the reference for this delivery.
 
-    Solar geometry is written in radians - SolarElevation 0.9744 is 55.8 deg,
-    right for 13:00 local in August at 51.4 N. The DLS attitude is not: across
-    Flight_CCT0803 yaw runs -27 to +32 and roll reaches 89, already degrees.
-    Converting them multiplied everything by 57.3.
+    It stores every DLS and solar field raw - as_float(xmp.get(...)) and no
+    arithmetic - so this page must too, or a cross-check between the page and
+    its CSV compares two different numbers. Converting the attitude as radians
+    put yaw at +/-2000 degrees; converting solar geometry to degrees disagreed
+    with the CSV.
     """
 
-    def test_solar_geometry_is_converted(self):
-        from instruments.micasense.adapter import RADIAN_QA_FIELDS, _qa_fields
+    def test_the_attitude_is_left_in_the_degrees_it_is_recorded_in(self):
+        from instruments.micasense.adapter import _qa_fields
 
-        assert "SolarElevation" in RADIAN_QA_FIELDS
-        values = _qa_fields({"SolarElevation": "0.97441876"})
-        assert values["solar_elevation_deg"] == pytest.approx(55.83, abs=0.01)
-
-    def test_the_attitude_is_not_converted(self):
-        from instruments.micasense.adapter import DEGREE_QA_FIELDS, _qa_fields
-
-        assert "IrradianceYaw" in DEGREE_QA_FIELDS
         values = _qa_fields({
             "IrradianceYaw": "-27.2997",
             "IrradiancePitch": "-1.1582",
             "IrradianceRoll": "89.0400",
         })
-        assert values["irradiance_yaw_deg"] == pytest.approx(-27.2997)
-        assert values["irradiance_pitch_deg"] == pytest.approx(-1.1582)
-        assert values["irradiance_roll_deg"] == pytest.approx(89.04)
+        assert values["dls_yaw"] == pytest.approx(-27.2997)
+        assert values["dls_pitch"] == pytest.approx(-1.1582)
+        assert values["dls_roll"] == pytest.approx(89.04)
 
-    def test_the_two_sets_do_not_overlap(self):
-        from instruments.micasense.adapter import (
-            DEGREE_QA_FIELDS,
-            RADIAN_QA_FIELDS,
-        )
+    def test_solar_geometry_is_left_in_the_radians_it_is_recorded_in(self):
+        from instruments.micasense.adapter import _qa_fields
 
-        assert not RADIAN_QA_FIELDS & DEGREE_QA_FIELDS
+        values = _qa_fields({"SolarElevation": "0.97441876", "SolarAzimuth": "3.2772"})
+        assert values["solar_elevation"] == pytest.approx(0.97441876)
+        assert values["solar_azimuth"] == pytest.approx(3.2772)
 
-    def test_both_sets_are_still_named_in_degrees(self):
-        from instruments.micasense.adapter import (
-            DEGREE_QA_FIELDS,
-            RADIAN_QA_FIELDS,
-            _qa_record_key,
-        )
-
-        for name in RADIAN_QA_FIELDS | DEGREE_QA_FIELDS:
-            assert _qa_record_key(name).endswith("_deg"), name
-
-    def test_a_plausible_yaw_stays_inside_a_compass(self):
-        """The check that would have caught it: a yaw is not 2000 degrees."""
+    def test_a_yaw_stays_inside_a_compass(self):
+        """The check that caught the mistake: a yaw is not 2000 degrees."""
         from instruments.micasense.adapter import _qa_fields
 
         for raw in ("-27.2997", "32.2161", "-4.8197"):
-            value = _qa_fields({"IrradianceYaw": raw})["irradiance_yaw_deg"]
-            assert -180 <= value <= 180, raw
+            assert -180 <= _qa_fields({"IrradianceYaw": raw})["dls_yaw"] <= 180
+
+    def test_the_solar_axis_states_the_unit_it_is_in(self):
+        script = (ASSETS / "micasense.js").read_text(encoding="utf-8")
+        assert "Elevation [rad, as recorded]" in script
+
+    def test_the_caption_says_it_matches_the_reference_csv(self):
+        html = (ASSETS / "micasense.html").read_text(encoding="utf-8")
+        assert "match the standalone MicaSense overview CSV value for value" in html
+
+    def test_the_static_geometry_check_still_reads_in_degrees(self):
+        """The recorded value is radians; a spread threshold has to be an angle
+        a person can judge."""
+        adapter = (
+            Path(__file__).resolve().parents[1]
+            / "instruments" / "micasense" / "adapter.py"
+        ).read_text(encoding="utf-8")
+        block = adapter[adapter.index("def _static_solar_geometry_warning"):]
+        assert "degrees(value) for _, value in points" in block
+
+
+class TestMacResourceForksAreNotDeliveries:
+    """Two warnings on Flight_CCT0803 were about files that are not data.
+
+    Copying a MicaSense folder through a non-HFS volume leaves a 4 KB
+    "._IMG_0000.zip" beside each real archive. It is an AppleDouble stub, not a
+    ZIP, so opening it raised BadZipFile and the capture was counted as a
+    corrupt archive - two "corrupt or unreadable" warnings on a delivery where
+    nothing was wrong.
+    """
+
+    def test_a_stub_is_recognised(self):
+        from instruments.micasense.adapter import _is_apple_double
+
+        assert _is_apple_double(Path("._IMG_0000.zip")) is True
+        assert _is_apple_double(Path("/a/b/._IMG_0488.zip")) is True
+
+    def test_a_real_archive_is_not(self):
+        from instruments.micasense.adapter import _is_apple_double
+
+        assert _is_apple_double(Path("IMG_0000.zip")) is False
+        assert _is_apple_double(Path("/a/b/IMG_0000_1.tif")) is False
+
+    def test_a_stub_beside_a_real_archive_is_skipped(self, tmp_path):
+        import io
+        import zipfile
+
+        from PIL import Image
+
+        from instruments.micasense.adapter import _all_images, release_archive_handle
+
+        real = tmp_path / "IMG_0000.zip"
+        with zipfile.ZipFile(real, "w") as bundle:
+            for band in range(1, 7):
+                buffer = io.BytesIO()
+                Image.new("L", (8, 8), color=band).save(buffer, format="TIFF")
+                bundle.writestr(f"IMG_0000_{band}.tif", buffer.getvalue())
+        # What macOS leaves behind: not a ZIP at all.
+        (tmp_path / "._IMG_0000.zip").write_bytes(b"\x00\x05\x16\x07" + b"\x00" * 64)
+
+        images = _all_images((tmp_path,))
+        release_archive_handle()
+
+        assert len(images) == 6
+        assert not [
+            item for item in images
+            if getattr(item, "member", "") == "__CORRUPT_ARCHIVE__.tif"
+        ]
+
+    def test_a_genuinely_broken_archive_is_still_reported(self, tmp_path):
+        """Skipping stubs must not hide a real unreadable delivery."""
+        from instruments.micasense.adapter import _all_images, release_archive_handle
+
+        (tmp_path / "IMG_0001.zip").write_bytes(b"not a zip at all")
+        images = _all_images((tmp_path,))
+        release_archive_handle()
+
+        assert [
+            item for item in images
+            if getattr(item, "member", "") == "__CORRUPT_ARCHIVE__.tif"
+        ]
+
+    def test_a_stub_tiff_is_skipped_too(self, tmp_path):
+        from instruments.micasense.adapter import _image_files
+
+        (tmp_path / "IMG_0000_1.tif").write_bytes(b"II*\x00")
+        (tmp_path / "._IMG_0000_1.tif").write_bytes(b"\x00\x05\x16\x07")
+        found = _image_files(tuple(tmp_path.iterdir()))
+        assert [p.name for p in found] == ["IMG_0000_1.tif"]
+
+
+class TestTheFiguresActuallyDraw:
+    """Found by rendering the page in a headless browser and looking at it.
+
+    Three defects no data check would have caught: nine WebGL panels showed
+    "WebGL is not supported by your browser" instead of figures, every title
+    printed on top of its legend, and the band-count axis auto-ranged a single
+    category across 5.6-6.4 as one full-width bar.
+    """
+
+    script = (ASSETS / "micasense.js").read_text(encoding="utf-8")
+
+    def test_no_panel_needs_webgl(self):
+        """A VM, a remote desktop or an old driver has no WebGL, and a browser
+        caps its contexts well below nine."""
+        assert "type:'scattergl'" not in self.script
+        assert "type:'scatter'" in self.script
+
+    def test_the_title_has_room_above_the_legend(self):
+        assert "margin:{l:78,r:58,t:86,b:64}" in self.script
+        assert "legend:{orientation:'h',y:1.06,x:0,yanchor:'bottom'}" in self.script
+
+    def test_band_counts_are_a_category_axis(self):
+        assert "{xaxis:{type:'category'},bargap:.6}" in self.script
+
+

@@ -166,10 +166,10 @@
     const rows = timedCaptures(captures);
     const times = rows.map(row => row.trigger_time);
     const wanted = [
-      ['irradiance','Irradiance',COLOURS.a],
-      ['horizontal_irradiance','Horizontal',COLOURS.b],
-      ['direct_irradiance','Direct',COLOURS.c],
-      ['scattered_irradiance','Scattered',COLOURS.d]
+      ['dls_irradiance','Irradiance',COLOURS.a],
+      ['dls_horizontal_irradiance','Horizontal',COLOURS.b],
+      ['dls_direct_irradiance','Direct',COLOURS.c],
+      ['dls_scattered_irradiance','Scattered',COLOURS.d]
     ];
     const traces = wanted
       .map(([field,name,colour]) => [series(rows,field),name,colour])
@@ -202,9 +202,9 @@
     const rows = timedCaptures(captures);
     const times = rows.map(row => row.trigger_time);
     const wanted = [
-      ['irradiance_yaw_deg','Yaw',COLOURS.a],
-      ['irradiance_pitch_deg','Pitch',COLOURS.b],
-      ['irradiance_roll_deg','Roll',COLOURS.c]
+      ['dls_yaw','Yaw',COLOURS.a],
+      ['dls_pitch','Pitch',COLOURS.b],
+      ['dls_roll','Roll',COLOURS.c]
     ];
     const traces = wanted
       .map(([field,name,colour]) => [series(rows,field),name,colour])
@@ -219,8 +219,8 @@
   function renderSolar(captures) {
     const rows = timedCaptures(captures);
     const times = rows.map(row => row.trigger_time);
-    const elevation = series(rows,'solar_elevation_deg');
-    const azimuth = series(rows,'solar_azimuth_deg');
+    const elevation = series(rows,'solar_elevation');
+    const azimuth = series(rows,'solar_azimuth');
     if (!hasAny(elevation) && !hasAny(azimuth)) return noData('solarPlot', 'No solar geometry was recorded.');
     const traces = [];
     if (hasAny(elevation)) traces.push({type:'scatter',mode:'lines',x:times,y:elevation,
@@ -228,8 +228,8 @@
     if (hasAny(azimuth)) traces.push({type:'scatter',mode:'lines',x:times,y:azimuth,
       name:'Solar azimuth',yaxis:'y2',line:{color:COLOURS.e,width:1.4}});
     Plotly.react('solarPlot', traces,
-      layout('Solar geometry as recorded by the light sensor','Capture time (UTC)','Elevation [deg]',
-        {yaxis2:{title:'Azimuth [deg]',overlaying:'y',side:'right',gridcolor:'transparent',automargin:true}}),
+      layout('Solar geometry as recorded by the light sensor','Capture time (UTC)','Elevation [rad, as recorded]',
+        {yaxis2:{title:'Azimuth [rad]',overlaying:'y',side:'right',gridcolor:'transparent',automargin:true}}),
       plotConfig);
   }
 
