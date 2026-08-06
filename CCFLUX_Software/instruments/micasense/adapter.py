@@ -890,8 +890,17 @@ NUMERIC_QA_FIELDS = (
 STATIC_SOLAR_MIN_HOURS = 1.0
 STATIC_SOLAR_MAX_SPREAD_DEG = 1.0
 
-RADIAN_QA_FIELDS = frozenset({
-    "SolarElevation", "SolarAzimuth",
+# Solar geometry is written in radians: SolarElevation 0.9744 is 55.8 degrees,
+# right for 13:00 local in August at 51.4 N, where 0.97 degrees would be
+# near-horizon nonsense.
+RADIAN_QA_FIELDS = frozenset({"SolarElevation", "SolarAzimuth"})
+
+# The DLS attitude is already in degrees - across Flight_CCT0803 yaw runs -27 to
+# +32 and roll reaches 89, all inside a degree range. Converting them as radians
+# multiplied everything by 57.3 and put yaw at +/-2000 degrees on the workspace
+# plot, which is what showed the mistake. Named _deg like the converted fields,
+# because that is what they are; they just need no conversion to get there.
+DEGREE_QA_FIELDS = frozenset({
     "IrradianceYaw", "IrradiancePitch", "IrradianceRoll",
 })
 
@@ -919,7 +928,9 @@ def _qa_record_key(name: str) -> str:
     snake = QA_KEY_OVERRIDES.get(name)
     if snake is None:
         snake = re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
-    return f"{snake}_deg" if name in RADIAN_QA_FIELDS else snake
+    if name in RADIAN_QA_FIELDS or name in DEGREE_QA_FIELDS:
+        return f"{snake}_deg"
+    return snake
 
 
 def _optional_number(value: Any) -> float | None:

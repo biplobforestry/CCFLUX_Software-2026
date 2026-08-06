@@ -6,17 +6,24 @@
 
   const plotConfig = {responsive:true,displaylogo:false,doubleClick:'reset',
     toImageButtonOptions:{format:'png',scale:2}};
+  // SVG traces, not scattergl. A flight is at most a few thousand captures,
+  // which SVG draws comfortably, and nine WebGL panels on one page is a page
+  // that shows "WebGL is not supported by your browser" instead of the figures
+  // wherever WebGL is missing - a VM, a remote desktop, an old driver - or once
+  // the browser's context limit is reached.
   // Matches the FLIR and SIF workspaces so a reader moving between them is not
   // relearning the axes each time.
   function layout(title, xTitle, yTitle, extra = {}) {
     const base = {
-      title:{text:title,x:.5,font:{size:17}},
+      title:{text:title,x:.5,y:.97,yanchor:'top',font:{size:17}},
       paper_bgcolor:'#f7fafc',plot_bgcolor:'#fff',
       font:{family:'Arial, sans-serif',size:13,color:'#172431'},
-      margin:{l:78,r:58,t:58,b:64},
+      // The legend sits above the plot, so the title needs room above it or the
+      // two print on top of each other - which they did on every panel.
+      margin:{l:78,r:58,t:86,b:64},
       xaxis:{title:xTitle,gridcolor:'#dce5ea',automargin:true},
       yaxis:{title:yTitle,gridcolor:'#dce5ea',automargin:true,separatethousands:true,exponentformat:'none'},
-      legend:{orientation:'h',y:1.15,x:0},hovermode:'closest'
+      legend:{orientation:'h',y:1.06,x:0,yanchor:'bottom'},hovermode:'closest'
     };
     return {...base,...extra,
       xaxis:{...base.xaxis,...(extra.xaxis||{})},
@@ -115,7 +122,7 @@
     const sorted = [...intervals].sort((a, b) => a - b);
     const nominal = sorted[Math.floor(sorted.length / 2)];
     Plotly.react('cadencePlot', [
-      {type:'scattergl',mode:'markers',x:times.slice(1),y:intervals,name:'Trigger interval',
+      {type:'scatter',mode:'markers',x:times.slice(1),y:intervals,name:'Trigger interval',
        marker:{color:COLOURS.a,size:4},
        hovertemplate:'%{x}<br>%{y:.3f} s<extra></extra>'},
       {type:'scatter',mode:'lines',x:[times[1],times[times.length-1]],y:[nominal,nominal],
@@ -130,7 +137,7 @@
     if (!rows.length) return noData('trackPlot', 'No capture carries a usable GPS position.');
     const altitudes = series(rows, 'gps_altitude');
     Plotly.react('trackPlot', [{
-      type:'scattergl',mode:'markers',
+      type:'scatter',mode:'markers',
       x:series(rows,'gps_longitude'),y:series(rows,'gps_latitude'),
       marker:{color:hasAny(altitudes)?altitudes:COLOURS.a,size:5,colorscale:'Viridis',
         showscale:hasAny(altitudes),colorbar:{title:{text:'Alt [m]',side:'right'}}},
@@ -147,9 +154,9 @@
     if (!hasAny(gps) && !hasAny(barometric)) return noData('altitudePlot', 'No altitude was recorded.');
     const times = rows.map(row => row.trigger_time);
     const traces = [];
-    if (hasAny(gps)) traces.push({type:'scattergl',mode:'lines',x:times,y:gps,
+    if (hasAny(gps)) traces.push({type:'scatter',mode:'lines',x:times,y:gps,
       name:'GPS altitude',line:{color:COLOURS.a,width:1.3}});
-    if (hasAny(barometric)) traces.push({type:'scattergl',mode:'lines',x:times,y:barometric,
+    if (hasAny(barometric)) traces.push({type:'scatter',mode:'lines',x:times,y:barometric,
       name:'Barometric altitude',line:{color:COLOURS.b,width:1.3}});
     Plotly.react('altitudePlot', traces,
       layout('Altitude per capture','Capture time (UTC)','Altitude [m]'), plotConfig);
@@ -167,7 +174,7 @@
     const traces = wanted
       .map(([field,name,colour]) => [series(rows,field),name,colour])
       .filter(([values]) => hasAny(values))
-      .map(([values,name,colour]) => ({type:'scattergl',mode:'lines',x:times,y:values,
+      .map(([values,name,colour]) => ({type:'scatter',mode:'lines',x:times,y:values,
         name,line:{color:colour,width:1.3}}));
     if (!traces.length) return noData('irradiancePlot', 'The light sensor recorded no irradiance for this flight.');
     Plotly.react('irradiancePlot', traces,
@@ -181,9 +188,9 @@
     const exposure = series(rows,'exposure_time'), iso = series(rows,'iso_speed');
     if (!hasAny(exposure) && !hasAny(iso)) return noData('exposurePlot', 'No exposure metadata was recorded.');
     const traces = [];
-    if (hasAny(exposure)) traces.push({type:'scattergl',mode:'lines',x:times,y:exposure,
+    if (hasAny(exposure)) traces.push({type:'scatter',mode:'lines',x:times,y:exposure,
       name:'Exposure time',line:{color:COLOURS.a,width:1.3}});
-    if (hasAny(iso)) traces.push({type:'scattergl',mode:'lines',x:times,y:iso,
+    if (hasAny(iso)) traces.push({type:'scatter',mode:'lines',x:times,y:iso,
       name:'ISO',yaxis:'y2',line:{color:COLOURS.b,width:1.3}});
     Plotly.react('exposurePlot', traces,
       layout('Exposure and gain per capture','Capture time (UTC)','Exposure time [s]',
@@ -202,7 +209,7 @@
     const traces = wanted
       .map(([field,name,colour]) => [series(rows,field),name,colour])
       .filter(([values]) => hasAny(values))
-      .map(([values,name,colour]) => ({type:'scattergl',mode:'lines',x:times,y:values,
+      .map(([values,name,colour]) => ({type:'scatter',mode:'lines',x:times,y:values,
         name,line:{color:colour,width:1.3}}));
     if (!traces.length) return noData('orientationPlot', 'The light sensor recorded no orientation.');
     Plotly.react('orientationPlot', traces,
@@ -216,9 +223,9 @@
     const azimuth = series(rows,'solar_azimuth_deg');
     if (!hasAny(elevation) && !hasAny(azimuth)) return noData('solarPlot', 'No solar geometry was recorded.');
     const traces = [];
-    if (hasAny(elevation)) traces.push({type:'scattergl',mode:'lines',x:times,y:elevation,
+    if (hasAny(elevation)) traces.push({type:'scatter',mode:'lines',x:times,y:elevation,
       name:'Solar elevation',line:{color:COLOURS.b,width:1.4}});
-    if (hasAny(azimuth)) traces.push({type:'scattergl',mode:'lines',x:times,y:azimuth,
+    if (hasAny(azimuth)) traces.push({type:'scatter',mode:'lines',x:times,y:azimuth,
       name:'Solar azimuth',yaxis:'y2',line:{color:COLOURS.e,width:1.4}});
     Plotly.react('solarPlot', traces,
       layout('Solar geometry as recorded by the light sensor','Capture time (UTC)','Elevation [deg]',
@@ -230,7 +237,7 @@
     const rows = timedCaptures(captures);
     const values = series(rows,'imager_temperature_c');
     if (!hasAny(values)) return noData('temperaturePlot', 'The camera recorded no imager temperature.');
-    Plotly.react('temperaturePlot', [{type:'scattergl',mode:'lines',
+    Plotly.react('temperaturePlot', [{type:'scatter',mode:'lines',
       x:rows.map(row => row.trigger_time),y:values,
       name:'Imager temperature',line:{color:COLOURS.b,width:1.3}}],
       layout('Imager body temperature','Capture time (UTC)','Temperature [°C]'), plotConfig);
@@ -249,7 +256,11 @@
       type:'bar',x:keys.map(String),y:keys.map(key => counts.get(key)),
       marker:{color:keys.map(key => (key === 6 ? COLOURS.c : COLOURS.warn))},
       hovertemplate:'%{x} band(s): %{y} capture(s)<extra></extra>',name:'Captures'
-    }], layout('Bands delivered per capture','Bands in the capture','Captures'), plotConfig);
+    }], layout('Bands delivered per capture','Bands in the capture','Captures',
+      // Band counts are categories, not a continuous scale. Left numeric,
+      // Plotly auto-ranged a single "6" across 5.6-6.4 and drew one bar the
+      // full width of the panel.
+      {xaxis:{type:'category'},bargap:.6}), plotConfig);
   }
 
   function renderPlots(data) {

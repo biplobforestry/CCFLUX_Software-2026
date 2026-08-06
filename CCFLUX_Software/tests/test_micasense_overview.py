@@ -445,3 +445,84 @@ class TestMacResourceForksAreNotDeliveries:
         (tmp_path / "._IMG_0000_1.tif").write_bytes(b"\x00\x05\x16\x07")
         found = _image_files(tuple(tmp_path.iterdir()))
         assert [p.name for p in found] == ["IMG_0000_1.tif"]
+
+
+class TestTheFiguresActuallyDraw:
+    """Found by rendering the page in a headless browser and looking at it.
+
+    Three defects no data check would have caught: nine WebGL panels showed
+    "WebGL is not supported by your browser" instead of figures, every title
+    printed on top of its legend, and the band-count axis auto-ranged a single
+    category across 5.6-6.4 as one full-width bar.
+    """
+
+    script = (ASSETS / "micasense.js").read_text(encoding="utf-8")
+
+    def test_no_panel_needs_webgl(self):
+        """A VM, a remote desktop or an old driver has no WebGL, and a browser
+        caps its contexts well below nine."""
+        assert "type:'scattergl'" not in self.script
+        assert "type:'scatter'" in self.script
+
+    def test_the_title_has_room_above_the_legend(self):
+        assert "margin:{l:78,r:58,t:86,b:64}" in self.script
+        assert "legend:{orientation:'h',y:1.06,x:0,yanchor:'bottom'}" in self.script
+
+    def test_band_counts_are_a_category_axis(self):
+        assert "{xaxis:{type:'category'},bargap:.6}" in self.script
+
+
+class TestTheDlsAttitudeIsAlreadyInDegrees:
+    """Rendering showed yaw at +/-2000 degrees, which is not a yaw.
+
+    Solar geometry is written in radians - SolarElevation 0.9744 is 55.8 deg,
+    right for 13:00 local in August at 51.4 N. The DLS attitude is not: across
+    Flight_CCT0803 yaw runs -27 to +32 and roll reaches 89, already degrees.
+    Converting them multiplied everything by 57.3.
+    """
+
+    def test_solar_geometry_is_converted(self):
+        from instruments.micasense.adapter import RADIAN_QA_FIELDS, _qa_fields
+
+        assert "SolarElevation" in RADIAN_QA_FIELDS
+        values = _qa_fields({"SolarElevation": "0.97441876"})
+        assert values["solar_elevation_deg"] == pytest.approx(55.83, abs=0.01)
+
+    def test_the_attitude_is_not_converted(self):
+        from instruments.micasense.adapter import DEGREE_QA_FIELDS, _qa_fields
+
+        assert "IrradianceYaw" in DEGREE_QA_FIELDS
+        values = _qa_fields({
+            "IrradianceYaw": "-27.2997",
+            "IrradiancePitch": "-1.1582",
+            "IrradianceRoll": "89.0400",
+        })
+        assert values["irradiance_yaw_deg"] == pytest.approx(-27.2997)
+        assert values["irradiance_pitch_deg"] == pytest.approx(-1.1582)
+        assert values["irradiance_roll_deg"] == pytest.approx(89.04)
+
+    def test_the_two_sets_do_not_overlap(self):
+        from instruments.micasense.adapter import (
+            DEGREE_QA_FIELDS,
+            RADIAN_QA_FIELDS,
+        )
+
+        assert not RADIAN_QA_FIELDS & DEGREE_QA_FIELDS
+
+    def test_both_sets_are_still_named_in_degrees(self):
+        from instruments.micasense.adapter import (
+            DEGREE_QA_FIELDS,
+            RADIAN_QA_FIELDS,
+            _qa_record_key,
+        )
+
+        for name in RADIAN_QA_FIELDS | DEGREE_QA_FIELDS:
+            assert _qa_record_key(name).endswith("_deg"), name
+
+    def test_a_plausible_yaw_stays_inside_a_compass(self):
+        """The check that would have caught it: a yaw is not 2000 degrees."""
+        from instruments.micasense.adapter import _qa_fields
+
+        for raw in ("-27.2997", "32.2161", "-4.8197"):
+            value = _qa_fields({"IrradianceYaw": raw})["irradiance_yaw_deg"]
+            assert -180 <= value <= 180, raw
