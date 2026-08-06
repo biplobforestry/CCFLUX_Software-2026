@@ -632,6 +632,24 @@ STRAIGHT_LEG_SETTINGS = (
 )
 
 
+def _idle_validation() -> dict[str, object]:
+    """No validation in progress. The window reads this and stays closed."""
+    return {
+        "running": False,
+        "instrument_id": None,
+        "instrument": None,
+        "index": 0,
+        "total": 0,
+        "file": None,
+        "file_index": 0,
+        "file_count": 0,
+        "bytes_done": 0,
+        "bytes_total": 0,
+        "note": None,
+        "instruments": [],
+    }
+
+
 def _json_safe_capture(row: Mapping[str, Any]) -> dict[str, Any]:
     """One MicaSense capture row as JSON the workspace can plot.
 
@@ -775,6 +793,9 @@ class DashboardScanBackend:
         self._gopro_index_cache: tuple[Path, dict[str, Path]] | None = None
         self._gopro_options = dict(DEFAULT_GOPRO_OPTIONS)
         self._gopro_clock_measurement: dict[str, object] | None = None
+        # What validation is reading right now, so the operator can watch a
+        # campaign Noseboom CSV being read instead of a still progress bar.
+        self._validation: dict[str, object] = _idle_validation()
 
     def attach_miro_rack_bridge(self, bridge: object) -> None:
         """Connect shared MIRO/Picarro browser science to queue processing."""
@@ -1435,6 +1456,7 @@ class DashboardScanBackend:
                     for source, channel in self._scan_channels.items()
                 },
                 "camera_scan_ready": self._camera_products_ready_locked(),
+                "validation": dict(self._validation),
                 "camera_coverage": self._camera_coverage_locked(),
             }
 
@@ -5588,6 +5610,23 @@ class DashboardScanBackend:
         extractor = self._timestamp_extractor()
         validation_items = tuple(grouped.items())
         validation_total = len(validation_items)
+        with self._lock:
+            self._validation = {
+                **_idle_validation(),
+                "running": True,
+                "total": validation_total,
+                "instruments": [
+                    {
+                        "instrument_id": item_id,
+                        "display_name": self._instruments[item_id].display_name,
+                        "state": "waiting",
+                        "files": len(
+                            self._validation_source_files(item_id, item_candidates)
+                        ),
+                    }
+                    for item_id, item_candidates in validation_items
+                ],
+            }
         for validation_index, (instrument_id, candidates) in enumerate(
             validation_items, start=1
         ):
@@ -5606,6 +5645,30 @@ class DashboardScanBackend:
                     f"Validating {display_name} "
                     f"({validation_index}/{validation_total})..."
                 )
+                self._validation = {
+                    **self._validation,
+                    "instrument_id": instrument_id,
+                    "instrument": display_name,
+                    "index": validation_index,
+                    "file": None,
+                    "file_index": 0,
+                    "file_count": 0,
+                    "bytes_done": 0,
+                    "bytes_total": 0,
+                    "note": None,
+                    "instruments": [
+                        {
+                            **entry,
+                            "state": (
+                                "validating" if entry["instrument_id"] == instrument_id
+                                else "done"
+                                if entry.get("state") == "validating"
+                                else entry.get("state", "waiting")
+                            ),
+                        }
+                        for entry in self._validation["instruments"]
+                    ],
+                }
                 self._instruments[instrument_id].detection_status = (
                     DetectionStatus.VALIDATING
                 )
@@ -5636,7 +5699,7 @@ class DashboardScanBackend:
                     if str(path) not in candidate_paths
                 )
             time_result = extractor.extract_instrument(
-                instrument_id, unique_source_files
+                instrument_id, unique_source_files, self._publish_validation_file
             )
             timestamp_warnings = list(time_result.timestamp_quality_warnings)
             card_timestamp_warnings = timestamp_warnings
@@ -5703,6 +5766,13 @@ class DashboardScanBackend:
                         f"{time_result.timezone_information}."
                     )
         with self._lock:
+            self._validation = {
+                **_idle_validation(),
+                "instruments": [
+                    {**entry, "state": "done"}
+                    for entry in self._validation["instruments"]
+                ],
+            }
             self._rebuild_time_state()
             self._sync_project_from_report(
                 report, expanded_source_files=expanded_source_files
@@ -5728,6 +5798,37 @@ class DashboardScanBackend:
         # against their coverage.
         if final:
             self._measure_gopro_clock()
+
+    def _publish_validation_file(
+        self,
+        instrument_id: str,
+        path: Path | None,
+        file_index: int,
+        file_count: int,
+        bytes_done: int,
+        bytes_total: int,
+        note: str | None,
+    ) -> None:
+        """Record which file validation is reading, and how far into it.
+
+        Called from inside the timestamp reader, including every few megabytes of
+        one file - a campaign Noseboom CSV runs to tens of gigabytes, and an
+        operator watching a single file name for minutes cannot tell a slow read
+        from a hang.
+        """
+        with self._lock:
+            if not self._validation.get("running"):
+                return
+            self._validation = {
+                **self._validation,
+                "instrument_id": instrument_id,
+                "file": None if path is None else Path(path).name,
+                "file_index": file_index,
+                "file_count": file_count,
+                "bytes_done": bytes_done,
+                "bytes_total": bytes_total,
+                "note": note,
+            }
 
     def _rebuild_time_state(self) -> None:
         """Rederive the dashboard time state from the current card times.

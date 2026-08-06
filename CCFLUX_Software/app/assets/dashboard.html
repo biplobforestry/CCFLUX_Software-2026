@@ -1439,6 +1439,27 @@
     .scan-window.show { display: block; }
     .scan-window.flight { left: 14px; }
     .scan-window.camera { right: 14px; }
+    /* Centred, and above the two scan windows - it is the thing being waited on,
+       so its z-index has to beat the 1001 on .scan-window, not sit under it. The
+       top falls back to a fixed offset so it is placed before positionScanWindows
+       has run. */
+    .scan-window.validation {
+      left: 50%; transform: translateX(-50%);
+      top: var(--scan-window-top, 96px);
+      width: min(560px, 92vw); z-index: 1002;
+    }
+    /* .scan-line has no styling of its own in this sheet, so the label and the
+       value ran together as "InstrumentNoseboom". */
+    .scan-window.validation .scan-line { display: flex; gap: 10px; align-items: baseline; margin: 6px 0; }
+    .scan-window.validation .scan-line > span:first-child { color: var(--muted); min-width: 72px; }
+    .scan-window.validation .scan-line .spacer { flex: 1; min-width: 0; }
+    .scan-window.validation .progress { margin: 10px 0 6px; }
+    .scan-window.validation .qc-list { margin-top: 10px; max-height: 190px; overflow-y: auto; }
+    .scan-window.validation .qc-list li { display: flex; gap: 8px; align-items: baseline; font-size: .82rem; padding: 5px 9px; }
+    .scan-window.validation .qc-list li .state { margin-left: auto; color: var(--muted); font-size: .74rem; text-transform: uppercase; letter-spacing: .04em; }
+    .scan-window.validation .qc-list li.active { border-color: #2f6f8f; background: #10293d; }
+    .scan-window.validation .qc-list li.active .state { color: #6fd0ff; }
+    .scan-window.validation .qc-list li.done .state { color: #5fbf88; }
     .scan-window.minimized {
       min-height: 0;
       height: auto !important;
@@ -2372,6 +2393,24 @@
     <span aria-hidden="true">&#9633;</span><span class="restore-label" id="modalRestoreLabel"></span>
   </button>
 
+  <!-- Shown only while timestamps are being read. A campaign Noseboom CSV runs
+       to tens of gigabytes and takes minutes on its own; without this the
+       operator sees one instrument name and a still bar. -->
+  <section class="scan-window validation" id="validationWindow" role="dialog" aria-labelledby="validationTitle" title="Validating timestamps">
+    <div class="scan-window-header">
+      <strong id="validationTitle">Validating timestamps</strong>
+      <span class="status-pill running" id="validationStatus"><span class="dot"></span>Reading</span>
+      <button class="window-control close" data-validation-close title="Hide">×</button>
+    </div>
+    <div class="scan-window-body">
+      <p class="scan-line"><span>Instrument</span><strong id="validationInstrument">—</strong></p>
+      <p class="scan-line"><span>File</span><strong id="validationFile">—</strong></p>
+      <div class="progress"><span id="validationBar" style="width:0%"></span></div>
+      <p class="scan-line"><span id="validationRead">—</span><span class="spacer"></span><span id="validationCount"></span></p>
+      <ul class="qc-list" id="validationList"></ul>
+      <p class="muted">Every timestamp is read so the Time Filter knows what each instrument actually covers. Nothing is written and no file is modified.</p>
+    </div>
+  </section>
   <section class="scan-window flight" id="flightScanWindow" role="dialog" aria-labelledby="flightScanTitle" title="Scanning Flight Data">
     <div class="scan-window-header">
       <strong id="flightScanTitle">Flight-data scanning</strong>

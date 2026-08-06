@@ -1343,3 +1343,82 @@ def test_straight_flight_recalculation_runs_in_background_with_live_progress(mon
     assert completed["progress"] == 100
     assert completed["result"]["data"]["straight_legs"] == []
     assert completed["elapsed_seconds"] >= 0
+
+
+def test_validation_publishes_what_it_is_reading(tmp_path: Path):
+    """A campaign Noseboom CSV runs to tens of gigabytes and takes minutes.
+
+    Without this the operator watches one instrument name and a still bar, and
+    cannot tell a slow read from a hang.
+    """
+    backend = DashboardScanBackend(
+        _application_root(),
+        logger=ProcessingLogManager(tmp_path / "application-log.jsonl"),
+    )
+    idle = backend.snapshot()["validation"]
+    assert idle["running"] is False
+    assert idle["instruments"] == []
+
+    backend._validation = {**idle, "running": True, "total": 2, "instruments": [
+        {"instrument_id": "noseboom", "display_name": "Noseboom",
+         "state": "validating", "files": 1},
+    ]}
+    backend._publish_validation_file(
+        "noseboom", Path("/x/NoseBoom.csv"), 1, 1, 4 * 1024**3, 100 * 1024**3,
+        None,
+    )
+    live = backend.snapshot()["validation"]
+    assert live["running"] is True
+    assert live["file"] == "NoseBoom.csv"
+    assert live["bytes_done"] == 4 * 1024**3
+    assert live["bytes_total"] == 100 * 1024**3
+    assert live["instruments"][0]["state"] == "validating"
+
+
+def test_validation_progress_is_ignored_once_it_has_finished(tmp_path: Path):
+    """A callback arriving late must not reopen a window that has closed."""
+    backend = DashboardScanBackend(
+        _application_root(),
+        logger=ProcessingLogManager(tmp_path / "application-log.jsonl"),
+    )
+    backend._publish_validation_file("noseboom", Path("/x/a.csv"), 1, 1, 5, 9, None)
+    assert backend.snapshot()["validation"]["running"] is False
+    assert backend.snapshot()["validation"]["file"] is None
+
+
+def test_the_validation_window_exists_and_is_driven(tmp_path: Path):
+    assets = _application_root() / "app" / "assets"
+    html = (assets / "dashboard.html").read_text(encoding="utf-8")
+    script = (assets / "dashboard.js").read_text(encoding="utf-8")
+    for element in ("validationWindow", "validationInstrument", "validationFile",
+                    "validationBar", "validationRead", "validationList"):
+        assert f'id="{element}"' in html, element
+        assert element in script, element
+    assert "renderValidation(state.validation)" in script
+    # Bytes when there are bytes, instrument count otherwise: a camera folder is
+    # thousands of small files, a Noseboom delivery is one huge one.
+    assert "bytesDone / bytesTotal * 100" in script
+    assert "data-validation-close" in html
+
+
+def test_the_timestamp_reader_reports_inside_one_file(tmp_path: Path):
+    """Every few megabytes, not every row, and not only between files."""
+    from core.time_extraction import TimestampExtractor, _Accumulator
+
+    assert _Accumulator.PROGRESS_REPORT_BYTES == 4 * 1024 * 1024
+    source = tmp_path / "noseboom.csv"
+    rows = ["timestamp,value"]
+    rows += [f"2026-08-03 11:{minute:02d}:{second:02d},1"
+             for minute in range(60) for second in range(60)]
+    source.write_text("\n".join(rows), encoding="utf-8")
+
+    seen: list[tuple[int, int]] = []
+    TimestampExtractor().extract_instrument(
+        "noseboom", [source],
+        lambda instrument, path, index, count, done, total, note:
+            seen.append((done, total)),
+    )
+    # At least a start and an end; the file is small so inner reports are not
+    # guaranteed, but the totals must be real.
+    assert seen
+    assert seen[-1][0] == seen[-1][1] == source.stat().st_size

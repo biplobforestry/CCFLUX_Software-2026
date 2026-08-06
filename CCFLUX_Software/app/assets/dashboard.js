@@ -959,6 +959,53 @@
     }
   }
 
+  // Hidden by the operator for this scan only; the next scan shows it again.
+  let validationHidden = false;
+  document.querySelector('[data-validation-close]')?.addEventListener('click', () => {
+    validationHidden = true;
+    document.getElementById('validationWindow').classList.remove('show');
+  });
+  function renderValidation(validation) {
+    const window = document.getElementById('validationWindow');
+    if (!window) return;
+    const running = Boolean(validation && validation.running);
+    window.classList.toggle('show', running && !validationHidden);
+    if (!running) { validationHidden = false; return; }
+    const bytesTotal = Number(validation.bytes_total || 0);
+    const bytesDone = Math.min(Number(validation.bytes_done || 0), bytesTotal);
+    // Bytes when there are bytes to count, otherwise how far through the
+    // instruments: a camera folder is thousands of small files, one Noseboom CSV
+    // is a single huge one, and the same bar has to mean something for both.
+    const percent = bytesTotal
+      ? bytesDone / bytesTotal * 100
+      : (Number(validation.total || 0)
+          ? (Number(validation.index || 0) - 1) / Number(validation.total) * 100
+          : 0);
+    document.getElementById('validationInstrument').textContent =
+      `${validation.instrument || '—'}${
+        validation.total ? ` (${validation.index} of ${validation.total})` : ''}`;
+    document.getElementById('validationFile').textContent =
+      validation.note || validation.file || 'Preparing…';
+    document.getElementById('validationBar').style.width = `${percent.toFixed(1)}%`;
+    document.getElementById('validationRead').textContent = bytesTotal
+      ? `${formatBytes(bytesDone)} of ${formatBytes(bytesTotal)} read`
+      : 'Reading timestamps';
+    document.getElementById('validationCount').textContent =
+      Number(validation.file_count || 0) > 1
+        ? `file ${validation.file_index} of ${validation.file_count}`
+        : '';
+    document.getElementById('validationList').innerHTML =
+      (validation.instruments || []).map(entry => {
+        const state = entry.state === 'validating' ? 'active'
+          : entry.state === 'done' ? 'done' : '';
+        const label = entry.state === 'validating' ? 'reading'
+          : entry.state === 'done' ? 'done' : 'waiting';
+        return `<li class="${state}"><span>${escapeHtml(entry.display_name)}</span>` +
+          `<span class="muted">${Number(entry.files || 0).toLocaleString()} file(s)</span>` +
+          `<span class="state">${label}</span></li>`;
+      }).join('');
+  }
+
   function renderScanState(state) {
     document.getElementById('selectedFlightFolder').textContent =
       state.selected_folder || 'Not selected';
@@ -978,6 +1025,7 @@
     } else {
       document.getElementById('flightId').value = '';
     }
+    renderValidation(state.validation);
     renderScanChannel('flight', state.scans?.flight || {});
     renderScanChannel('camera', state.scans?.camera || {});
     renderControlStates(state);

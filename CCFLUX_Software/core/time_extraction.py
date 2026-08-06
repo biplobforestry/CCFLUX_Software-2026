@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 from zoneinfo import ZoneInfo
 
 from PIL import ExifTags, Image, UnidentifiedImageError
@@ -30,6 +30,12 @@ from .time_manager import (
 # campaign's local zone, which is what CC-FLUX has always assumed; it is only a
 # fallback now, because on Flight_CCT0803 it was wrong by two hours.
 GOPRO_ASSUMED_TIMEZONE = "Europe/Berlin"
+
+# instrument_id, file being read (None between files), file index, file count,
+# bytes done, bytes total, an optional phase note.
+ValidationProgress = Callable[
+    [str, "Path | None", int, int, int, int, "str | None"], None
+]
 
 MAX_SOURCE_FILE_SAMPLES = 20
 MAX_QUALITY_SAMPLES = 100
@@ -124,9 +130,15 @@ class _Accumulator:
     coverage_segments: list[tuple[datetime, datetime]] = field(default_factory=list)
     file_aware_min: datetime | None = None
     file_aware_max: datetime | None = None
+    # Set per file while validating, so a single huge delivery shows movement.
+    row_callback: Any = None
+    bytes_seen: int = 0
+    next_report: int = 0
     unset_clock_images: int = 0
 
     def begin_file(self, path: Path) -> None:
+        self.bytes_seen = 0
+        self.next_report = self.PROGRESS_REPORT_BYTES
         self._close_file_segment()
         self.source_file_count += 1
         if len(self.source_file_samples) < MAX_SOURCE_FILE_SAMPLES:
@@ -140,8 +152,21 @@ class _Accumulator:
         self.file_aware_min = None
         self.file_aware_max = None
 
+    # Every few megabytes, not every row: a campaign Noseboom CSV holds tens of
+    # millions of them and publishing on each would cost more than reading.
+    PROGRESS_REPORT_BYTES = 4 * 1024 * 1024
+
+    def note_bytes(self, count: int) -> None:
+        """Count consumed bytes and report occasionally."""
+        self.bytes_seen += count
+        if self.row_callback is None or self.bytes_seen < self.next_report:
+            return
+        self.next_report = self.bytes_seen + self.PROGRESS_REPORT_BYTES
+        self.row_callback(self.bytes_seen)
+
     def observe(self, raw: _RawTimestamp) -> None:
         self.records_examined += 1
+        self.note_bytes(len(raw.original) + 1)
         original = raw.original
         if not original.strip():
             self.missing += 1
@@ -338,22 +363,67 @@ class TimestampExtractor:
         self._gopro_record_clock_offset_seconds = gopro_record_clock_offset_seconds
 
     def extract_instrument(
-        self, instrument_id: str, source_files: Iterable[Path]
+        self,
+        instrument_id: str,
+        source_files: Iterable[Path],
+        progress: ValidationProgress | None = None,
     ) -> TimeRangeResult:
+        """Read every timestamp of one instrument.
+
+        ``progress`` is called as each file starts and as rows accumulate inside
+        it. A campaign Noseboom CSV runs to tens of gigabytes and takes minutes
+        on its own, so an operator watching needs to see movement inside the file
+        rather than a still bar between two file names.
+        """
         accumulator = _Accumulator(instrument_id=instrument_id)
         source_files = list(source_files)
+        total_bytes = 0
+        for candidate in source_files:
+            try:
+                total_bytes += Path(candidate).stat().st_size
+            except OSError:
+                continue
+        done_bytes = 0
         if (
             instrument_id == "gopro"
             and len(source_files) >= self.GOPRO_PARALLEL_THRESHOLD
         ):
+            if progress is not None:
+                progress(
+                    instrument_id, None, 0, len(source_files),
+                    done_bytes, total_bytes, "Reading camera EXIF headers",
+                )
             self._gopro_exif = self._read_gopro_exif(source_files)
-        for source_file in source_files:
+        for index, source_file in enumerate(source_files, start=1):
             path = Path(source_file)
             accumulator.begin_file(path)
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            if progress is not None:
+                progress(
+                    instrument_id, path, index, len(source_files),
+                    done_bytes, total_bytes, None,
+                )
+                accumulator.row_callback = lambda read, _p=path, _i=index, _d=done_bytes: (
+                    progress(
+                        instrument_id, _p, _i, len(source_files),
+                        _d + read, total_bytes, None,
+                    )
+                )
             try:
                 self._extract_file(instrument_id, path, accumulator)
             except (OSError, UnicodeError, csv.Error) as exc:
                 accumulator.errors.append(f"Cannot inspect timestamps in {path}: {exc}")
+            finally:
+                accumulator.row_callback = None
+            done_bytes += size
+        if progress is not None:
+            progress(
+                instrument_id, None, len(source_files), len(source_files),
+                total_bytes, total_bytes, None,
+            )
         return accumulator.result()
 
     def extract_all(
