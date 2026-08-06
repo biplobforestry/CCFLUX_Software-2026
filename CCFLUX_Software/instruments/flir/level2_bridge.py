@@ -23,14 +23,11 @@ from core.legacy_paths import legacy_integration_path
 RADIOMETRY_SOURCE = legacy_integration_path("FLIR", "flir_radiometry.py")
 HEALTH_SOURCE = legacy_integration_path("FLIR", "flir_health_temperature.py")
 
-# Two modes, exactly as the reference defines them.
+# The one mode the campaign can support. Environment-corrected temperature needs
+# five measured environment values - emissivity, object distance, atmospheric
+# and reflected apparent temperature, relative humidity - that the campaign does
+# not record, so it was never quantitative and is no longer offered.
 APPARENT = "apparent"
-CORRECTED = "corrected"
-
-# Results computed from guessed environment values must never be presented as
-# quantitative, so the provenance travels with every row.
-PROVENANCE_MEASURED = "measured"
-PROVENANCE_ASSUMED = "assumed_for_testing"
 
 
 class LegacyFlirLevel2Bridge:
@@ -86,46 +83,3 @@ class LegacyFlirLevel2Bridge:
                     "ccflux_flir_health_temperature", self.health_path
                 )
             return self._health
-
-    def correction_inputs(self, options: dict) -> object | None:
-        """Build CorrectionInputs, or None for apparent (uncorrected) mode.
-
-        Apparent mode uses factory calibration with emissivity 1 and no
-        atmospheric, reflected or optics correction. The reference is explicit
-        that it is a sensor sanity check, not a publication-grade surface
-        temperature, and the caller is expected to say so in its output.
-        """
-        if str(options.get("mode", APPARENT)) != CORRECTED:
-            return None
-        required = (
-            "emissivity",
-            "object_distance_m",
-            "atmospheric_temperature_c",
-            "reflected_apparent_temperature_c",
-            "relative_humidity_percent",
-        )
-        missing = [name for name in required if options.get(name) is None]
-        if missing:
-            raise ValueError(
-                "Environment-corrected temperature needs measured values for: "
-                + ", ".join(missing)
-            )
-        inputs = self.radiometry.CorrectionInputs(
-            emissivity=float(options["emissivity"]),
-            object_distance_m=float(options["object_distance_m"]),
-            atmospheric_temperature_c=float(options["atmospheric_temperature_c"]),
-            reflected_apparent_temperature_c=float(
-                options["reflected_apparent_temperature_c"]
-            ),
-            relative_humidity_percent=float(options["relative_humidity_percent"]),
-            external_optics_transmission=float(
-                options.get("external_optics_transmission", 1.0)
-            ),
-            external_optics_temperature_c=(
-                None
-                if options.get("external_optics_temperature_c") is None
-                else float(options["external_optics_temperature_c"])
-            ),
-        )
-        inputs.validate()
-        return inputs

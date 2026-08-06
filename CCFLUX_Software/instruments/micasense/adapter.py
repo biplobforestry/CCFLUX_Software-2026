@@ -19,6 +19,7 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from math import degrees
 from pathlib import Path
 from statistics import median
 from typing import Any, Callable, Mapping, Sequence
@@ -43,6 +44,11 @@ from core.time_manager import TimeRange, TimezoneState
 from instruments.base.interface import InstrumentBase, ProgressCallback
 
 EXPECTED_BANDS = frozenset({1, 2, 3, 4, 5, 6})
+# The first campaign year. A RedEdge-P whose GPS has not locked dates its frames
+# from a default clock, so anything earlier than this was not acquired when it
+# says it was. Matches the --minimum-year default of the standalone MicaSense
+# scientific overview, so the two agree on which captures are usable.
+MINIMUM_CAPTURE_YEAR = 2025
 IMAGE_SUFFIXES = frozenset({".tif", ".tiff"})
 CAPTURE_PATTERN = re.compile(r"(.+?)_(\d+)\.tiff?$", re.IGNORECASE)
 MetadataReader = Callable[[Path], Mapping[str, Any]]
@@ -247,17 +253,28 @@ class MicaSenseLevel1Adapter(InstrumentBase):
         # did not describe the same flight window as every other instrument.
         selected_start = _as_utc(options.get("analysis_start"))
         selected_end = _as_utc(options.get("analysis_end"))
+        # A capture dated before the campaign was dated by a camera whose GPS had
+        # not locked, so it carries a default clock rather than an acquisition
+        # time. Those frames are dropped from every calculation - coverage,
+        # capture grouping, trigger cadence and the plotted series - and reported
+        # instead. Keeping them made MicaSense claim it recorded from 1970 and
+        # put a 56-year gap in the trigger intervals.
+        pre_campaign = [
+            record for record in self._records
+            if (stamp := _as_utc(record.get("timestamp"))) is not None
+            and stamp.year < MINIMUM_CAPTURE_YEAR
+        ]
+        if pre_campaign:
+            dropped = {id(record) for record in pre_campaign}
+            self._records = [
+                record for record in self._records if id(record) not in dropped
+            ]
         excluded_by_time = 0
         undated = 0
         if selected_start is not None or selected_end is not None:
             selected_records = []
             for record in self._records:
                 stamp = _as_utc(record.get("timestamp"))
-                if stamp is not None and stamp.year < 2000:
-                    # A camera powered up without a clock write dates its frames
-                    # from the epoch. Those stamps say nothing about when the
-                    # image was taken, so they must not be used to exclude it.
-                    stamp = None
                 if stamp is None:
                     # An image with no usable acquisition time cannot be placed
                     # in the flight; keep it and say so rather than silently
@@ -286,6 +303,12 @@ class MicaSenseLevel1Adapter(InstrumentBase):
             for record in self._records
             if record["timestamp"] is not None
         ]
+        # A camera powered up without a clock write dates its frames from the
+        # epoch, and 24 of Flight_CCT0803's carry such a stamp. Including them
+        # in the reported coverage made MicaSense claim it recorded from
+        # 1970-01-01, which is 56 years of coverage for a four-hour flight. They
+        # are still counted and warned about below; they just cannot bound a
+        # window they were never placed in.
         trigger_intervals = _trigger_intervals(self._captures)
         thumbnail_paths = self._create_limited_thumbnails(files)
         warnings = []
@@ -313,13 +336,17 @@ class MicaSenseLevel1Adapter(InstrumentBase):
             warnings.append(f"GPS metadata missing from {missing_gps} image(s).")
         if missing_exposure:
             warnings.append(f"Exposure metadata missing from {missing_exposure} image(s).")
-        implausible_times = [
-            value for value in timestamps if value.year < 2000
-        ]
-        if implausible_times:
+        static_solar = _static_solar_geometry_warning(self._captures)
+        if static_solar:
+            warnings.append(static_solar)
+        if pre_campaign:
             warnings.append(
-                f"{len(implausible_times)} timestamp(s) predate 2000 and appear "
-                "to use camera boot time rather than campaign UTC."
+                f"{len(pre_campaign)} image(s) are dated before "
+                f"{MINIMUM_CAPTURE_YEAR}, which means the camera GPS had not "
+                "locked and the frame carries a default clock rather than an "
+                "acquisition time. They are excluded from the coverage, capture "
+                "grouping, trigger cadence and every plot; the images "
+                "themselves are untouched on the delivery."
             )
         status = ProcessingStatus.WARNING if warnings else ProcessingStatus.COMPLETE
         result = InstrumentResult(
@@ -369,6 +396,7 @@ class MicaSenseLevel1Adapter(InstrumentBase):
                 "corrupt_files": corrupt,
                 "unusually_small_files": small,
                 "thumbnail_count": len(thumbnail_paths),
+                "camera_identity": _camera_identity(self._records),
                 "batch_size": batch_size,
                 "cpu_limit": self.resource_limits.worker_count,
                 "ram_limit_bytes": self.resource_limits.memory_bytes,
@@ -475,7 +503,8 @@ class MicaSenseLevel1Adapter(InstrumentBase):
             for field in (
                 "capture_id", "timestamp", "gps_present", "gps_latitude",
                 "gps_longitude", "gps_altitude", "exposure_present",
-                "exposure_time", "iso_speed",
+                "exposure_time", "iso_speed", "gps_dop",
+                *(_qa_record_key(name) for name in NUMERIC_QA_FIELDS),
             ):
                 record[field] = source[field]
 
@@ -502,6 +531,9 @@ class MicaSenseLevel1Adapter(InstrumentBase):
                 "exposure_present": None,
                 "exposure_time": None,
                 "iso_speed": None,
+                "gps_dop": None,
+                **{_qa_record_key(name): None for name in NUMERIC_QA_FIELDS},
+                **{key: None for key in TRACEABILITY_FIELDS.values()},
                 "size_bytes": size,
                 "unusually_small": size < self.unusually_small_bytes,
                 "corrupt": False,
@@ -539,6 +571,12 @@ class MicaSenseLevel1Adapter(InstrumentBase):
             "exposure_present": metadata.get("ExposureTime") is not None,
             "exposure_time": metadata.get("ExposureTime"),
             "iso_speed": metadata.get("ISOSpeed"),
+            "gps_dop": _optional_number(metadata.get("GPSDOP")),
+            **_qa_fields(metadata),
+            **{
+                key: (str(metadata.get(name)) if metadata.get(name) else None)
+                for name, key in TRACEABILITY_FIELDS.items()
+            },
             "size_bytes": size,
             "unusually_small": size < self.unusually_small_bytes,
             "corrupt": corrupt,
@@ -755,6 +793,8 @@ def _metadata_from_image(image: Image.Image) -> Mapping[str, Any]:
             result["GPSLongitude"] = longitude
         if gps.get(6) is not None:
             result["GPSAltitude"] = float(gps[6])
+        if gps.get(11) is not None:
+            result["GPSDOP"] = float(gps[11])
     except (KeyError, TypeError, ValueError):
         pass
     xmp = image.info.get("xmp")
@@ -774,6 +814,116 @@ def _gps_decimal(value: Any, reference: Any) -> float | None:
     return -decimal if str(reference).upper() in {"S", "W"} else decimal
 
 
+# What the camera records about the conditions it recorded in. All of it is
+# metadata already decoded while reading the band, so keeping it costs no extra
+# read; discarding it was what left the workspace with nothing to plot.
+# Wavelengths and irradiances are the camera's own values, unmodified.
+XMP_QA_FIELDS = (
+    "Irradiance",
+    "SpectralIrradiance",
+    "HorizontalIrradiance",
+    "DirectIrradiance",
+    "ScatteredIrradiance",
+    "IrradianceYaw",
+    "IrradiancePitch",
+    "IrradianceRoll",
+    "Yaw",
+    "Pitch",
+    "Roll",
+    "SolarElevation",
+    "SolarAzimuth",
+    "ImagerTemperatureC",
+    "PressureAlt",
+    "BootTimestamp",
+    "GPSXYAccuracy",
+    "GPSZAccuracy",
+    "FlightId",
+    "Serial",
+    "SwVersion",
+    "RigName",
+)
+
+
+# The subset that is a number and worth a series. FlightId, Serial, SwVersion
+# and RigName are traceability strings and are reported once, not plotted.
+NUMERIC_QA_FIELDS = (
+    "Irradiance",
+    "SpectralIrradiance",
+    "HorizontalIrradiance",
+    "DirectIrradiance",
+    "ScatteredIrradiance",
+    "IrradianceYaw",
+    "IrradiancePitch",
+    "IrradianceRoll",
+    "SolarElevation",
+    "SolarAzimuth",
+    "ImagerTemperatureC",
+    "PressureAlt",
+    "GPSXYAccuracy",
+    "GPSZAccuracy",
+)
+# The camera writes solar geometry and its own attitude in radians.
+# A frozen solar-geometry reading only shows up over a long enough span: over
+# ten minutes the sun really does barely move.
+STATIC_SOLAR_MIN_HOURS = 1.0
+STATIC_SOLAR_MAX_SPREAD_DEG = 1.0
+
+RADIAN_QA_FIELDS = frozenset({
+    "SolarElevation", "SolarAzimuth",
+    "IrradianceYaw", "IrradiancePitch", "IrradianceRoll",
+})
+
+
+# Which camera and light sensor produced the delivery. Reported once rather than
+# plotted, and worth reporting: a mid-campaign sensor swap or firmware change is
+# invisible in the imagery but decides whether two flights are comparable.
+TRACEABILITY_FIELDS = {
+    "RigName": "rig_name",
+    "Serial": "dls_serial",
+    "SwVersion": "dls_software",
+    "FlightId": "flight_id",
+}
+
+# Names the split-on-capitals rule gets wrong: runs of capitals are one word.
+QA_KEY_OVERRIDES = {
+    "GPSXYAccuracy": "gps_xy_accuracy",
+    "GPSZAccuracy": "gps_z_accuracy",
+    "ImagerTemperatureC": "imager_temperature_c",
+}
+
+
+def _qa_record_key(name: str) -> str:
+    """CamelCase XMP name to the snake_case record field, degrees noted."""
+    snake = QA_KEY_OVERRIDES.get(name)
+    if snake is None:
+        snake = re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+    return f"{snake}_deg" if name in RADIAN_QA_FIELDS else snake
+
+
+def _optional_number(value: Any) -> float | None:
+    """A float, or None. XMP values arrive as text and may be absent."""
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or abs(number) == float("inf"):
+        return None
+    return number
+
+
+def _qa_fields(metadata: Mapping[str, Any]) -> dict[str, float | None]:
+    """The camera's own QA values, radians converted to degrees for reading."""
+    result: dict[str, float | None] = {}
+    for name in NUMERIC_QA_FIELDS:
+        value = _optional_number(metadata.get(name))
+        if value is not None and name in RADIAN_QA_FIELDS:
+            value = degrees(value)
+        result[_qa_record_key(name)] = value
+    return result
+
+
 def _xmp_metadata(payload: bytes) -> dict[str, Any]:
     try:
         root = ElementTree.fromstring(payload.decode("utf-8", errors="ignore"))
@@ -791,6 +941,8 @@ def _xmp_metadata(payload: bytes) -> dict[str, Any]:
                 "WavelengthFWHM": "Bandwidth",
             }.get(local, local)
             values[key] = text
+        elif local in XMP_QA_FIELDS:
+            values[local] = text
     return values
 
 
@@ -804,19 +956,65 @@ def _verify_image(source: Any, payload: bytes | None = None) -> None:
         image.verify()
 
 
+# A RedEdge-P band is a 16-bit single-channel TIFF holding raw sensor counts,
+# and the useful signal occupies a narrow part of the 0-65535 range: band 1 of
+# Flight_CCT0803 runs 4064-65504 with a mean near 15952. Two things follow, and
+# both used to break the sample strip.
+#
+# PIL cannot resize an "I;16" image at all - Image.thumbnail raises
+# "image has wrong mode" - so band 6, the 2464x2056 panchromatic one, produced
+# no thumbnail and was silently swallowed by the caller's except/continue.
+# And I;16 -> RGB clips every value above 255 rather than scaling, so the five
+# 1456x1088 bands that did survive came out uniformly 255: pure white boxes.
+#
+# Scaling to 8 bits first fixes both. The stretch is a percentile one because a
+# min/max stretch is set by single hot or dead pixels and leaves the scene flat.
+# This is a display transform for a quicklook only: nothing here is calibrated,
+# and no reflectance or index is computed anywhere in CC-FLUX.
+THUMBNAIL_SIZE = (480, 360)
+THUMBNAIL_STRETCH_PERCENTILES = (2.0, 98.0)
+
+
+def _eight_bit_for_display(image: Image.Image) -> Image.Image:
+    """An 8-bit image safe to resize and encode as JPEG.
+
+    Already-8-bit modes are returned untouched. Higher-precision single-channel
+    modes are linearly stretched between the 2nd and 98th percentile.
+    """
+    if image.mode in {"RGB", "L"}:
+        return image
+    if image.mode not in {"I;16", "I;16B", "I;16L", "I;16N", "I", "F"}:
+        return image.convert("RGB")
+    import numpy as np
+
+    samples = np.asarray(image)
+    finite = samples[np.isfinite(samples)] if samples.dtype.kind == "f" else samples
+    if not finite.size:
+        return Image.new("L", image.size)
+    low, high = np.percentile(finite, THUMBNAIL_STRETCH_PERCENTILES)
+    if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+        # A genuinely uniform band. Mid-grey says "read, and flat" rather than
+        # pretending to a contrast the data does not have.
+        return Image.new("L", image.size, color=128)
+    scaled = (samples.astype("float32") - float(low)) * (255.0 / (float(high) - float(low)))
+    return Image.fromarray(np.clip(scaled, 0, 255).astype("uint8"), mode="L")
+
+
+def _write_thumbnail(image: Image.Image, target: Path) -> None:
+    converted = _eight_bit_for_display(image)
+    converted.thumbnail(THUMBNAIL_SIZE)
+    converted.save(target, "JPEG", quality=80)
+
+
 def _save_thumbnail(source: Any, target: Path) -> None:
     if isinstance(source, ArchiveImage):
         with zipfile.ZipFile(source.archive) as bundle:
             with bundle.open(source.member) as stream:
                 with Image.open(stream) as image:
-                    image.thumbnail((480, 360))
-                    converted = image if image.mode in {"RGB", "L"} else image.convert("RGB")
-                    converted.save(target, "JPEG", quality=80)
+                    _write_thumbnail(image, target)
         return
     with Image.open(source) as image:
-        image.thumbnail((480, 360))
-        converted = image if image.mode in {"RGB", "L"} else image.convert("RGB")
-        converted.save(target, "JPEG", quality=80)
+        _write_thumbnail(image, target)
 
 
 def _asset_size(source: Any) -> int:
@@ -896,6 +1094,96 @@ def _gps_present(metadata: Mapping[str, Any]) -> bool:
     return metadata.get("GPSLatitude") is not None and metadata.get("GPSLongitude") is not None
 
 
+# What a capture reports about the flight and the light it was taken in. Every
+# one of these comes from metadata already read; none is a derived radiometric
+# quantity. Order is the order the workspace plots them in.
+CAPTURE_CONDITION_FIELDS = (
+    "gps_latitude",
+    "gps_longitude",
+    "gps_altitude",
+    "pressure_alt",
+    "gps_dop",
+    "gps_xy_accuracy",
+    "gps_z_accuracy",
+    "exposure_time",
+    "iso_speed",
+    "irradiance",
+    "spectral_irradiance",
+    "horizontal_irradiance",
+    "direct_irradiance",
+    "scattered_irradiance",
+    "irradiance_yaw_deg",
+    "irradiance_pitch_deg",
+    "irradiance_roll_deg",
+    "solar_elevation_deg",
+    "solar_azimuth_deg",
+    "imager_temperature_c",
+)
+
+
+def _camera_identity(records: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    """The rig, light sensor and flight the delivery names.
+
+    More than one value means the delivery mixes hardware or flights, so all of
+    them are reported rather than the first one silently standing for the rest.
+    """
+    identity: dict[str, str] = {}
+    for key in TRACEABILITY_FIELDS.values():
+        values = sorted({
+            str(record[key]) for record in records if record.get(key)
+        })
+        if values:
+            identity[key] = values[0] if len(values) == 1 else ", ".join(values)
+    return identity
+
+
+def _static_solar_geometry_warning(
+    captures: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """Whether the light sensor stopped recomputing where the sun was.
+
+    Solar elevation moves several degrees an hour. On Flight_CCT0803 the DLS
+    reported 55.83 degrees from 13:17 to 15:51 while the true elevation fell
+    towards 30, so the recorded geometry is unusable for that part of the
+    flight. The values are still reported exactly as recorded; this only says
+    that they stopped changing.
+    """
+    points = [
+        (row["trigger_time"], row["solar_elevation_deg"])
+        for row in captures
+        if row.get("trigger_time") is not None
+        and row.get("solar_elevation_deg") is not None
+    ]
+    if len(points) < 2:
+        return None
+    span_hours = (points[-1][0] - points[0][0]).total_seconds() / 3600.0
+    elevations = [value for _, value in points]
+    spread = max(elevations) - min(elevations)
+    if span_hours < STATIC_SOLAR_MIN_HOURS or spread > STATIC_SOLAR_MAX_SPREAD_DEG:
+        return None
+    return (
+        f"Light sensor solar elevation varies by only {spread:.2f}° over "
+        f"{span_hours:.1f} h, which the sun does not. The recorded solar "
+        "geometry stopped updating and should not be used to correct this "
+        "flight; the irradiance readings themselves are unaffected."
+    )
+
+
+def _capture_conditions(group: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The first recorded value of each condition across a capture's bands."""
+    result: dict[str, Any] = {}
+    for field in CAPTURE_CONDITION_FIELDS:
+        result[field] = next(
+            (
+                record[field]
+                for record in group
+                if record.get(field) is not None
+            ),
+            None,
+        )
+    return result
+
+
 def _capture_rows(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for record in records:
@@ -930,6 +1218,10 @@ def _capture_rows(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 "missing_bands": missing,
                 "duplicate_band_files": duplicate_count,
                 "complete": not missing and len(group) == len(EXPECTED_BANDS) and not duplicate_count,
+                # One trigger fires all six bands, so the conditions belong to
+                # the capture. Taken from whichever band was read: the others
+                # are listed from the archive and carry no metadata.
+                **_capture_conditions(group),
             }
         )
     rows.sort(key=lambda row: (row["trigger_time"] is None, row["trigger_time"] or datetime.max.replace(tzinfo=timezone.utc)))

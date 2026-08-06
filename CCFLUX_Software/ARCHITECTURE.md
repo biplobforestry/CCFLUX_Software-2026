@@ -36,7 +36,7 @@ lines of frontend HTML/JS/CSS, 11 registered instruments, 13 processing jobs.
    │  scanner · detection_configuration · time_extraction  │
    │  dashboard_time · processing_manager · priority_mgr   │
    │  resource_manager · logging_manager · flight_project  │
-   │  gopro/flir_georeference · camera_level2              │
+   │  gopro/flir_georeference · time_manager               │
    └────────┬──────────────────────────────────────────────┘
             │
    ┌────────▼────────────┐        ┌──────────────────────────────┐
@@ -235,12 +235,19 @@ legacy Flask app's test client. It also reaches into `backend._lock` and
 | Partector Pro | HATCHBOX | ✅ | — | `/partector` |
 | INS Gimbal | HATCHBOX | ✅ | not supported | `/ins_gimbal` |
 | SIF / FLOX | HATCHBOX | ✅ configurable (modes, position mode, corrections) | — | `/sif` |
-| MicaSense | HATCHBOX | ✅ metadata only | all routines declared unavailable | — |
-| FLIR | HATCHBOX | ✅ acquisition health | ✅ radiometric temperature + Noseboom georeferencing | `/flir` |
+| MicaSense | HATCHBOX | ✅ metadata only | — | `/micasense` |
+| FLIR | HATCHBOX | ✅ acquisition health | ✅ apparent temperature + Noseboom georeferencing, always | `/flir` |
 | GoPro | HATCHBOX | ✅ inventory + capture map | not supported | `/gopro` (Leaflet) |
 
-`core/camera_level2.py` declares each Level 2 routine's availability with an
-explicit reason string — honest capability reporting rather than silent absence.
+FLIR temperature conversion is part of selecting FLIR, not a stage the operator
+configures and starts. It runs in apparent mode — factory calibration,
+emissivity 1, no atmospheric, reflected or optics correction — and every row of
+`temperature_frames.csv` carries `temperature_mode=apparent` and
+`quantitative=false` so no downstream reader can mistake it for a corrected
+surface temperature. The environment-corrected calculation remains intact in
+`legacy_integration/FLIR/flir_radiometry.py`; nothing in the application drives
+it, because it needs five measured environment values the campaign does not
+record.
 
 ---
 

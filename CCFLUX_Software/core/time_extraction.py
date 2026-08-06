@@ -26,6 +26,11 @@ from .time_manager import (
     TimestampQualitySample,
 )
 
+# What a GoPro clock is read as until the operator declares otherwise. The
+# campaign's local zone, which is what CC-FLUX has always assumed; it is only a
+# fallback now, because on Flight_CCT0803 it was wrong by two hours.
+GOPRO_ASSUMED_TIMEZONE = "Europe/Berlin"
+
 MAX_SOURCE_FILE_SAMPLES = 20
 MAX_QUALITY_SAMPLES = 100
 # Coverage is recorded per source file so a gap between files stays visible.
@@ -79,6 +84,9 @@ class _RawTimestamp:
     format_hint: str | None = None
     assume_utc: bool = False
     timezone_name: str | None = None
+    # How far the recording clock runs ahead of UTC, in seconds, when that is
+    # declared rather than readable from the file. Subtracted to reach UTC.
+    utc_offset_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +153,7 @@ class _Accumulator:
                 format_hint=raw.format_hint,
                 assume_utc=raw.assume_utc,
                 timezone_name=raw.timezone_name,
+                utc_offset_seconds=raw.utc_offset_seconds,
             )
         except (ValueError, OverflowError, OSError):
             self.invalid += 1
@@ -152,7 +161,8 @@ class _Accumulator:
             return
 
         value = parsed.value
-        if raw.timezone_name and value.utcoffset() is not None:
+        declared_shift = raw.timezone_name or raw.utc_offset_seconds
+        if declared_shift and value.utcoffset() is not None:
             self.applied_time_offsets.add(-value.utcoffset())
         self.valid += 1
         self.formats.add(parsed.format_name)
@@ -305,6 +315,27 @@ class TimestampExtractor:
     # concurrent readers, so asking for more only adds threads.
     GOPRO_EXIF_READERS = 4
     GOPRO_PARALLEL_THRESHOLD = 64
+
+    def __init__(
+        self,
+        *,
+        sif_record_clock_offset_seconds: float | None = None,
+        gopro_record_clock_offset_seconds: float | None = None,
+    ) -> None:
+        """
+        sif_record_clock_offset_seconds is the operator's declaration of how
+        far the AirFloX record clock runs ahead of UTC. FLOX and FULL write
+        campaign local time and their GPS often never locks, so nothing in the
+        raw files says it. None means undeclared, and the raw record clock is
+        read as UTC exactly as before - which is what a scan that has not yet
+        asked the operator must do.
+
+        gopro_record_clock_offset_seconds is the same declaration for the GoPro
+        camera clock, whose EXIF carries no timezone field either. None means
+        undeclared, and the campaign's local zone is assumed as before.
+        """
+        self._sif_record_clock_offset_seconds = sif_record_clock_offset_seconds
+        self._gopro_record_clock_offset_seconds = gopro_record_clock_offset_seconds
 
     def extract_instrument(
         self, instrument_id: str, source_files: Iterable[Path]
@@ -522,13 +553,20 @@ class TimestampExtractor:
             )
             return
         accumulator.timestamp_columns.add("EXIF DateTimeOriginal")
+        # GoPro EXIF carries no OffsetTime or OffsetTimeOriginal, so nothing in
+        # the file says what its clock is set to. Where the operator has
+        # declared it - after being shown the offset measured against a camera
+        # that records UTC - that declaration converts it. Until then the
+        # campaign's local zone is assumed, which is what this always did.
+        declared = self._gopro_record_clock_offset_seconds
         accumulator.observe(
             _RawTimestamp(
                 str(value),
                 1,
                 path,
                 format_hint="%Y:%m:%d %H:%M:%S",
-                timezone_name="Europe/Berlin",
+                timezone_name=None if declared is not None else GOPRO_ASSUMED_TIMEZONE,
+                utc_offset_seconds=declared,
             )
         )
 
@@ -818,13 +856,19 @@ class TimestampExtractor:
                     continue
                 found = True
                 original = f"{row[1].strip()} {row[2].strip()}"
+                # The raw record clock, not UTC. Where the operator has
+                # declared what it is set to, that declaration converts it;
+                # until then it is read as UTC so the scan can still place the
+                # instrument on the timeline and ask.
+                declared = self._sif_record_clock_offset_seconds
                 accumulator.observe(
                     _RawTimestamp(
                         original,
                         row_number,
                         path,
                         "%y%m%d %H%M%S",
-                        True,
+                        declared is None,
+                        utc_offset_seconds=declared,
                     )
                 )
             if found:
@@ -890,6 +934,36 @@ def _exif_original_datetime(source: Any) -> str | None:
     return str(value) if value else None
 
 
+def read_gopro_camera_clock_times(paths: Iterable[Path]) -> list[datetime]:
+    """Every GoPro EXIF stamp exactly as the camera wrote it, no offset applied.
+
+    Deliberately not coverage: this is the camera's own clock, which is what
+    core.camera_clock needs to measure the clock against an instrument recording
+    UTC. Extracting coverage would already have applied an offset, and measuring
+    an offset from values that have had one applied is circular.
+    """
+    reader = TimestampExtractor()
+    values: list[datetime] = []
+    for value, _failure in reader._read_gopro_exif(list(paths)).values():
+        if not value:
+            continue
+        try:
+            stamp = datetime.strptime(str(value)[:19], "%Y:%m:%d %H:%M:%S")
+        except ValueError:
+            continue
+        if not _is_unset_camera_clock(str(value)):
+            values.append(stamp)
+    return sorted(values)
+
+
+def _offset_label(seconds: float) -> str:
+    """A declared clock offset as +H or +H:MM, for a timezone description."""
+    sign = "-" if seconds < 0 else "+"
+    minutes, _ = divmod(int(abs(seconds)), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{sign}{hours}" if not minutes else f"{sign}{hours}:{minutes:02d}"
+
+
 def _detect_delimiter(header: str) -> str:
     counts = {value: header.count(value) for value in (",", ";", "\t")}
     delimiter, count = max(counts.items(), key=lambda item: item[1])
@@ -902,6 +976,7 @@ def _parse_timestamp(
     format_hint: str | None,
     assume_utc: bool,
     timezone_name: str | None = None,
+    utc_offset_seconds: float | None = None,
 ) -> _ParsedTimestamp:
     text = original.strip().strip('"')
     if format_hint == "unix_epoch_nanoseconds":
@@ -942,6 +1017,17 @@ def _parse_timestamp(
     if value.tzinfo is None and timezone_name:
         value = value.replace(tzinfo=ZoneInfo(timezone_name))
         timezone_label = f"{timezone_name} camera clock → UTC"
+    elif value.tzinfo is None and utc_offset_seconds is not None:
+        # The operator declared how far the recording clock runs ahead of UTC.
+        # Nothing in the file says it, so the declaration is the only source.
+        value = value.replace(
+            tzinfo=timezone(timedelta(seconds=utc_offset_seconds))
+        )
+        timezone_label = (
+            "UTC (declared record clock)"
+            if not utc_offset_seconds
+            else f"declared record clock UTC{_offset_label(utc_offset_seconds)} → UTC"
+        )
     elif value.tzinfo is None and assume_utc:
         value = value.replace(tzinfo=timezone.utc)
         timezone_label = "UTC (instrument field semantics)"

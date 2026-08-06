@@ -357,7 +357,6 @@ def test_a_worker_cannot_change_the_science(tmp_path):
 
     for call in (
         lambda: backend.update_sif_options({"raw_min_kb": 250}),
-        lambda: backend.update_flir_level2_options({"mode": "apparent"}),
         lambda: backend.update_time_filter({"action": "full"}),
     ):
         with pytest.raises(ValueError, match="fixed by the work package"):

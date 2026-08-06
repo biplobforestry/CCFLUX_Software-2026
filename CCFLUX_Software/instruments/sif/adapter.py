@@ -17,7 +17,11 @@ from core.enums import DetectionStatus, ProcessingStatus
 from core.logging_manager import LogLevel, ProcessingLogManager
 from core.models import FigureArtifact, InstrumentDescriptor, InstrumentResult, OutputFile, ProgressUpdate, SourceFile
 from core.scanner import ScanIndex
-from core.time_manager import TimeRange, TimezoneState
+from core.time_manager import (
+    TimeRange,
+    TimezoneState,
+    sif_record_clock_declaration,
+)
 from instruments.base.interface import InstrumentBase, ProgressCallback
 from .legacy_bridge import LegacySifBridge
 
@@ -39,6 +43,28 @@ class SifAdapter(InstrumentBase):
         self._callback: ProgressCallback | None = None
         self._cancelled = threading.Event()
         self._products: dict[str, dict[str, Any]] = {}
+
+    def _declare_record_clock(self, chosen: object) -> None:
+        """Tell the preserved reader what the AirFloX record clock is set to.
+
+        The reader takes it as a module global, and the only module object that
+        matters is the one this adapter's bridge loaded - it is executed from
+        source under its own name, so importing the same file by package path
+        would set a global on a different object and change nothing. Applying
+        it here is what makes the operator's answer reach the science.
+        """
+        declaration = sif_record_clock_declaration(chosen)
+        if declaration is None:
+            return
+        offset_seconds, label = declaration
+        self.bridge.module.RECORD_CLOCK_TIMEZONE.update(
+            {"offset_seconds": offset_seconds, "label": label}
+        )
+        self._emit(
+            2,
+            f"AirFloX record clock read as {label}"
+            + ("" if not offset_seconds else f", converted to UTC by {offset_seconds:.0f} s"),
+        )
 
     def detect(self, scan_index: ScanIndex) -> Sequence[InputCandidate]:
         paths = [entry.path for entry in scan_index.entries if entry.is_file and entry.path.suffix.casefold() == ".csv" and _is_raw(entry.path)]
@@ -88,6 +114,7 @@ class SifAdapter(InstrumentBase):
     def process_quicklook(self, loaded, options: Mapping[str, Any]):
         started = time.monotonic()
         self._products = {}
+        self._declare_record_clock(options.get("record_clock_timezone"))
         # An operator may supply their own calibration or vegetation-index file;
         # anything not supplied stays on the bundled CAL_FROG/Indices_ICOS set.
         essentials_overrides = {

@@ -9,6 +9,36 @@ from pathlib import Path
 from typing import Mapping
 
 
+# What the AirFloX record clock is set to. FLOX and FULL write campaign local
+# time and their GPS often never locks, so nothing in the files says how far
+# that is from UTC; the operator declares it when the scan finds SIF. None
+# means undeclared, and the scan asks.
+#
+# Here rather than in the dashboard because both consumers need it and they sit
+# on opposite sides of the application: detection reads it to place SIF on the
+# timeline, and the SIF adapter reads it to convert the record clock it hands
+# to the preserved reader.
+SIF_RECORD_CLOCK_TIMEZONES: Mapping[str, Mapping[str, object]] = {
+    "utc": {"label": "UTC", "offset_seconds": 0},
+    "cest": {"label": "CEST (UTC+2)", "offset_seconds": 7200},
+}
+
+
+def sif_record_clock_declaration(key: object) -> tuple[float, str] | None:
+    """The declared offset to subtract to reach UTC, and its label.
+
+    None when the operator has not answered yet, or answered with something
+    that is no longer offered.
+    """
+    if key is None:
+        return None
+    normalized = str(key).strip().casefold()
+    selection = SIF_RECORD_CLOCK_TIMEZONES.get(normalized)
+    if selection is None:
+        return None
+    return float(selection["offset_seconds"]), str(selection["label"])
+
+
 class TimezoneState(StrEnum):
     EXPLICIT_UTC = "explicit_utc"
     EXPLICIT_OFFSET = "explicit_offset"

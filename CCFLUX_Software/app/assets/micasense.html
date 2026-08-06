@@ -13,6 +13,11 @@
     .thumbs img{display:block;width:100%;height:auto}
     .thumbs figcaption{padding:7px 9px;font-size:.76rem;color:var(--muted);word-break:break-all}
     .excluded{color:#f0dcae}
+    .plot{width:100%;height:390px}
+    .traceability{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:0;padding:0;list-style:none}
+    .traceability li{padding:9px 12px;border-radius:8px;background:#0d2536;border:1px solid #2b4d63}
+    .traceability span{display:block;font-size:.74rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+    .traceability strong{font-size:.94rem;color:#dbeaf4;word-break:break-all}
   </style>
 </head>
 <body>
@@ -29,8 +34,49 @@
         <ul class="qc-list" id="qcList"></ul>
         <div class="science-note">MicaSense is read for its acquisition metadata only. Radiometry, reflectance and vegetation indices are done by the standalone MicaSense pipeline, not here.</div>
       </article>
+      <article class="chart-card wide"><div class="card-head"><h2>Camera and light sensor</h2></div>
+        <ul class="traceability" id="traceability"></ul>
+        <div class="science-note">Read from the XMP of the band this review decodes for each capture. Nothing here is calibrated or corrected.</div>
+      </article>
+      <article class="chart-card wide"><div class="card-head"><h2>Capture cadence</h2></div>
+        <div class="plot" id="cadencePlot"></div>
+        <p class="interpretation">Time between consecutive camera triggers. A flat line at the nominal interval is a camera that kept its rate; spikes are missed or delayed triggers.</p>
+      </article>
+      <article class="chart-card"><div class="card-head"><h2>Flight track</h2></div>
+        <div class="plot" id="trackPlot"></div>
+        <p class="interpretation">Capture positions from image GPS, coloured by GPS altitude. Metadata positions only — no photogrammetry is performed.</p>
+      </article>
+      <article class="chart-card"><div class="card-head"><h2>Altitude</h2></div>
+        <div class="plot" id="altitudePlot"></div>
+        <p class="interpretation">GPS altitude beside the camera's barometric altitude. A steady offset between them is normal; divergence indicates one of the two drifting.</p>
+      </article>
+      <article class="chart-card"><div class="card-head"><h2>Downwelling irradiance</h2></div>
+        <div class="plot" id="irradiancePlot"></div>
+        <p class="interpretation">The DLS record of incoming light at each trigger. This is what a later reflectance conversion would divide by, so its stability bounds what that conversion can achieve.</p>
+      </article>
+      <article class="chart-card"><div class="card-head"><h2>Exposure and gain</h2></div>
+        <div class="plot" id="exposurePlot"></div>
+        <p class="interpretation">Exposure time and ISO per capture. Both moving together with irradiance is auto-exposure working; either pinned at a limit means the scene was outside the camera's range.</p>
+      </article>
+      <article class="chart-card"><div class="card-head"><h2>Light sensor orientation</h2></div>
+        <div class="plot" id="orientationPlot"></div>
+        <p class="interpretation">DLS yaw, pitch and roll. The irradiance reading assumes a level sensor, so large pitch or roll excursions are where it is least trustworthy.</p>
+      </article>
+      <article class="chart-card"><div class="card-head"><h2>Solar geometry</h2></div>
+        <div class="plot" id="solarPlot"></div>
+        <p class="interpretation">Solar elevation and azimuth exactly as the DLS recorded them, unmodified. They should track the sun across the flight; a flat line means the sensor stopped recomputing them.</p>
+      </article>
+      <article class="chart-card"><div class="card-head"><h2>Imager temperature</h2></div>
+        <div class="plot" id="temperaturePlot"></div>
+        <p class="interpretation">Sensor body temperature per capture. Dark current rises with it, which matters for any later radiometric work.</p>
+      </article>
+      <article class="chart-card"><div class="card-head"><h2>Band completeness</h2></div>
+        <div class="plot" id="completenessPlot"></div>
+        <p class="interpretation">How many of the six bands each trigger delivered. A capture short of six bands cannot be band-aligned downstream.</p>
+      </article>
       <article class="chart-card wide"><div class="card-head"><h2>Sample images</h2></div>
         <div class="thumbs" id="thumbs"></div>
+        <p class="interpretation">One band per sampled capture, contrast-stretched between its 2nd and 98th percentile so the 16-bit scene is visible. A display stretch only: the stored counts are untouched.</p>
       </article>
       <article class="chart-card wide"><div class="card-head"><h2>Exported files</h2></div>
         <ul class="qc-list" id="exportList"></ul>
@@ -39,6 +85,6 @@
   </main>
   <div class="busy show" id="busy"><div class="busy-card"><div class="spinner"></div><h2>Preparing MicaSense workspace</h2><p id="busyText">Loading the saved, precomputed flight products.</p></div></div>
   <footer class="app-footer">© 2026 Biplob Dey · Forschungszentrum Jülich GmbH · <span class="app-version">Version 1.0.2</span></footer>
-  <script src="/micasense.js"></script>
+  <script src="/vendor/plotly.min.js"></script><script src="/micasense.js"></script>
 </body>
 </html>

@@ -495,12 +495,14 @@ def test_gopro_time_is_corrected_before_remote_processing(tmp_path: Path):
     assert gopro["utc_start_time"] == "2026-07-26T10:00:00+00:00"
     assert gopro["utc_end_time"] == "2026-07-26T10:00:00+00:00"
     assert gopro["processing_status"] == "idle"
+    # The card names the zone actually used. Undeclared, that is the assumed
+    # campaign zone; once the operator declares the clock it names that instead.
     assert gopro["processing_step"] == (
-        "Time corrected during detection: Europe/Berlin → UTC"
+        "Time corrected during detection: Europe/Berlin camera clock → UTC"
     )
     assert gopro["quicklook"]["time_correction_complete"] is True
     assert any(
-        "GoPro camera time corrected" in message
+        "GoPro camera time converted to UTC during detection" in message
         for message in state["messages"]
     )
 

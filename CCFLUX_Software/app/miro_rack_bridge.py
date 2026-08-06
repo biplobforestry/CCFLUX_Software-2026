@@ -37,6 +37,27 @@ MIRO_MAP_UNITS = {
 PICARRO_MAP_UNITS = {"CO2": "ppm", "CH4": "ppm", "H2O": "%"}
 
 
+def _absent_instrument_meta() -> dict[str, Any]:
+    """The metadata block for an instrument this flight does not carry.
+
+    The same keys the preserved loaders return, so the page reads zero rows and
+    no gases rather than tripping over a missing object. A flight with only one
+    of the two rack instruments is normal, not an error.
+    """
+    return {
+        "files_found": 0,
+        "files_used": 0,
+        "duplicate_files": [],
+        "skipped_files": [],
+        "duplicate_timestamps_removed": 0,
+        "sorted": True,
+        "rows": 0,
+        "start": None,
+        "end": None,
+        "gases": [],
+    }
+
+
 class MiroRackBridge:
     """Namespace the legacy app and add non-blocking flight georeferencing."""
 
@@ -324,14 +345,17 @@ function applyInvestigationTimeFilter() {
       outputSummary.textContent = `Output: ${state.output_path}`;
       outputSummary.title = state.output_path;
     }
+    // Whichever analyzers this flight carried. Requiring both meant a
+    // Picarro-only flight never reached loadData or runAnalysis below, so the
+    // overview stayed empty while /api/results already held its analysis.
     const sourceChanged = Boolean(
-      state.miro_path && state.picarro_path &&
-      (miroPath.value !== state.miro_path || picarroPath.value !== state.picarro_path)
+      (state.miro_path && miroPath.value !== state.miro_path) ||
+      (state.picarro_path && picarroPath.value !== state.picarro_path)
     );
     if (state.miro_path) miroPath.value = state.miro_path;
     if (state.picarro_path) picarroPath.value = state.picarro_path;
     updateSetupState();
-    if (typeof app !== 'undefined' && state.miro_path && state.picarro_path) {
+    if (typeof app !== 'undefined' && (state.miro_path || state.picarro_path)) {
       if (sourceChanged) app.loaded = false;
       if (!app.loaded && !app.busy) {
         await loadData();
@@ -609,6 +633,11 @@ function closeMapSync() {
             store_paths = dict(store_meta.get("paths") or {})
             store_paths[instrument_id] = str(Path(source_paths[0]).parent)
             store_meta[instrument_id] = dict(metadata)
+            # Both keys always, so the page can read rows and gases for an
+            # instrument this flight does not carry instead of failing on an
+            # undefined one. Flight_CCT0803 has Picarro and no MIRO.
+            for name in ("miro", "picarro"):
+                store_meta.setdefault(name, _absent_instrument_meta())
             store_meta["paths"] = store_paths
             store_results = dict(self.module.STORE.get("results") or {})
             store_results[instrument_id] = analysis

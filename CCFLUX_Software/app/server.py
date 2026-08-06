@@ -303,6 +303,10 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             )
         elif path == "/api/sif/timezone":
             self._send_json(HTTPStatus.OK, self.server.backend.sif_timezone_prompt())
+        elif path == "/api/gopro/timezone":
+            self._send_json(
+                HTTPStatus.OK, self.server.backend.gopro_timezone_prompt()
+            )
         elif path == "/api/sif":
             self._send_json(HTTPStatus.OK, self.server.backend.hatchbox_view("sif"))
         elif path == "/api/miro-rack/bootstrap":
@@ -458,15 +462,6 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     page, str(body.get("message") or "Hatchbox browser interaction")
                 )
                 self._send_json(HTTPStatus.OK, {"logged": True})
-            elif path == "/api/flir/level2-options":
-                body = self._json_body()
-                self._send_json(
-                    HTTPStatus.OK,
-                    {
-                        "saved": True,
-                        "options": self.server.backend.update_flir_level2_options(body),
-                    },
-                )
             elif path == "/api/sif/select-file":
                 body = self._json_body()
                 self._send_json(
@@ -522,6 +517,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     HTTPStatus.OK,
                     self.server.backend.set_sif_timezone(str(body.get("timezone", ""))),
+                )
+            elif path == "/api/gopro/timezone":
+                body = self._json_body()
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.backend.set_gopro_timezone(
+                        str(body.get("timezone", "")),
+                        body.get("manual_offset_seconds"),
+                    ),
                 )
             elif path == "/api/noseboom/statistics/export":
                 body = self._json_body()

@@ -45,7 +45,6 @@
   let lastLogSignature = '';
   let autoScroll = true;
   let draggedJobId = null;
-  let level2Capabilities = {};
   let currentQueue = { jobs: [] };
   let queueRefreshPending = false;
   let customTimeEditing = false;
@@ -932,6 +931,11 @@
   }
   function startPolling() {
     cameraCoverageAnnounced = false;
+    // Whether to ask is the server's decision, not this flag's: it answers
+    // "required" only while the declaration is missing. Clearing the flag each
+    // scan is what lets a second flight in the same session be asked at all.
+    sifTimezoneAsked = false;
+    goproTimezoneAsked = false;
     if (scanPoll) clearInterval(scanPoll);
     pollScan();
     scanPoll = setInterval(pollScan, 250);
@@ -946,6 +950,7 @@
         clearInterval(scanPoll);
         scanPoll = null;
         await askSifTimezone();
+        await askGoproTimezone();
       }
     } catch (error) {
       clearInterval(scanPoll);
@@ -955,7 +960,6 @@
   }
 
   function renderScanState(state) {
-    level2Capabilities = state.level2_capabilities || level2Capabilities;
     document.getElementById('selectedFlightFolder').textContent =
       state.selected_folder || 'Not selected';
     document.getElementById('selectedFlightFolder').title =
@@ -2146,7 +2150,6 @@
       return;
     }
     if (!prompt.required) return;
-    sifTimezoneAsked = true;
     const choices = (prompt.choices || [])
       .map(choice => `<label class="format-choice"><input type="radio" name="sifTimezone"
             value="${escapeHtml(choice.key)}"${choice.key === 'cest' ? ' checked' : ''}>
@@ -2170,10 +2173,103 @@
           method: 'POST',
           body: JSON.stringify({ timezone: picked.value })
         });
+        // Only now. Latching before the answer landed meant a dismissed or
+        // failed dialog was never shown again, and SIF ran undeclared.
+        sifTimezoneAsked = true;
         modal.classList.remove('show');
         showToast(`SIF record clock read as ${picked.parentElement.textContent.trim()}.`);
+        // The card was filled in before the answer, so refresh it to show the
+        // converted window rather than the raw record clock.
+        await pollScan();
       } catch (error) {
         showToast(`Could not set the SIF timezone: ${error.message}`);
+      }
+    };
+  }
+
+  // The GoPro camera clock. Unlike SIF this can be measured: the other gondola
+  // cameras record UTC and were switched on with it, so the dialog shows what
+  // the offset appears to be and on what evidence, and the operator confirms.
+  let goproTimezoneAsked = false;
+  async function askGoproTimezone() {
+    if (goproTimezoneAsked) return;
+    let prompt;
+    try {
+      prompt = await api('/api/gopro/timezone');
+    } catch (error) {
+      return;
+    }
+    if (!prompt.required) return;
+    const measurement = prompt.measurement || {};
+    // Only a confident measurement preselects anything. This camera is set to
+    // UTC on some flights and to campaign local time on others, so a
+    // half-aligned guess sitting pre-ticked is worse than an unanswered dialog:
+    // it invites the operator to accept it without reading the evidence.
+    const suggested = measurement.confident ? measurement.best_key : null;
+    const choices = (prompt.choices || [])
+      .map(choice => {
+        const candidate = (measurement.candidates || [])
+          .find(item => item.key === choice.key) || {};
+        const evidence = candidate.frames_on_reference_day
+          ? `${candidate.frames_inside_reference} of ${candidate.frames_on_reference_day} frame(s) inside the reference window`
+          : 'no frames land on the reference flight';
+        return `<label class="format-choice"><input type="radio" name="goproTimezone"
+            value="${escapeHtml(choice.key)}"${choice.key === suggested ? ' checked' : ''}>
+            <strong>${escapeHtml(choice.label)}</strong><br>
+            <small>${escapeHtml(evidence)}</small></label>`;
+      })
+      .join('');
+    const days = (measurement.camera_days || [])
+      .map(item => `${escapeHtml(item.day)} (${Number(item.frames).toLocaleString()} frames)`)
+      .join(', ');
+    modalTitle.textContent = 'GoPro camera-clock timezone';
+    modalBody.innerHTML = `
+      <p>${escapeHtml(prompt.message)}</p>
+      <p class="muted">This camera is set to UTC on some flights and to campaign local
+      time on others, so it is asked once per flight rather than assumed.</p>
+      ${measurement.reason
+        ? `<p class="muted"><strong>Measured against ${escapeHtml(measurement.reference_instrument || 'another camera')}:</strong>
+             ${escapeHtml(measurement.reason)}${
+               measurement.confident
+                 ? ' That answer is preselected below.'
+                 : ' This is not conclusive, so nothing is preselected — check the evidence and choose.'
+             }</p>`
+        : `<p class="muted">No camera recording UTC was found for this flight, so the clock
+             could not be measured. Nothing was assumed for you; choose below.</p>`}
+      ${days ? `<p class="muted">The card holds ${escapeHtml(days)}. Only frames inside the
+        interval you process are used.</p>` : ''}
+      <div class="format-grid">${choices}</div>
+      <label class="detail-row"><input type="radio" name="goproTimezone" value="manual">
+        <span><strong>Enter the offset myself</strong><br>
+        <small>Seconds the camera clock runs ahead of UTC
+        <input type="number" id="goproManualOffset" step="1" value="0" style="width:9em"></small></span></label>
+      <p class="muted">Every GoPro timestamp, and the capture map, is converted to UTC from
+      what you choose. Noseboom and the other instruments are recorded in UTC and are
+      not changed.</p>
+      <div class="modal-actions">
+        <button class="btn primary" id="goproTimezoneUse">Use this clock setting</button>
+      </div>`;
+    showModal();
+    document.getElementById('goproTimezoneUse').onclick = async () => {
+      const picked = document.querySelector('[name=goproTimezone]:checked');
+      if (!picked) return;
+      const body = { timezone: picked.value };
+      if (picked.value === 'manual') {
+        const offset = Number(document.getElementById('goproManualOffset').value);
+        if (!Number.isFinite(offset)) {
+          showToast('Enter the offset in whole seconds ahead of UTC.');
+          return;
+        }
+        body.manual_offset_seconds = offset;
+      }
+      try {
+        await api('/api/gopro/timezone', { method: 'POST', body: JSON.stringify(body) });
+        goproTimezoneAsked = true;
+        modal.classList.remove('show');
+        showToast('GoPro camera clock recorded; its coverage has been reread.');
+        await pollScan();
+      } catch (error) {
+        showToast(`Could not set the GoPro clock: ${error.message}`);
       }
     };
   }

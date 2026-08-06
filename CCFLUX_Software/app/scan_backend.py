@@ -78,10 +78,6 @@ from core.processing_manager import (
     WorkerGroup,
     worker_group_capacities,
 )
-from core.camera_level2 import (
-    level2_capability_snapshot,
-    validate_level2_selection,
-)
 from core.scanner import (
     FlightFolderScanner,
     InstrumentCandidate,
@@ -92,7 +88,20 @@ from core.scanner import (
 from instruments.micasense import MicaSenseLevel1Adapter
 from instruments.flir import FlirLevel1Adapter
 from instruments.gopro import GoProLevel1Adapter
-from core.time_extraction import TimestampExtractor
+from core.camera_clock import (
+    CAMERA_RECORD_CLOCK_TIMEZONES,
+    flight_days,
+    measure_camera_clock_offset,
+)
+from core.time_extraction import (
+    GOPRO_ASSUMED_TIMEZONE,
+    TimestampExtractor,
+    read_gopro_camera_clock_times,
+)
+from core.time_manager import (
+    SIF_RECORD_CLOCK_TIMEZONES as _SIF_RECORD_CLOCK_TIMEZONES,
+    sif_record_clock_declaration,
+)
 from core.update_check import UpdateStatus, check_for_update
 from core.version import SOFTWARE_VERSION
 from core.timestamp_repair import repair_chronology, repair_interval
@@ -146,23 +155,15 @@ GOPRO_NO_DISK_MESSAGE = (
     "Dr. Georgios I. Gkatzelis or Biplob Dey."
 )
 
-# FLIR Level 2 defaults. Apparent mode needs no environment measurements and is
-# a sensor sanity check; corrected mode is quantitative only when every value is
-# a recorded measurement, which the provenance field records.
-DEFAULT_FLIR_LEVEL2_OPTIONS: dict[str, object] = {
-    "mode": "apparent",
-    "environment_inputs_provenance": "assumed_for_testing",
-    "emissivity": None,
-    "object_distance_m": None,
-    "atmospheric_temperature_c": None,
-    "reflected_apparent_temperature_c": None,
-    "relative_humidity_percent": None,
-    "external_optics_transmission": 1.0,
-    "external_optics_temperature_c": None,
-    "valid_temperature_min_c": None,
-    "valid_temperature_max_c": None,
-    "save_temperature_npz": False,
-}
+# FLIR temperature conversion is part of selecting FLIR, not a stage the
+# operator configures and starts. It runs in apparent mode: factory calibration
+# with emissivity 1 and no atmospheric, reflected or optics correction. That is
+# a sensor sanity check rather than a surface temperature, and every output says
+# so. There is no environment-corrected path: it needed five measured
+# environment values the campaign does not record, so it was never usable, and
+# the configuration stage that carried it only stood between the operator and
+# the conversion that always ran anyway.
+FLIR_TEMPERATURE_MODE = "apparent"
 
 LOGGER = logging.getLogger(__name__)
 
@@ -174,13 +175,20 @@ INSTRUMENT_ORDER = (
     "partector", "ins_gimbal", "sif", "gopro", "flir", "micasense",
 )
 
-# What the AirFloX record clock is set to. FLOX and FULL write campaign local
-# time and their GPS often never locks, so nothing in the files says how far
-# that is from UTC; the operator declares it when the scan finds SIF. None
-# means undeclared, and the scan asks.
-SIF_RECORD_CLOCK_TIMEZONES: dict[str, dict[str, object]] = {
-    "utc": {"label": "UTC", "offset_seconds": 0},
-    "cest": {"label": "CEST (UTC+2)", "offset_seconds": 7200},
+# Defined in core.time_manager, where the SIF adapter can reach it too, and
+# re-exported here because the dashboard API is its other caller.
+SIF_RECORD_CLOCK_TIMEZONES = _SIF_RECORD_CLOCK_TIMEZONES
+
+# The GoPro camera clock, declared the same way. Its EXIF has no OffsetTime
+# field, so the zone cannot be read from the file; unlike SIF it can at least be
+# measured, because the other gondola cameras record UTC and were switched on
+# with it. The measurement is shown to the operator to confirm, never applied on
+# its own - see core.camera_clock.
+GOPRO_RECORD_CLOCK_TIMEZONES = CAMERA_RECORD_CLOCK_TIMEZONES
+
+DEFAULT_GOPRO_OPTIONS: dict[str, object] = {
+    "record_clock_timezone": None,
+    "manual_offset_seconds": None,
 }
 
 DEFAULT_SIF_OPTIONS: dict[str, object] = {
@@ -727,12 +735,13 @@ class DashboardScanBackend:
         self._work_package = None
         self._camera_selected_start: datetime | None = None
         self._camera_selected_end: datetime | None = None
-        self._flir_level2_options = dict(DEFAULT_FLIR_LEVEL2_OPTIONS)
         self._update_status: UpdateStatus | None = None
         self._last_checkpoint_monotonic = 0.0
         # Set when an operator reconnects the camera disk somewhere new.
         self._gopro_media_root: Path | None = None
         self._gopro_index_cache: tuple[Path, dict[str, Path]] | None = None
+        self._gopro_options = dict(DEFAULT_GOPRO_OPTIONS)
+        self._gopro_clock_measurement: dict[str, object] | None = None
 
     def attach_miro_rack_bridge(self, bridge: object) -> None:
         """Connect shared MIRO/Picarro browser science to queue processing."""
@@ -974,6 +983,8 @@ class DashboardScanBackend:
             self._time_state = DashboardTimeState()
             self._flight_project = None
             self._sif_options = dict(DEFAULT_SIF_OPTIONS)
+            self._gopro_options = dict(DEFAULT_GOPRO_OPTIONS)
+            self._gopro_clock_measurement = None
             self.processing_queue = create_default_priority_queue()
             self._noseboom_preview_quicklook = None
             self._noseboom_preview_settings = None
@@ -1134,6 +1145,16 @@ class DashboardScanBackend:
                 existing_project is not None
                 and existing_project.completed_jobs
             )
+            # A recording clock is a property of one flight, not of the session.
+            # The GoPro is set to UTC on some flights and to campaign local time
+            # on others, and the AirFloX record clock varies the same way, so an
+            # answer given for the previous flight must not be carried into this
+            # one. Scanning the flight the answer belongs to keeps it; starting
+            # on a different flight asks again.
+            if existing_project is None:
+                self._sif_options = dict(DEFAULT_SIF_OPTIONS)
+                self._gopro_options = dict(DEFAULT_GOPRO_OPTIONS)
+                self._gopro_clock_measurement = None
             self._scan_id = uuid4().hex
             self._selected_folder = root
             self._selected_camera_folder = selected_camera_root
@@ -1373,24 +1394,49 @@ class DashboardScanBackend:
                 "time_filter": self._time_state.to_dict(),
                 "resources": self._resource_snapshot(),
                 "processing_queue": self._queue_snapshot(),
-                "level2_capabilities": level2_capability_snapshot(),
                 "sif_options": dict(self._sif_options),
-                "flir_level2_options": dict(self._flir_level2_options),
+                "gopro_options": dict(self._gopro_options),
                 "software_version": SOFTWARE_VERSION,
                 "scans": {
                     source: self._scan_channel_snapshot(channel)
                     for source, channel in self._scan_channels.items()
                 },
-                "camera_scan_ready": (
-                    self._scan_channels["camera"]["phase"] == "complete"
-                    and not self._scan_channels["camera"]["cancelled"]
-                    and self._scan_channels["camera"]["error"] is None
-                ),
+                "camera_scan_ready": self._camera_products_ready_locked(),
                 "camera_coverage": self._camera_coverage_locked(),
             }
 
     # The order the remote-sensing products are scanned and presented in.
     CAMERA_SCAN_ORDER = ("gopro", "flir", "micasense")
+
+    def _camera_products_ready_locked(self) -> bool:
+        """Whether remote-sensing products can be selected. Lock held.
+
+        A separate Camera Folder scan proves them ready. So does a finished
+        flight scan that found them: on Flight_CCT0803 the GoPro, FLIR and
+        MicaSense deliveries all live inside the Flight Folder, so no camera
+        channel ever runs and requiring one left every camera product
+        unselectable - the Remote Sensing button stayed disabled and told the
+        operator to add a Camera Folder that would only rescan the same files.
+        """
+        camera = self._scan_channels["camera"]
+        if (
+            camera["phase"] == "complete"
+            and not camera["cancelled"]
+            and camera["error"] is None
+        ):
+            return True
+        flight = self._scan_channels["flight"]
+        if (
+            flight["phase"] != "complete"
+            or flight["cancelled"]
+            or flight["error"] is not None
+        ):
+            return False
+        return any(
+            self._instruments[name].detection_status
+            is not DetectionStatus.NOT_DETECTED
+            for name in self.CAMERA_SCAN_ORDER
+        )
 
     def _camera_coverage_locked(self) -> dict[str, object]:
         """UTC coverage of the remote-sensing products, on their own terms.
@@ -1404,11 +1450,7 @@ class DashboardScanBackend:
         Assumes ``self._lock`` is held.
         """
         channel = self._scan_channels["camera"]
-        ready = (
-            channel["phase"] == "complete"
-            and not channel["cancelled"]
-            and channel["error"] is None
-        )
+        ready = self._camera_products_ready_locked()
         products: list[dict[str, object]] = []
         starts: list[datetime] = []
         ends: list[datetime] = []
@@ -1471,11 +1513,9 @@ class DashboardScanBackend:
             ]
             worker = self._work_package
             # Sealed into every package, so it has to survive JSON round-trip.
+            # Sealed as a mapping so a later instrument option can join it.
             options = {
-                key: json.loads(json.dumps(dict(value), default=str))
-                for key, value in (
-                    ("sif", self._sif_options), ("flir", self._flir_level2_options)
-                )
+                "sif": json.loads(json.dumps(dict(self._sif_options), default=str))
             }
         missing: list[str] = []
         if project is None:
@@ -1605,10 +1645,6 @@ class DashboardScanBackend:
             for key, value in package.payload.get("instrument_options", {}).items():
                 if key == "sif":
                     self._sif_options = {**DEFAULT_SIF_OPTIONS, **value}
-                elif key == "flir":
-                    self._flir_level2_options = {
-                        **DEFAULT_FLIR_LEVEL2_OPTIONS, **value
-                    }
         start = package.payload.get("analysis_start")
         end = package.payload.get("analysis_end")
         if start and end:
@@ -2260,9 +2296,9 @@ class DashboardScanBackend:
                 **DEFAULT_SIF_OPTIONS,
                 **project.instrument_options.get("sif", {}),
             }
-            self._flir_level2_options = {
-                **DEFAULT_FLIR_LEVEL2_OPTIONS,
-                **project.instrument_options.get("flir_level2", {}),
+            self._gopro_options = {
+                **DEFAULT_GOPRO_OPTIONS,
+                **project.instrument_options.get("gopro", {}),
             }
             self.processing_queue = restored_queue
             self._scheduler = None
@@ -3206,7 +3242,10 @@ class DashboardScanBackend:
             )
         with self._lock:
             self._sif_options["record_clock_timezone"] = normalized
-        self._apply_sif_timezone()
+            if self._flight_project is not None:
+                self._flight_project.instrument_options["sif"] = dict(
+                    self._sif_options
+                )
         self.logger.log(
             LogLevel.INFO,
             "sif-timezone",
@@ -3216,25 +3255,276 @@ class DashboardScanBackend:
             instrument="sif",
             processing_step="scan-timezone",
         )
+        # The card was filled in before the answer arrived, so it still shows
+        # the raw record clock. Correcting it now is what stops the operator
+        # choosing a Time Filter against a window two hours from the science.
+        self._revalidate_sif_times()
+        self._checkpoint_project()
         return self.sif_timezone_prompt()
 
-    def _apply_sif_timezone(self) -> None:
-        """Hand the declaration to the preserved SIF reader."""
+    def _sif_record_clock_offset_seconds(self) -> float | None:
+        """How far the AirFloX record clock runs ahead of UTC, if declared.
+
+        None until the operator answers. Every reader of SIF time - detection,
+        coverage, delivery selection and processing - must agree with this, or
+        the card reports one window while the science is written in another.
+        """
         with self._lock:
             chosen = self._sif_options.get("record_clock_timezone")
-        if chosen is None:
-            return
-        selection = SIF_RECORD_CLOCK_TIMEZONES[chosen]
-        try:
-            from instruments.sif.legacy import airflox_sif_automation as module
-        except ImportError:  # the preserved module is optional in tests
-            return
-        module.RECORD_CLOCK_TIMEZONE.update(
-            {
-                "offset_seconds": selection["offset_seconds"],
-                "label": selection["label"],
-            }
+        declaration = sif_record_clock_declaration(chosen)
+        return None if declaration is None else declaration[0]
+
+    def _gopro_record_clock_offset_seconds(self) -> float | None:
+        """How far the GoPro camera clock runs ahead of UTC, if declared."""
+        with self._lock:
+            chosen = self._gopro_options.get("record_clock_timezone")
+            manual = self._gopro_options.get("manual_offset_seconds")
+        if chosen == "manual":
+            return None if manual is None else float(manual)
+        entry = GOPRO_RECORD_CLOCK_TIMEZONES.get(str(chosen or ""))
+        return None if entry is None else float(entry["offset_seconds"])
+
+    def _timestamp_extractor(self) -> TimestampExtractor:
+        """An extractor that already knows the operator's clock declarations.
+
+        Constructing extractors through here is what keeps a rescan honest: the
+        declarations are read at construction, so they apply to every scan after
+        they were made rather than only to the one that asked.
+        """
+        return TimestampExtractor(
+            sif_record_clock_offset_seconds=self._sif_record_clock_offset_seconds(),
+            gopro_record_clock_offset_seconds=(
+                self._gopro_record_clock_offset_seconds()
+            ),
         )
+
+    # ------------------------------------------------------- GoPro camera clock
+    def _measure_gopro_clock(self) -> dict[str, object] | None:
+        """Compare the GoPro clock against a camera that records UTC.
+
+        MicaSense first, then FLIR: both sit on the same gondola, both record
+        UTC, and both are switched on with the GoPro. Their detected coverage is
+        already computed by the time this runs, and the GoPro's own EXIF stamps
+        are read straight from the card, so nothing here reprocesses anything.
+        """
+        with self._lock:
+            report = self._report
+            gopro_state = self._instruments["gopro"]
+            if gopro_state.detection_status is DetectionStatus.NOT_DETECTED:
+                return None
+            references = [
+                (self._instruments[name].display_name, name)
+                for name in ("micasense", "flir")
+                if self._instruments[name].detection_status
+                is not DetectionStatus.NOT_DETECTED
+                and self._instruments[name].utc_start_time is not None
+            ]
+        if report is None or not references:
+            return None
+        paths = self._validation_source_files(
+            "gopro",
+            [c for c in report.candidates if c.instrument_id == "gopro"],
+        )
+        if not paths:
+            return None
+        camera_times = read_gopro_camera_clock_times(paths)
+        if not camera_times:
+            return None
+        display_name, reference_id = references[0]
+        with self._lock:
+            state = self._instruments[reference_id]
+            segments = list(state.coverage_segments) or [
+                (state.utc_start_time, state.utc_end_time)
+            ]
+        # The reference camera's own recorded instants, naive so the comparison
+        # is wall-clock against the GoPro's naive EXIF.
+        reference_times = [
+            value.replace(tzinfo=None)
+            for pair in segments
+            for value in pair
+            if value is not None
+        ]
+        measurement = measure_camera_clock_offset(
+            camera_times, reference_times, reference_instrument=display_name
+        )
+        payload = measurement.to_dict()
+        payload["camera_days"] = [
+            {"day": day.isoformat(), "frames": count}
+            for day, count in flight_days(camera_times)
+        ]
+        payload["frames_read"] = len(camera_times)
+        days = flight_days(camera_times)
+        with self._lock:
+            self._gopro_clock_measurement = payload
+            # A camera card is not emptied between flights. Saying so, with the
+            # counts, is what stops a whole card being processed as one flight:
+            # only 188 of Flight_CCT0803's 2,099 frames belong to it.
+            if len(days) > 1:
+                listed = ", ".join(
+                    f"{day} ({count} frame(s))" for day, count in days
+                )
+                state = self._instruments["gopro"]
+                warning = (
+                    f"The GoPro card holds {len(days)} flight days: {listed}. "
+                    "Only the frames inside the selected interval are "
+                    "processed; the rest belong to other flights."
+                )
+                if warning not in state.warnings:
+                    state.warnings = [*state.warnings, warning]
+        self.logger.log(
+            LogLevel.INFO, "gopro-timezone", measurement.reason,
+            instrument="gopro", processing_step="clock-measurement",
+        )
+        return payload
+
+    def _gopro_camera_timezone_label(self) -> str:
+        """What the GoPro clock is being read as, for the products to record."""
+        with self._lock:
+            chosen = self._gopro_options.get("record_clock_timezone")
+            manual = self._gopro_options.get("manual_offset_seconds")
+        if chosen == "manual" and manual is not None:
+            return f"declared camera clock {float(manual):+.0f} s from UTC"
+        entry = GOPRO_RECORD_CLOCK_TIMEZONES.get(str(chosen or ""))
+        if entry is not None:
+            return f"declared camera clock {entry['label']}"
+        return f"{GOPRO_ASSUMED_TIMEZONE} (assumed; not declared)"
+
+    def gopro_timezone_prompt(self) -> dict[str, object]:
+        """Whether the scan still needs the GoPro camera clock declared.
+
+        Carries the measurement so the dialog can show what the offset appears
+        to be and on what evidence, rather than asking the operator to guess
+        about hardware they may not have configured themselves.
+        """
+        with self._lock:
+            detected = (
+                self._instruments["gopro"].detection_status
+                is not DetectionStatus.NOT_DETECTED
+            )
+            chosen = self._gopro_options.get("record_clock_timezone")
+            manual = self._gopro_options.get("manual_offset_seconds")
+            measurement = self._gopro_clock_measurement
+        return {
+            "required": bool(detected) and chosen is None,
+            "chosen": chosen,
+            "manual_offset_seconds": manual,
+            "choices": [
+                {"key": key, "label": value["label"],
+                 "offset_seconds": value["offset_seconds"]}
+                for key, value in GOPRO_RECORD_CLOCK_TIMEZONES.items()
+            ],
+            "measurement": measurement,
+            "assumed_timezone": GOPRO_ASSUMED_TIMEZONE,
+            "message": (
+                "GoPro EXIF carries no timezone field, so what its clock is set "
+                "to cannot be read from the images. Confirm it below; every "
+                "GoPro timestamp is converted to UTC from what you choose."
+            ),
+        }
+
+    def set_gopro_timezone(
+        self, key: str, manual_offset_seconds: object = None
+    ) -> dict[str, object]:
+        """Record the operator's declaration for the GoPro camera clock."""
+        normalized = str(key).strip().casefold()
+        manual: float | None = None
+        if normalized == "manual":
+            manual = _optional_float(manual_offset_seconds)
+            if manual is None:
+                raise ValueError(
+                    "A manual GoPro clock offset needs a number of seconds "
+                    "ahead of UTC"
+                )
+            if not -86400 <= manual <= 86400:
+                raise ValueError(
+                    "A manual GoPro clock offset must be within a day of UTC"
+                )
+        elif normalized not in GOPRO_RECORD_CLOCK_TIMEZONES:
+            raise ValueError(
+                "GoPro camera clock must be one of: "
+                + ", ".join([*sorted(GOPRO_RECORD_CLOCK_TIMEZONES), "manual"])
+            )
+        with self._lock:
+            self._gopro_options["record_clock_timezone"] = normalized
+            self._gopro_options["manual_offset_seconds"] = manual
+            if self._flight_project is not None:
+                self._flight_project.instrument_options["gopro"] = dict(
+                    self._gopro_options
+                )
+        label = (
+            f"{manual:+.0f} s from UTC"
+            if normalized == "manual"
+            else GOPRO_RECORD_CLOCK_TIMEZONES[normalized]["label"]
+        )
+        self.logger.log(
+            LogLevel.INFO, "gopro-timezone",
+            f"GoPro camera clock declared as {label}; GoPro timestamps are "
+            "converted to UTC from it.",
+            instrument="gopro", processing_step="scan-timezone",
+        )
+        # The card was filled in under the assumed zone before the answer
+        # arrived, so it still shows that window.
+        self._revalidate_gopro_times()
+        self._checkpoint_project()
+        return self.gopro_timezone_prompt()
+
+    def _revalidate_gopro_times(self) -> bool:
+        """Reread GoPro EXIF under the current declaration."""
+        with self._lock:
+            report = self._report
+            detected = (
+                self._instruments["gopro"].detection_status
+                is not DetectionStatus.NOT_DETECTED
+            )
+        if report is None or not detected:
+            return False
+        paths = self._validation_source_files(
+            "gopro",
+            [c for c in report.candidates if c.instrument_id == "gopro"],
+        )
+        if not paths:
+            return False
+        result = self._timestamp_extractor().extract_instrument("gopro", paths)
+        if not result.has_utc_range:
+            return False
+        with self._lock:
+            state = self._instruments["gopro"]
+            state.utc_start_time = result.utc_start_time
+            state.utc_end_time = result.utc_end_time
+            state.coverage_segments = recorded_coverage_segments(
+                "gopro", result.coverage_segments
+            )
+            state.original_start_time = result.original_min_timestamp
+            state.original_end_time = result.original_max_timestamp
+            state.processing_step = (
+                f"Time corrected during detection: {result.timezone_information}"
+            )
+            state.quicklook = {
+                **state.quicklook,
+                "time_correction_complete": True,
+                "camera_timezone": result.timezone_information,
+                "navigation_timezone": "UTC",
+                "corrected_start_utc": _iso(result.utc_start_time),
+                "corrected_end_utc": _iso(result.utc_end_time),
+            }
+            saved = (
+                self._flight_project.detected_instruments.get("gopro")
+                if self._flight_project is not None
+                else None
+            )
+            if saved is not None:
+                saved.utc_start_time = result.utc_start_time
+                saved.utc_end_time = result.utc_end_time
+                saved.coverage_segments = list(state.coverage_segments)
+            self._rebuild_time_state()
+        self.logger.log(
+            LogLevel.INFO, "gopro-timezone",
+            "GoPro coverage reread under the declared camera clock: "
+            f"{_iso(result.utc_start_time)} to {_iso(result.utc_end_time)} UTC "
+            f"({result.timezone_information}).",
+            instrument="gopro", processing_step="scan-timezone",
+        )
+        return True
 
     def update_sif_options(
         self, request: Mapping[str, object] | None
@@ -5237,7 +5527,7 @@ class DashboardScanBackend:
             for instrument_id in ("opc_hbx4", "opc_hbx5")
         }
         ambiguous_opc_files = opc_files["opc_hbx4"] & opc_files["opc_hbx5"]
-        extractor = TimestampExtractor()
+        extractor = self._timestamp_extractor()
         validation_items = tuple(grouped.items())
         validation_total = len(validation_items)
         for validation_index, (instrument_id, candidates) in enumerate(
@@ -5323,12 +5613,13 @@ class DashboardScanBackend:
                 state.original_end_time = time_result.original_max_timestamp
                 if instrument_id == "gopro" and time_result.utc_start_time:
                     state.processing_step = (
-                        "Time corrected during detection: Europe/Berlin → UTC"
+                        "Time corrected during detection: "
+                        f"{time_result.timezone_information}"
                     )
                     state.quicklook = {
                         **state.quicklook,
                         "time_correction_complete": True,
-                        "camera_timezone": "Europe/Berlin (CET/CEST)",
+                        "camera_timezone": time_result.timezone_information,
                         "navigation_timezone": "UTC",
                         "corrected_start_utc": _iso(time_result.utc_start_time),
                         "corrected_end_utc": _iso(time_result.utc_end_time),
@@ -5350,27 +5641,11 @@ class DashboardScanBackend:
                 )
                 if instrument_id == "gopro" and time_result.utc_start_time:
                     self._messages.append(
-                        "GoPro camera time corrected from Europe/Berlin "
-                        "(CET/CEST) to UTC during detection."
+                        "GoPro camera time converted to UTC during detection: "
+                        f"{time_result.timezone_information}."
                     )
         with self._lock:
-            self._time_state = DashboardTimeState.from_instrument_ranges(
-                {
-                    key: (
-                        value.utc_start_time,
-                        value.utc_end_time,
-                        value.timestamp_warnings,
-                    )
-                    for key, value in self._instruments.items()
-                    if value.detection_status is not DetectionStatus.NOT_DETECTED
-                },
-                analysis_anchor_id="noseboom",
-                coverage_segments={
-                    key: tuple(value.coverage_segments)
-                    for key, value in self._instruments.items()
-                    if value.coverage_segments
-                },
-            )
+            self._rebuild_time_state()
             self._sync_project_from_report(
                 report, expanded_source_files=expanded_source_files
             )
@@ -5390,6 +5665,91 @@ class DashboardScanBackend:
                 self._messages.append(
                     "Ambiguous candidates require user confirmation."
                 )
+        # Outside the lock: this reads EXIF from the camera disk. Only once the
+        # reference cameras have been validated, because the measurement is
+        # against their coverage.
+        if final:
+            self._measure_gopro_clock()
+
+    def _rebuild_time_state(self) -> None:
+        """Rederive the dashboard time state from the current card times.
+
+        Called with the lock held. Separate from _apply_report because a
+        declaration made after the scan - the SIF record clock - changes an
+        instrument's UTC window without rescanning anything.
+        """
+        self._time_state = DashboardTimeState.from_instrument_ranges(
+            {
+                key: (
+                    value.utc_start_time,
+                    value.utc_end_time,
+                    value.timestamp_warnings,
+                )
+                for key, value in self._instruments.items()
+                if value.detection_status is not DetectionStatus.NOT_DETECTED
+            },
+            analysis_anchor_id="noseboom",
+            coverage_segments={
+                key: tuple(value.coverage_segments)
+                for key, value in self._instruments.items()
+                if value.coverage_segments
+            },
+        )
+
+    def _revalidate_sif_times(self) -> bool:
+        """Reread SIF timestamps under the current declaration.
+
+        The scan asks for the declaration only once SIF has been detected, so
+        by the time the answer arrives the card already carries the raw record
+        clock read as UTC. Rereading just SIF is cheap - a few CSVs - and
+        avoids revalidating GoPro's thousands of EXIF headers to correct it.
+        """
+        with self._lock:
+            report = self._report
+            state = self._instruments["sif"]
+            detected = state.detection_status is not DetectionStatus.NOT_DETECTED
+        if report is None or not detected:
+            return False
+        paths = tuple(dict.fromkeys(
+            path
+            for candidate in report.candidates
+            if candidate.instrument_id == "sif"
+            for path in candidate.all_matching_files
+        ))
+        if not paths:
+            return False
+        result = self._timestamp_extractor().extract_instrument("sif", paths)
+        if not result.has_utc_range:
+            return False
+        with self._lock:
+            state = self._instruments["sif"]
+            state.utc_start_time = result.utc_start_time
+            state.utc_end_time = result.utc_end_time
+            state.coverage_segments = recorded_coverage_segments(
+                "sif", result.coverage_segments
+            )
+            state.original_start_time = result.original_min_timestamp
+            state.original_end_time = result.original_max_timestamp
+            saved = (
+                self._flight_project.detected_instruments.get("sif")
+                if self._flight_project is not None
+                else None
+            )
+            if saved is not None:
+                saved.utc_start_time = result.utc_start_time
+                saved.utc_end_time = result.utc_end_time
+                saved.coverage_segments = list(state.coverage_segments)
+            self._rebuild_time_state()
+        self.logger.log(
+            LogLevel.INFO,
+            "sif-timezone",
+            "SIF coverage reread under the declared record clock: "
+            f"{_iso(result.utc_start_time)} to {_iso(result.utc_end_time)} UTC "
+            f"({result.timezone_information}).",
+            instrument="sif",
+            processing_step="scan-timezone",
+        )
+        return True
 
     @staticmethod
     def _validation_source_files(
@@ -6275,9 +6635,11 @@ class DashboardScanBackend:
         return JobOutcome()
 
     def _sif_task(self, context: ProcessingContext) -> JobOutcome | None:
-        # The operator's declaration decides every SIF timestamp, so it is
-        # applied before the reader runs rather than left to import order.
-        self._apply_sif_timezone()
+        # The operator's declaration travels with the SIF options below, and
+        # the adapter applies it to the reader it owns. It used to be pushed
+        # into instruments.sif.legacy.airflox_sif_automation from here, which
+        # never worked: that import fails, and the reader the adapter loads is
+        # a separate module object anyway.
         from instruments.sif import SifAdapter
         with self._lock:
             report, project = self._report, self._flight_project
@@ -6558,7 +6920,7 @@ class DashboardScanBackend:
             context.report_progress(
                 55, "Converting temperature and matching Noseboom navigation"
             )
-            self._flir_detailed_task(context, self._flir_level2_routines())
+            self._flir_detailed_task(context)
         except ProcessingCancelledError:
             raise
         except Exception as exc:
@@ -6575,16 +6937,6 @@ class DashboardScanBackend:
                 f"{exc}"
             )
         return JobOutcome(warning=warning)
-
-    def _flir_level2_routines(self) -> tuple[str, ...]:
-        """Every available routine. There is nothing useful to leave out."""
-        from core.camera_level2 import level2_capability_snapshot
-
-        return tuple(
-            item["routine_id"]
-            for item in level2_capability_snapshot().get("flir", ())
-            if item.get("available")
-        )
 
     # Per-file coverage is only worth measuring when a delivery is split across
     # files and the whole set is small enough to inspect cheaply. A single file
@@ -6625,7 +6977,7 @@ class DashboardScanBackend:
         if total > self.DELIVERY_SELECTION_MAX_BYTES:
             return paths
 
-        extractor = TimestampExtractor()
+        extractor = self._timestamp_extractor()
         kept: list[Path] = []
         dropped: list[str] = []
         for path in paths:
@@ -6746,90 +7098,6 @@ class DashboardScanBackend:
             })
         return exports
 
-    def update_flir_level2_options(
-        self, request: Mapping[str, object] | None
-    ) -> dict[str, object]:
-        """Validate the operator's radiometric correction inputs.
-
-        Refused outright on a worker computer: the settings came with the work
-        package and every machine must use the same ones.
-
-        Apparent mode needs nothing. Corrected mode needs every environment
-        measurement, and is only quantitative when the operator states the
-        values were measured rather than assumed.
-        """
-        self._refuse_if_worker("The FLIR configuration")
-        request = request or {}
-        options = dict(DEFAULT_FLIR_LEVEL2_OPTIONS)
-        mode = str(request.get("mode", options["mode"])).strip().lower()
-        if mode not in {"apparent", "corrected"}:
-            raise ValueError("FLIR temperature mode must be apparent or corrected")
-        options["mode"] = mode
-        provenance = str(
-            request.get("environment_inputs_provenance",
-                        options["environment_inputs_provenance"])
-        ).strip().lower()
-        if provenance not in {"measured", "assumed_for_testing"}:
-            raise ValueError(
-                "Environment input provenance must be measured or assumed_for_testing"
-            )
-        options["environment_inputs_provenance"] = provenance
-
-        numeric = {
-            "emissivity": (0.0, 1.0, False),
-            "object_distance_m": (0.0, 100_000.0, True),
-            "atmospheric_temperature_c": (-273.15, 200.0, False),
-            "reflected_apparent_temperature_c": (-273.15, 200.0, False),
-            "relative_humidity_percent": (0.0, 100.0, True),
-            "external_optics_transmission": (0.0, 1.0, False),
-            "external_optics_temperature_c": (-273.15, 200.0, False),
-            "valid_temperature_min_c": (-273.15, 2000.0, True),
-            "valid_temperature_max_c": (-273.15, 2000.0, True),
-        }
-        for name, (low, high, inclusive_low) in numeric.items():
-            if request.get(name) is None:
-                continue
-            value = _optional_float(request.get(name))
-            if value is None:
-                continue
-            within = low <= value <= high if inclusive_low else low < value <= high
-            if not within:
-                raise ValueError(
-                    f"{name} must be between {low} and {high}"
-                )
-            options[name] = value
-        options["save_temperature_npz"] = request.get("save_temperature_npz") is True
-
-        if (options["valid_temperature_min_c"] is None) != (
-            options["valid_temperature_max_c"] is None
-        ):
-            raise ValueError(
-                "Provide both valid temperature limits, or neither"
-            )
-        if mode == "corrected":
-            missing = [
-                name for name in (
-                    "emissivity", "object_distance_m", "atmospheric_temperature_c",
-                    "reflected_apparent_temperature_c", "relative_humidity_percent",
-                ) if options[name] is None
-            ]
-            if missing:
-                raise ValueError(
-                    "Environment-corrected temperature needs measured values for: "
-                    + ", ".join(missing)
-                )
-        with self._lock:
-            self._flir_level2_options = options
-            if self._flight_project is not None:
-                self._flight_project.instrument_options["flir_level2"] = dict(options)
-        self.logger.log(
-            LogLevel.INFO, "camera-level2",
-            f"FLIR Level 2 options saved: mode={mode}, provenance={provenance}",
-            instrument="flir", processing_step="level2-configuration",
-        )
-        self._checkpoint_project()
-        return dict(options)
-
     def _flir_exports_for_interval(
         self,
         report: ScanReport,
@@ -6929,9 +7197,7 @@ class DashboardScanBackend:
         )
         return entries
 
-    def _flir_detailed_task(
-        self, context: ProcessingContext, selected_routines: tuple[str, ...]
-    ) -> JobOutcome | None:
+    def _flir_detailed_task(self, context: ProcessingContext) -> JobOutcome | None:
         """Radiometric temperature plus Noseboom georeferencing for every frame.
 
         Runs Teledyne FLIR's reference counts2temp calculation over the frames
@@ -6940,10 +7206,7 @@ class DashboardScanBackend:
         into post-processing. The science lives unchanged in
         legacy_integration/FLIR; this only selects, drives and georeferences it.
         """
-        from instruments.flir.level2_bridge import (
-            APPARENT, CORRECTED, PROVENANCE_ASSUMED, PROVENANCE_MEASURED,
-            LegacyFlirLevel2Bridge,
-        )
+        from instruments.flir.level2_bridge import LegacyFlirLevel2Bridge
 
         with self._lock:
             report, project, limits = (
@@ -6955,7 +7218,6 @@ class DashboardScanBackend:
             noseboom_points = tuple(
                 self._instruments["noseboom"].quicklook.get("points", ())
             )
-            options = dict(self._flir_level2_options)
         if report is None or project is None:
             raise RuntimeError("Flight scan and project state are required")
 
@@ -6967,20 +7229,8 @@ class DashboardScanBackend:
         )
         bridge = LegacyFlirLevel2Bridge()
         health_module = bridge.health
-        mode = str(options.get("mode", APPARENT))
-        correction = bridge.correction_inputs(options)
-        provenance = str(
-            options.get("environment_inputs_provenance", PROVENANCE_ASSUMED)
-        )
-        if mode == CORRECTED and provenance != PROVENANCE_MEASURED:
-            # The reference is explicit that guessed inputs are not quantitative.
-            self.logger.log(
-                LogLevel.WARNING, "camera-level2",
-                "Environment-corrected FLIR temperature was requested with "
-                "inputs that are not recorded as measured; the result is "
-                "marked non-quantitative.",
-                instrument="flir", processing_step="level2-provenance",
-            )
+        # Apparent mode: no correction inputs. See FLIR_TEMPERATURE_MODE.
+        correction = None
 
         output_root = self._run_output_root(project, "flir") / "level2"
         output_root.mkdir(parents=True, exist_ok=True)
@@ -7028,17 +7278,11 @@ class DashboardScanBackend:
                 )
             )
         spans = health_module.object_spans(entries)
+        # No plausibility window and no per-frame temperature rasters. Both were
+        # only reachable through the configuration stage, and every frame's
+        # statistics land in temperature_frames.csv either way.
         valid_range = None
-        if options.get("valid_temperature_min_c") is not None:
-            valid_range = (
-                float(options["valid_temperature_min_c"]),
-                float(options["valid_temperature_max_c"]),
-            )
-        save_directory = (
-            output_root / "temperature_maps_npz"
-            if options.get("save_temperature_npz")
-            else None
-        )
+        save_directory = None
 
         context.report_progress(
             26, f"Converting {len(indices):,} frames to temperature"
@@ -7097,11 +7341,10 @@ class DashboardScanBackend:
             row["georeference_method"] = (
                 "nearest Noseboom UTC navigation sample within 2.5 s"
             )
-            row["temperature_mode"] = mode
-            row["environment_inputs_provenance"] = provenance
-            row["quantitative"] = (
-                mode == CORRECTED and provenance == PROVENANCE_MEASURED
-            )
+            # Constant, and kept in the CSV on purpose: a downstream reader
+            # must not mistake apparent temperature for a corrected one.
+            row["temperature_mode"] = FLIR_TEMPERATURE_MODE
+            row["quantitative"] = False
         health_module.write_csv(output_root / "temperature_frames.csv", rows)
 
         matched = sum(1 for row in rows if row["georeference_status"] == "MATCHED")
@@ -7111,12 +7354,10 @@ class DashboardScanBackend:
             "processed_frames": len(rows),
             "temperature_frames_passed": converted,
             "georeferenced_frames": matched,
-            "temperature_mode": mode,
-            "environment_inputs_provenance": provenance,
-            "quantitative": mode == CORRECTED and provenance == PROVENANCE_MEASURED,
+            "temperature_mode": FLIR_TEMPERATURE_MODE,
+            "quantitative": False,
             "time_filter_start_utc": _iso(selected_start),
             "time_filter_end_utc": _iso(selected_end),
-            "selected_routines": list(selected_routines),
         }
         (output_root / "summary.json").write_text(
             json.dumps(summary_payload, indent=2, default=str) + "\n",
@@ -7167,16 +7408,9 @@ class DashboardScanBackend:
                 "FLIR apparent temperature: factory calibration with emissivity "
                 "1, no atmospheric, reflected or optics correction. A sensor "
                 "sanity check, not a surface temperature."
-                if mode == APPARENT else
-                "FLIR environment-corrected surface temperature using measured "
-                "emissivity, distance, atmospheric and reflected temperature, "
-                "humidity and optics transmission."
-                if provenance == PROVENANCE_MEASURED else
-                "Environment-corrected temperature computed from assumed inputs. "
-                "NOT QUANTITATIVE — for debugging only."
             ),
-            "temperature_mode": mode,
-            "quantitative": mode == CORRECTED and provenance == PROVENANCE_MEASURED,
+            "temperature_mode": FLIR_TEMPERATURE_MODE,
+            "quantitative": False,
             "temperature_records": temperature_records,
             "temperature_records_total": temperature_total,
             "map_points": map_points,
@@ -7216,16 +7450,17 @@ class DashboardScanBackend:
                 saved.output_locations = [Path(v) for v in state.output_files]
             project.output_locations["flir_browser"] = quicklook_path
         self.logger.log(
-            LogLevel.SUCCESS, "camera-level2",
+            LogLevel.SUCCESS, "flir-temperature",
             (
-                f"FLIR Level 2 complete: {converted}/{len(rows)} frame(s) converted "
-                f"to {mode} temperature, {matched} georeferenced against Noseboom"
+                f"FLIR temperature complete: {converted}/{len(rows)} frame(s) "
+                f"converted to {FLIR_TEMPERATURE_MODE} temperature, "
+                f"{matched} georeferenced against Noseboom"
             ),
             instrument="flir", job_id="flir_detailed",
             file_path=output_root / "temperature_frames.csv",
-            processing_step=",".join(selected_routines),
+            processing_step="temperature-conversion,georeferencing",
         )
-        context.report_progress(100, "FLIR Level 2 and temperature map complete")
+        context.report_progress(100, "FLIR temperature and temperature map complete")
         return JobOutcome(
             warning=None if matched else
             "Temperature was calculated but no frame matched Noseboom navigation."
@@ -7265,6 +7500,9 @@ class DashboardScanBackend:
                 maximum_thumbnail_count=12,
             ),
             logger=self.logger,
+            # The same declaration detection used, so the georeferenced
+            # captures land where the card said they would.
+            record_clock_offset_seconds=self._gopro_record_clock_offset_seconds(),
         )
         adapter.report_progress(lambda update: context.report_progress(update.progress or 0.0, update.phase))
         loaded = adapter.load(InputCandidate("gopro", tuple(paths), 1.0, "Confirmed Flight Folder scan candidate"))
@@ -7313,7 +7551,7 @@ class DashboardScanBackend:
                 None if captures
                 else "No GoPro image timestamp could be matched to processed Noseboom navigation within 2.5 seconds."
             ),
-            "camera_timezone": "Europe/Berlin (CET/CEST)",
+            "camera_timezone": self._gopro_camera_timezone_label(),
             "navigation_timezone": "UTC",
             "matching_method": "Nearest Noseboom 1 Hz sample; maximum difference 2.5 seconds",
             "image_count": image_count,

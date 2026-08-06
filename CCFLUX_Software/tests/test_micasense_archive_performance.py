@@ -131,10 +131,18 @@ def test_unset_camera_clock_does_not_exclude_images(adapter, tmp_path):
     )
 
 
-def test_epoch_timestamps_are_treated_as_an_unset_clock(adapter):
-    """A 1970 stamp must not be used to exclude an image from the window."""
+def test_pre_campaign_timestamps_are_dropped_from_the_calculation(adapter):
+    """A frame dated before the campaign was dated by an unlocked GPS.
+
+    Its stamp says nothing about when the image was taken, so it cannot bound
+    the coverage, join a capture or contribute a trigger interval. It is counted
+    and reported instead of being used.
+    """
     import inspect
 
+    from instruments.micasense.adapter import MINIMUM_CAPTURE_YEAR
+
     source = inspect.getsource(adapter.process_quicklook)
-    assert "stamp.year < 2000" in source
-    assert "camera clock" in source.lower()
+    assert MINIMUM_CAPTURE_YEAR == 2025
+    assert "stamp.year < MINIMUM_CAPTURE_YEAR" in source
+    assert "GPS had not" in source or "GPS had not locked" in source

@@ -15,7 +15,27 @@ from app.miro_rack_bridge import (
     MIRO_MAP_GASES,
     PICARRO_MAP_GASES,
     MiroRackBridge,
+    _absent_instrument_meta,
 )
+
+
+class _NullLogger:
+    def log(self, *args, **kwargs):
+        return None
+
+
+class _MinimalBackend:
+    """Enough dashboard for the bridge to build its page and bootstrap."""
+
+    def __init__(self, snapshot=None):
+        self.logger = _NullLogger()
+        self._snapshot = snapshot or {}
+
+    def snapshot(self):
+        return self._snapshot
+
+    def _persist_project_logs(self):
+        return None
 
 
 def test_miro_rack_page_namespaces_legacy_api_and_adds_required_controls(tmp_path):
@@ -282,3 +302,109 @@ def test_main_processing_prepares_and_reuses_saved_map_payload(tmp_path):
     status = bridge.start_map_job()
     assert status["ready"] is True
     assert status["percent"] == 100.0
+
+
+class TestPicarroOnlyFlightPopulatesTheOverview:
+    """Flight_CCT0803 carries Picarro and no MIRO.
+
+    The rack overview stayed empty on it - no time series, no distribution and
+    an empty Trace gas list - while /api/miro-rack/results already held a
+    complete Picarro analysis. Every remaining both-or-nothing gate between the
+    payload and the page is covered here.
+    """
+
+    def _page(self, tmp_path):
+        return MiroRackBridge(tmp_path, _MinimalBackend()).page_html().decode("utf-8")
+
+    def test_the_bootstrap_block_runs_with_only_one_source_path(self, tmp_path):
+        """This was the gate that stopped everything downstream."""
+        html = self._page(tmp_path)
+        assert "(state.miro_path || state.picarro_path)" in html
+        assert "state.miro_path && state.picarro_path" not in html
+
+    def test_the_session_restore_needs_only_one_instrument(self, tmp_path):
+        html = self._page(tmp_path)
+        assert "meta?.miro?.rows||meta?.picarro?.rows" in html
+        assert "meta?.miro?.rows&&meta?.picarro?.rows" not in html
+
+    def test_a_restored_session_renders_whichever_results_exist(self, tmp_path):
+        html = self._page(tmp_path)
+        assert "restoreLoadedResults" in html
+        assert "if(hasPicarro)await renderPicarro(result.picarro)" in html
+
+    def test_either_folder_is_enough_to_load(self, tmp_path):
+        html = self._page(tmp_path)
+        assert "miroPath.value.trim()||picarroPath.value.trim()" in html
+        assert "Select a MIRO folder, a Picarro folder, or both." in html
+
+    def test_the_gas_selectors_tolerate_an_absent_instrument(self, tmp_path):
+        html = self._page(tmp_path)
+        assert "app.meta.miro?.gases" in html
+        assert "app.meta.picarro?.gases" in html
+        assert "Array.isArray(values)?values:[]" in html
+
+    def test_the_summary_names_the_instrument_that_was_not_recorded(self, tmp_path):
+        html = self._page(tmp_path)
+        assert "Not recorded on this flight" in html
+
+    def test_a_gas_selector_with_no_options_stays_disabled(self, tmp_path):
+        html = self._page(tmp_path)
+        assert "!picarroGas.options.length" in html
+        assert "!miroGas.options.length" in html
+
+    def test_the_absent_instrument_block_has_the_loader_keys(self):
+        """The page reads rows and gases off it, so the shape has to match."""
+        absent = _absent_instrument_meta()
+        assert absent["rows"] == 0
+        assert absent["gases"] == []
+        assert absent["start"] is None and absent["end"] is None
+        assert absent["files_used"] == 0
+
+    def test_bootstrap_reports_only_the_detected_source(self, tmp_path):
+        """Picarro is detected inside a folder named MIRO on this flight."""
+        backend = _MinimalBackend({
+            "flight_id": "Flight_CCT0803",
+            "instruments": {
+                "picarro": {"candidate_paths": [str(tmp_path / "MIRO" / "03")]},
+                "miro": {"candidate_paths": []},
+            },
+        })
+        (tmp_path / "MIRO" / "03").mkdir(parents=True)
+        bridge = MiroRackBridge(tmp_path, backend)
+        state = bridge.bootstrap()
+        assert state["picarro_path"].endswith("03")
+        assert state["miro_path"] == ""
+
+
+class TestPicarroOnlyLoadWorker:
+    """The legacy loader raised out of the job when a folder was absent."""
+
+    def _module(self, tmp_path):
+        bridge = MiroRackBridge(tmp_path, _MinimalBackend())
+        return bridge.module
+
+    def test_an_absent_miro_folder_does_not_fail_the_load(self, tmp_path):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "legacy_integration" / "MIRO_Rack" / "MIRO_Rack_GUI.py"
+        ).read_text(encoding="utf-8")
+        worker = source[source.index("def load_worker("):source.index("def comparison_payload(")]
+        assert "if miro_path:" in worker
+        assert "if picarro_path:" in worker
+        assert "loading Picarro alone" in worker
+
+    def test_neither_folder_is_still_refused(self, tmp_path):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "legacy_integration" / "MIRO_Rack" / "MIRO_Rack_GUI.py"
+        ).read_text(encoding="utf-8")
+        assert "Select a MIRO folder, a Picarro folder, or both." in source
+
+    def test_a_comparison_still_needs_both(self, tmp_path):
+        """Only the overview is single-instrument; a correlation is not."""
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "legacy_integration" / "MIRO_Rack" / "MIRO_Rack_GUI.py"
+        ).read_text(encoding="utf-8")
+        worker = source[source.index("def comparison_worker("):]
+        assert "if mdata is None or pdata is None" in worker[:600]

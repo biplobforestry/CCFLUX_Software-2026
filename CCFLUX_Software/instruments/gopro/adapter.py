@@ -57,6 +57,7 @@ class GoProLevel1Adapter(InstrumentBase):
         unusually_small_image_bytes: int = 8 * 1024,
         unusually_small_video_bytes: int = 128 * 1024,
         gap_factor: float = 3.0,
+        record_clock_offset_seconds: float | None = None,
     ) -> None:
         self.output_root, self.flight_name = Path(output_root), flight_name
         self.resource_limits = resource_limits
@@ -69,6 +70,10 @@ class GoProLevel1Adapter(InstrumentBase):
         self.unusually_small_image_bytes = unusually_small_image_bytes
         self.unusually_small_video_bytes = unusually_small_video_bytes
         self.gap_factor = gap_factor
+        # How far the camera clock runs ahead of UTC, as declared by the
+        # operator. None keeps the campaign-local assumption this had
+        # before the clock could be declared.
+        self.record_clock_offset_seconds = record_clock_offset_seconds
         self._callback: ProgressCallback | None = None
         self._cancelled = threading.Event()
         self._records: list[dict[str, Any]] = []
@@ -95,7 +100,7 @@ class GoProLevel1Adapter(InstrumentBase):
         values = []
         for path in images:
             self._check()
-            value, _ = _image_timestamp(path)
+            value, _ = _image_timestamp(path, self.record_clock_offset_seconds)
             if value:
                 values.append(value)
         for path in videos:
@@ -246,7 +251,7 @@ class GoProLevel1Adapter(InstrumentBase):
         inspected = 0
         for path in loaded.images:
             self._check()
-            timestamp, _ = _image_timestamp(path)
+            timestamp, _ = _image_timestamp(path, self.record_clock_offset_seconds)
             inspected += 1
             if _inside_interval(timestamp, start, end):
                 images.append(path)
@@ -321,7 +326,7 @@ class GoProLevel1Adapter(InstrumentBase):
                 image.verify()
         except (OSError, ValueError, UnidentifiedImageError):
             corrupt = True
-        timestamp, source = _image_timestamp(path)
+        timestamp, source = _image_timestamp(path, self.record_clock_offset_seconds)
         size = path.stat().st_size
         return _record(path, "image", timestamp, source, None, size < self.unusually_small_image_bytes, corrupt)
 
@@ -392,14 +397,21 @@ def _classify(paths: Sequence[Path]) -> tuple[tuple[Path, ...], tuple[Path, ...]
     return tuple(sorted(dict.fromkeys(images), key=key)), tuple(sorted(dict.fromkeys(videos), key=key))
 
 
-def _image_timestamp(path: Path) -> tuple[datetime | None, str]:
+def _image_timestamp(
+    path: Path, offset_seconds: float | None = None
+) -> tuple[datetime | None, str]:
     try:
         with Image.open(path) as image:
             exif = {ExifTags.TAGS.get(tag, str(tag)): value for tag, value in image.getexif().items()}
         raw = exif.get("DateTimeOriginal") or exif.get("DateTime")
         if raw:
             local_time = datetime.strptime(str(raw), "%Y:%m:%d %H:%M:%S")
-            return camera_local_to_utc(local_time), "EXIF Europe/Berlin→UTC"
+            label = (
+                f"EXIF {offset_seconds:+.0f} s→UTC"
+                if offset_seconds is not None
+                else "EXIF Europe/Berlin→UTC (assumed)"
+            )
+            return camera_local_to_utc(local_time, offset_seconds), label
     except (OSError, ValueError, UnidentifiedImageError):
         pass
     return None, "missing"

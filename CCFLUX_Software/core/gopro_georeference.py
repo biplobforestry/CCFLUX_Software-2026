@@ -3,19 +3,36 @@
 from __future__ import annotations
 
 from bisect import bisect_left
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 
+# Only a fallback. GoPro EXIF has no timezone field, so CC-FLUX used to assume
+# the campaign's local zone for every flight; on Flight_CCT0803 that was wrong by
+# two hours. The operator now declares the clock after being shown the offset
+# measured against a camera that records UTC, and the declaration is passed in.
 GOPRO_TIMEZONE = ZoneInfo("Europe/Berlin")
 
 
-def camera_local_to_utc(value: datetime) -> datetime:
-    """Interpret a naive GoPro clock value as Europe/Berlin and return UTC."""
-    localized = value.replace(tzinfo=GOPRO_TIMEZONE) if value.tzinfo is None else value
-    return localized.astimezone(timezone.utc)
+def camera_local_to_utc(
+    value: datetime, offset_seconds: float | None = None
+) -> datetime:
+    """Convert a naive GoPro clock value to UTC.
+
+    ``offset_seconds`` is the operator's declaration of how far the camera clock
+    runs ahead of UTC: 0 when the camera is set to UTC, 7200 for CEST. None
+    falls back to interpreting the value as the campaign's local zone, which is
+    what this did before the clock could be declared.
+    """
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc)
+    if offset_seconds is None:
+        return value.replace(tzinfo=GOPRO_TIMEZONE).astimezone(timezone.utc)
+    return value.replace(
+        tzinfo=timezone(timedelta(seconds=offset_seconds))
+    ).astimezone(timezone.utc)
 
 
 def parse_utc(value: Any) -> datetime | None:

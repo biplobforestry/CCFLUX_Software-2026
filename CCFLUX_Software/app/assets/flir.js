@@ -84,7 +84,7 @@
     const medians=temperatures.map(row=>row.temperature_median_c).filter(finite);
     $('summaryGrid').innerHTML=[
       summaryCard('Selected FLIR frames',Number(summary.frame_count||0).toLocaleString(),`${payload.utc_start||'—'} to ${payload.utc_end||'—'}`),
-      summaryCard('Radiometric frames',temperatures.length.toLocaleString(),payload.temperature_available?'Temperature conversion complete':'Level 2 required'),
+      summaryCard('Radiometric frames',temperatures.length.toLocaleString(),payload.temperature_available?'Temperature conversion complete':payload.temperature_reason||'Waiting for FLIR processing'),
       summaryCard('Mapped frames',mapped.length.toLocaleString(),payload.matching_method||'Noseboom UTC matching pending'),
       summaryCard('Median apparent temperature',medians.length?`${quantile(medians,.5).toFixed(2)} °C`:'—','Uncorrected FLIR Planck temperature')
     ].join('');
