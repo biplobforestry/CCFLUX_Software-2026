@@ -375,3 +375,73 @@ class TestTheCaptureRowsReachThePage:
                 return "odd"
 
         assert _json_safe_capture({"x": Odd()})["x"] == "odd"
+
+
+class TestMacResourceForksAreNotDeliveries:
+    """Two warnings on Flight_CCT0803 were about files that are not data.
+
+    Copying a MicaSense folder through a non-HFS volume leaves a 4 KB
+    "._IMG_0000.zip" beside each real archive. It is an AppleDouble stub, not a
+    ZIP, so opening it raised BadZipFile and the capture was counted as a
+    corrupt archive - two "corrupt or unreadable" warnings on a delivery where
+    nothing was wrong.
+    """
+
+    def test_a_stub_is_recognised(self):
+        from instruments.micasense.adapter import _is_apple_double
+
+        assert _is_apple_double(Path("._IMG_0000.zip")) is True
+        assert _is_apple_double(Path("/a/b/._IMG_0488.zip")) is True
+
+    def test_a_real_archive_is_not(self):
+        from instruments.micasense.adapter import _is_apple_double
+
+        assert _is_apple_double(Path("IMG_0000.zip")) is False
+        assert _is_apple_double(Path("/a/b/IMG_0000_1.tif")) is False
+
+    def test_a_stub_beside_a_real_archive_is_skipped(self, tmp_path):
+        import io
+        import zipfile
+
+        from PIL import Image
+
+        from instruments.micasense.adapter import _all_images, release_archive_handle
+
+        real = tmp_path / "IMG_0000.zip"
+        with zipfile.ZipFile(real, "w") as bundle:
+            for band in range(1, 7):
+                buffer = io.BytesIO()
+                Image.new("L", (8, 8), color=band).save(buffer, format="TIFF")
+                bundle.writestr(f"IMG_0000_{band}.tif", buffer.getvalue())
+        # What macOS leaves behind: not a ZIP at all.
+        (tmp_path / "._IMG_0000.zip").write_bytes(b"\x00\x05\x16\x07" + b"\x00" * 64)
+
+        images = _all_images((tmp_path,))
+        release_archive_handle()
+
+        assert len(images) == 6
+        assert not [
+            item for item in images
+            if getattr(item, "member", "") == "__CORRUPT_ARCHIVE__.tif"
+        ]
+
+    def test_a_genuinely_broken_archive_is_still_reported(self, tmp_path):
+        """Skipping stubs must not hide a real unreadable delivery."""
+        from instruments.micasense.adapter import _all_images, release_archive_handle
+
+        (tmp_path / "IMG_0001.zip").write_bytes(b"not a zip at all")
+        images = _all_images((tmp_path,))
+        release_archive_handle()
+
+        assert [
+            item for item in images
+            if getattr(item, "member", "") == "__CORRUPT_ARCHIVE__.tif"
+        ]
+
+    def test_a_stub_tiff_is_skipped_too(self, tmp_path):
+        from instruments.micasense.adapter import _image_files
+
+        (tmp_path / "IMG_0000_1.tif").write_bytes(b"II*\x00")
+        (tmp_path / "._IMG_0000_1.tif").write_bytes(b"\x00\x05\x16\x07")
+        found = _image_files(tuple(tmp_path.iterdir()))
+        assert [p.name for p in found] == ["IMG_0000_1.tif"]

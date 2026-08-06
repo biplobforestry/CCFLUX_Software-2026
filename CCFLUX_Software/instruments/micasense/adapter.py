@@ -661,10 +661,23 @@ def _image_files(paths: Sequence[Path]) -> tuple[Path, ...]:
                 for path in paths
                 if Path(path).is_file()
                 and Path(path).suffix.casefold() in IMAGE_SUFFIXES
+                and not _is_apple_double(path)
             ),
             key=lambda path: str(path).casefold(),
         )
     )
+
+
+def _is_apple_double(path: Any) -> bool:
+    """A macOS resource-fork stub, not a delivery.
+
+    Copying a MicaSense folder through a non-HFS volume leaves a 4 KB
+    "._IMG_0000.zip" beside each real archive. It is an AppleDouble file, not a
+    ZIP, so opening it raised BadZipFile and the capture was reported as a
+    corrupt archive - two false "corrupt or unreadable" warnings on
+    Flight_CCT0803, on a delivery where nothing was wrong.
+    """
+    return Path(getattr(path, "name", str(path))).name.startswith("._")
 
 
 def _all_images(paths: Sequence[Path]) -> tuple[Any, ...]:
@@ -676,6 +689,7 @@ def _all_images(paths: Sequence[Path]) -> tuple[Any, ...]:
             archives.extend(path.rglob("*.zip"))
         elif path.is_file() and path.suffix.casefold() == ".zip":
             archives.append(path)
+    archives = [archive for archive in archives if not _is_apple_double(archive)]
     for archive in sorted(dict.fromkeys(archives), key=lambda item: str(item).casefold()):
         try:
             with zipfile.ZipFile(archive) as bundle:
