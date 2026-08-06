@@ -626,6 +626,33 @@ STRAIGHT_LEG_SETTINGS = (
 )
 
 
+def _json_safe_capture(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One MicaSense capture row as JSON the workspace can plot.
+
+    Trigger times become ISO strings and band lists become plain lists; the
+    numbers are left exactly as the camera recorded them.
+    """
+    safe: dict[str, Any] = {}
+    for key, value in dict(row).items():
+        if isinstance(value, datetime):
+            safe[key] = _iso(value)
+        elif isinstance(value, (set, frozenset)):
+            safe[key] = sorted(value)
+        elif isinstance(value, (list, tuple)):
+            safe[key] = list(value)
+        elif value is None or isinstance(value, (bool, int, float, str)):
+            safe[key] = value
+        else:
+            # EXIF exposure time and F-number arrive as PIL IFDRational, which
+            # json cannot encode. A float is what the plots want anyway; a value
+            # that is not a number at all is kept as text rather than dropped.
+            try:
+                safe[key] = float(value)
+            except (TypeError, ValueError):
+                safe[key] = str(value)
+    return safe
+
+
 class DashboardScanBackend:
     """Own one cancellable scan while exposing thread-safe dashboard snapshots."""
 
@@ -6767,7 +6794,9 @@ class DashboardScanBackend:
         adapter.create_plots(result, adapter.output_root)
         # The workspace reads this, so the metadata check has somewhere to be
         # seen instead of only landing in files beside the project.
-        quicklook = self._micasense_browser_payload(project, result, outputs)
+        quicklook = self._micasense_browser_payload(
+            project, result, outputs, captures=adapter.capture_rows()
+        )
         with self._lock:
             state = self._instruments["micasense"]
             state.output_files = [
@@ -6777,7 +6806,11 @@ class DashboardScanBackend:
         return JobOutcome(warning=result.warnings[0] if result.warnings else None)
 
     def _micasense_browser_payload(
-        self, project: FlightProject, result: Any, outputs: Sequence[Any]
+        self,
+        project: FlightProject,
+        result: Any,
+        outputs: Sequence[Any],
+        captures: Sequence[Mapping[str, Any]] = (),
     ) -> dict[str, Any]:
         """Write and return what the MicaSense workspace shows."""
         from instruments.hatchbox_payload import write_json_atomic
@@ -6798,7 +6831,10 @@ class DashboardScanBackend:
             "warnings": list(result.warnings or ()),
             "thumbnails": thumbnails,
             "exports": [str(value.path) for value in outputs],
-            "captures": [dict(row) for row in getattr(result, "captures", ()) or ()],
+            # From the adapter, not the result: InstrumentResult has no
+            # captures attribute, so getattr always returned () here and
+            # every plot on the page drew nothing.
+            "captures": [_json_safe_capture(row) for row in captures],
         }
         target = project.flight_output_root / "quicklooks" / "micasense_browser.json"
         target.parent.mkdir(parents=True, exist_ok=True)

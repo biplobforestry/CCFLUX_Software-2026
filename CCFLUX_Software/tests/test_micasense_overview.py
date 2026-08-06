@@ -304,3 +304,74 @@ class TestThePageShowsThePlots:
     def test_camera_identity_is_shown(self):
         assert 'id="traceability"' in self.html
         assert "renderTraceability" in self.script
+
+
+class TestTheCaptureRowsReachThePage:
+    """The plots read data.captures, which was always empty.
+
+    _micasense_browser_payload took the rows from getattr(result, "captures"),
+    but InstrumentResult carries only the summary counts - the adapter keeps the
+    rows on itself. So the key was always [] and every panel on the page drew
+    nothing, however good the data was.
+    """
+
+    backend_source = (
+        Path(__file__).resolve().parents[1] / "app" / "scan_backend.py"
+    ).read_text(encoding="utf-8")
+
+    def test_the_rows_come_from_the_adapter_not_the_result(self):
+        assert 'getattr(result, "captures"' not in self.backend_source
+        assert "captures=adapter.capture_rows()" in self.backend_source
+
+    def test_the_adapter_exposes_them(self):
+        from instruments.micasense.adapter import MicaSenseLevel1Adapter
+
+        assert hasattr(MicaSenseLevel1Adapter, "capture_rows")
+
+    def test_a_trigger_time_becomes_an_iso_string(self):
+        from app.scan_backend import _json_safe_capture
+
+        row = {"trigger_time": datetime(2026, 8, 3, 11, 30, tzinfo=timezone.utc)}
+        assert _json_safe_capture(row)["trigger_time"].startswith("2026-08-03T11:30")
+
+    def test_band_sets_become_lists(self):
+        from app.scan_backend import _json_safe_capture
+
+        assert _json_safe_capture({"found_bands": {3, 1, 2}})["found_bands"] == [1, 2, 3]
+
+    def test_an_exif_rational_becomes_a_float(self):
+        """PIL hands exposure time back as IFDRational, which json refuses."""
+        from PIL.TiffImagePlugin import IFDRational
+
+        from app.scan_backend import _json_safe_capture
+
+        value = _json_safe_capture({"exposure_time": IFDRational(1, 723)})
+        assert isinstance(value["exposure_time"], float)
+        assert value["exposure_time"] == pytest.approx(1 / 723)
+
+    def test_the_whole_row_survives_json(self):
+        import json
+
+        from PIL.TiffImagePlugin import IFDRational
+
+        from app.scan_backend import _json_safe_capture
+
+        row = {
+            "trigger_time": datetime(2026, 8, 3, 11, 30, tzinfo=timezone.utc),
+            "found_bands": {1, 2, 3, 4, 5, 6},
+            "exposure_time": IFDRational(1, 723),
+            "irradiance": 9.685,
+            "complete": True,
+            "capture_id": "mxPsuh847qgEuwZespyY",
+            "missing_bands": [],
+        }
+        json.dumps(_json_safe_capture(row))
+
+    def test_an_unencodable_value_is_kept_as_text_not_dropped(self):
+        from app.scan_backend import _json_safe_capture
+
+        class Odd:
+            def __str__(self):
+                return "odd"
+
+        assert _json_safe_capture({"x": Odd()})["x"] == "odd"

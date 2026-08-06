@@ -297,6 +297,29 @@ def _apply_record_clock_offset(record_clock,offset_seconds):
     shift=timedelta(seconds=float(offset_seconds))
     return [pd.NaT if pd.isna(t) else t-shift for t in record_clock]
 
+def _backfill_missing_times(times):
+    """CCFLUX: carry the previous good time over a missing one.
+
+    A record clock with an unreadable block leaves NaT, and solar() calls
+    timetuple() on whatever it is given, so a NaT reaches it as
+    "NaTType does not support timetuple" and kills the whole channel. The
+    GPS-derived path already backfills from the neighbour; the declared-clock
+    path returned early and did not, so declaring the clock turned a skipped
+    block into a crash.
+    """
+    result=list(times)
+    for i in range(len(result)):
+        if pd.isna(result[i]):
+            result[i]=result[i-1] if i>0 and not pd.isna(result[i-1]) else pd.NaT
+    # A leading run of NaT has no earlier value to inherit; take the first good
+    # one that follows so the block is placed in the flight rather than in 1970.
+    first_good=next((t for t in result if not pd.isna(t)),None)
+    if first_good is not None:
+        for i in range(len(result)):
+            if pd.isna(result[i]): result[i]=first_good
+            else: break
+    return result
+
 def get_gps_utc(raw):
     clock_dates=pd.to_numeric(pd.Series(raw.date),errors='coerce').to_numpy(float)
     invalid=(clock_dates==181818)|(clock_dates==4516585)|(clock_dates==191919)|(clock_dates<180000)|(~np.isfinite(clock_dates))
@@ -324,7 +347,17 @@ def get_gps_utc(raw):
     # after 177 spectra. Where there is a fix, use it and measure how far ahead
     # the record clock runs; elsewhere, correct the record clock by that amount.
     offset,fixes,spread=measure_record_clock_offset(utc,record_clock,raw)
-    if _gps_is_unusable(utc,record_clock):
+    # CCFLUX: a receiver that reported no position never locked, so its clock
+    # cannot calibrate anything either, and the declaration is the only source.
+    # _gps_is_unusable alone was not enough: it compares timestamps against the
+    # record clock with a one-day threshold, and Flight_CCT0803's rollover rows
+    # sit two hours away - the CEST offset being resolved - so they counted as
+    # agreeing, its unanimity test failed, and the whole file was treated as
+    # having a usable GPS. The 2080-01-05 power-on dates then survived into the
+    # time filter, which discarded every row of the flight. fixes comes from
+    # real_gps_fix_mask, which already requires a reported position, so the two
+    # judgements now agree.
+    if _gps_is_unusable(utc,record_clock) or fixes==0:
         # FLOX and FULL write their record clock in campaign local time, and a
         # receiver that never locks cannot say how far that is from UTC. The
         # operator declares it once for the flight, and that declaration is
@@ -338,17 +371,17 @@ def get_gps_utc(raw):
             else:
                 print('warning=AirFloX GPS never acquired a fix. The record clock is read as UTC, '
                       'as declared for this flight.')
-            return _apply_record_clock_offset(record_clock,declared)
+            return _backfill_missing_times(_apply_record_clock_offset(record_clock,declared))
         hint=getattr(raw,'record_clock_offset_seconds',None)
         if hint is None: hint=RECORD_CLOCK_OFFSET_HINT.get('seconds')
         if hint is not None:
             print(f'warning=AirFloX GPS never acquired a fix; the record clock is used for UTC, '
                   f'corrected by {hint:.1f} s measured from the other AirFloX channel of this flight.')
-            return _apply_record_clock_offset(record_clock,hint)
+            return _backfill_missing_times(_apply_record_clock_offset(record_clock,hint))
         print('warning=AirFloX GPS clock never acquired a fix, and no channel of this flight has one; '
               'the instrument record clock is used for UTC uncorrected. It is set to campaign local '
               'time, so timestamps may be offset by the local UTC difference.')
-        return record_clock
+        return _backfill_missing_times(record_clock)
     if offset is not None:
         RECORD_CLOCK_OFFSET_HINT['seconds']=offset
     diffs=[]

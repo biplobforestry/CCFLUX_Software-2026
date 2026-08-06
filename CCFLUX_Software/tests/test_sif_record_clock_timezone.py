@@ -374,3 +374,81 @@ class TestPromptIsNotLatchedBeforeTheAnswer:
     def test_the_card_is_refreshed_once_the_answer_is_stored(self):
         post = self.script.index("'/api/sif/timezone', {")
         assert "await pollScan();" in self.script[post:post + 600]
+
+
+class TestAChannelWithNoPositionUsesTheDeclaration:
+    """Flight_CCT0803 failed outright with "time filter removed all rows".
+
+    Neither AirFloX channel ever reported a position, but a few rows carried a
+    GPS time only two hours from the record clock - the CEST offset being
+    resolved. _gps_is_unusable compares timestamps with a one-day threshold, so
+    those rows counted as agreeing, its unanimity test failed, and the file was
+    judged to have a usable GPS. The 2080-01-05 power-on dates then reached the
+    time filter, which discarded every row of the flight. On a wider interval the
+    same defect showed as FLUO keeping 10 rows where 366 were in range.
+    """
+
+    def test_no_positional_fix_means_the_gps_is_not_trusted(self):
+        source = Path(afx.__file__).read_text(encoding="utf-8")
+        block = source[source.index("offset,fixes,spread=measure_record_clock_offset"):]
+        assert "_gps_is_unusable(utc,record_clock) or fixes==0" in block[:900]
+
+    def test_the_declaration_still_wins_over_a_measured_hint(self):
+        source = Path(afx.__file__).read_text(encoding="utf-8")
+        block = source[source.index("if _gps_is_unusable(utc,record_clock) or fixes==0"):]
+        declared = block.index("RECORD_CLOCK_TIMEZONE.get('offset_seconds')")
+        hint = block.index("RECORD_CLOCK_OFFSET_HINT.get('seconds')")
+        assert declared < hint
+
+    def test_a_channel_that_did_lock_is_left_alone(self):
+        """fixes>0 keeps the GPS path, so a good flight is unaffected."""
+        source = Path(afx.__file__).read_text(encoding="utf-8")
+        assert "fixes==0" in source
+        assert "RECORD_CLOCK_OFFSET_HINT['seconds']=offset" in source
+
+
+class TestASkippedBlockDoesNotKillTheChannel:
+    """solar() calls timetuple() on whatever it is given.
+
+    A record clock with an unreadable block leaves NaT. The GPS-derived path
+    already backfilled from the neighbour; the declared-clock path returned
+    early and did not, so declaring the clock turned a skipped block into
+    "NaTType does not support timetuple" and lost the whole channel.
+    """
+
+    def test_a_missing_time_inherits_the_previous_one(self):
+        import pandas as pd
+
+        values = [
+            datetime(2026, 8, 3, 11, 30),
+            pd.NaT,
+            datetime(2026, 8, 3, 11, 32),
+        ]
+        filled = afx._backfill_missing_times(values)
+        assert filled[1] == datetime(2026, 8, 3, 11, 30)
+
+    def test_a_leading_gap_takes_the_first_good_time(self):
+        """There is no earlier value to inherit, and 1970 is not the flight."""
+        import pandas as pd
+
+        filled = afx._backfill_missing_times(
+            [pd.NaT, pd.NaT, datetime(2026, 8, 3, 11, 30)]
+        )
+        assert filled[0] == datetime(2026, 8, 3, 11, 30)
+        assert filled[1] == datetime(2026, 8, 3, 11, 30)
+
+    def test_all_missing_stays_missing_rather_than_inventing_a_time(self):
+        import pandas as pd
+
+        filled = afx._backfill_missing_times([pd.NaT, pd.NaT])
+        assert all(pd.isna(value) for value in filled)
+
+    def test_good_times_are_untouched(self):
+        values = [datetime(2026, 8, 3, 11, 30), datetime(2026, 8, 3, 11, 31)]
+        assert afx._backfill_missing_times(values) == values
+
+    def test_every_declared_clock_return_backfills(self):
+        source = Path(afx.__file__).read_text(encoding="utf-8")
+        block = source[source.index("if _gps_is_unusable(utc,record_clock) or fixes==0"):]
+        head = block[:block.index("if offset is not None:")]
+        assert head.count("_backfill_missing_times(") == 3

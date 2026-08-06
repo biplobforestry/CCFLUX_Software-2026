@@ -235,6 +235,17 @@ def test_bundled_science_differs_from_the_original_only_where_recorded():
         "probe_record_clock_offset",    # new helper
         "run_flight",                   # probes the channels before processing
         "_gps_is_unusable",             # trailing lines attributed by the splitter
+        # Flight_CCT0803: neither AirFloX channel ever reported a position, yet a
+        # few rows carried a GPS time only two hours from the record clock - the
+        # CEST offset being resolved. _gps_is_unusable compares timestamps with a
+        # one-day threshold, so those rows counted as agreeing, its unanimity test
+        # failed, and the file was treated as having a usable GPS. The 2080-01-05
+        # power-on dates then reached the time filter, which discarded every row of
+        # the flight. get_gps_utc now also treats a channel with no positional fix
+        # as unusable, so the operator's declaration governs, and backfills the
+        # times a skipped block leaves empty - solar() calls timetuple() on what it
+        # is given, so a NaT killed the channel outright.
+        "_backfill_missing_times",      # new helper
     }
 
     mine = _top_level_definitions(BUNDLED / "airflox_sif_automation.py")

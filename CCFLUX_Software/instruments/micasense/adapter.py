@@ -113,6 +113,14 @@ class MicaSenseLevel1Adapter(InstrumentBase):
         self._records: list[dict[str, Any]] = []
         self._captures: list[dict[str, Any]] = []
 
+    def capture_rows(self) -> tuple[Mapping[str, Any], ...]:
+        """One row per camera trigger, with the conditions it was taken in.
+
+        What the workspace plots. Exposed because InstrumentResult carries only
+        the summary counts, and the page needs the per-capture series.
+        """
+        return tuple(self._captures)
+
     def detect(self, scan_index: ScanIndex) -> Sequence[InputCandidate]:
         files = tuple(
             entry.path
