@@ -529,7 +529,8 @@ class TestAFailedRetrievalIsReportedNotFatal:
         assert "307 of 311" in messages[0]
         assert "-697.228" in messages[0]
         assert "did not work" in messages[0]
-        assert "left out of the evaluation" in messages[0]
+        assert "still plotted" in messages[0]
+        assert "left out of\n        the statistics" not in messages[0]
 
     def test_nothing_is_warned_about_when_every_retrieval_worked(self):
         from instruments.sif.adapter import _sif_retrieval_warnings
@@ -562,11 +563,48 @@ class TestAFailedRetrievalIsReportedNotFatal:
             assert not statements, (name, statements)
 
     def test_the_exported_values_are_left_alone(self):
-        """The CSV is the scientific record; only the plots skip a bad row."""
+        """The CSV is the scientific record and keeps every computed value."""
         adapter = (
             Path(__file__).resolve().parents[1] / "instruments" / "sif" / "adapter.py"
         ).read_text(encoding="utf-8")
-        assert "exported CSV keeps every value" in adapter
+        assert "exported values themselves, are unchanged" in adapter
+
+    def test_the_period_the_instrument_covered_stays_visible(self):
+        """Blanking them showed four points where FLOX recorded 2.5 hours."""
+        adapter = (
+            Path(__file__).resolve().parents[1] / "instruments" / "sif" / "adapter.py"
+        ).read_text(encoding="utf-8")
+        assert "Every retrieval is plotted, including the ones below zero" in adapter
+        assert 'series[f"{column} usable"] = modes_valid' in adapter
+
+    def test_an_old_calibration_is_named_as_the_first_thing_to_check(self):
+        from instruments.sif.adapter import _calibration_age_warnings
+        from datetime import datetime
+
+        messages = _calibration_age_warnings(
+            {"FLUO": "CAL_FROG_AIRFLOX_FLUO_05FZJ_2023-05-31.csv"},
+            datetime(2026, 8, 3, 11, 30),
+        )
+        assert len(messages) == 1
+        assert "1160 days" in messages[0]
+        assert "3.2 years" in messages[0]
+
+    def test_a_current_calibration_is_not_complained_about(self):
+        from instruments.sif.adapter import _calibration_age_warnings
+        from datetime import datetime
+
+        assert _calibration_age_warnings(
+            {"FLUO": "CAL_FROG_AIRFLOX_FLUO_05FZJ_2026-05-31.csv"},
+            datetime(2026, 8, 3, 11, 30),
+        ) == []
+
+    def test_a_calibration_with_no_date_is_not_guessed_at(self):
+        from instruments.sif.adapter import _calibration_age_warnings
+        from datetime import datetime
+
+        assert _calibration_age_warnings(
+            {"FLUO": "CAL_FROG.csv"}, datetime(2026, 8, 3)
+        ) == []
 
     def test_the_page_says_how_many_were_left_out(self):
         script = (ASSETS / "sif.js").read_text(encoding="utf-8")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import re
 import threading
 import time
 import warnings
@@ -291,6 +292,13 @@ class SifAdapter(InstrumentBase):
                     processing_step="sif-retrieval-quality",
                 )
         all_times = pd.concat([pd.to_datetime(p["metadata"]["datetime [UTC]"], utc=True) for p in self._products.values()]).dropna()
+        quicklook_warnings += _calibration_age_warnings(
+            {
+                mode: str(self.bridge.essentials(mode, essentials_overrides)[0])
+                for mode in sorted(self._products)
+            },
+            all_times.min().to_pydatetime() if len(all_times) else None,
+        )
         self._emit(100, "SIF quicklook complete")
         if self.logger: self.logger.log(LogLevel.SUCCESS, "sif-adapter", "SIF quicklook completed", instrument="sif")
         return InstrumentResult("sif", "Solar-Induced Fluorescence / FLOX", "HATCHBOX", DetectionStatus.READY, ProcessingStatus.COMPLETE, _sources(retained_paths), len(retained_paths), all_times.min().to_pydatetime(), all_times.max().to_pydatetime(), all_times.min().to_pydatetime(), all_times.max().to_pydatetime(), progress=100.0, metadata={"processed_modes": sorted(self._products), "rows_by_mode": {mode: len(p["metadata"]) for mode, p in self._products.items()}, "raw_file_filter_kb": raw_min_kb, "retained_raw_files": [str(path) for path in retained_paths], "skipped_raw_files": [{"path": str(path), "size_kb": round(path.stat().st_size / 1024, 1)} for path in skipped_paths], "scientific_source": str(self.bridge.source_path), "essentials_directory": str(self.bridge.essentials("FULL", essentials_overrides)[0].parent), "calibration_files": {m: str(self.bridge.essentials(m, essentials_overrides)[0]) for m in sorted(self._products)}, "index_file": str(self.bridge.essentials("FULL", essentials_overrides)[1]), "position_mode": position_mode, "telemetry_log": str(telemetry_log) if telemetry_log else None, "sif_retrieval_audit": _json_safe(retrieval_audits), "usable_sif_rows_by_mode": {mode: int(np.count_nonzero(p.get("sif_retrieval_valid", ()))) for mode, p in self._products.items()}, "options": _json_safe(dict(options))}, warnings=quicklook_warnings, elapsed_time=timedelta(seconds=time.monotonic() - started))
@@ -322,19 +330,19 @@ class SifAdapter(InstrumentBase):
                 )
                 for column in numeric_columns
             }
-            # A failed iFLD retrieval is blanked here and nowhere else: the plots
-            # then draw the rows that worked instead of a trace dragged to
-            # -697 mW m-2 nm-1 sr-1, while the exported CSV keeps every value the
-            # reference computed. Only the two SIF columns are affected - the
-            # radiance, reflectance and vegetation indices in those same rows are
-            # computed independently and stay.
+            # Every retrieval is plotted, including the ones below zero. Blanking
+            # them showed four points where FLOX recorded two and a half hours,
+            # which reads as an instrument that barely measured rather than one
+            # whose retrieval needs recalibrating. The page marks them instead,
+            # and they stay out of the statistics.
             for column in SIF_RETRIEVAL_COLUMNS:
                 if column not in series:
                     continue
-                series[column] = [
-                    None if (value is not None and value <= 0) else value
+                modes_valid = [
+                    None if value is None else bool(value > 0)
                     for value in series[column]
                 ]
+                series[f"{column} usable"] = modes_valid
             spectra = product["spectra"]
             modes[mode] = {
                 "row_count": int(len(metadata)),
@@ -511,10 +519,54 @@ def _sif_retrieval_warnings(audits: Mapping[str, Mapping[str, object]]) -> list[
                 f"{mode} {short} is zero or negative on "
                 f"{entry['non_positive']} of {rows} row(s){floor}. Fluorescence "
                 "is emitted, so those retrievals did not work - most often the "
-                "incoming and reflected radiance pair is wrong. They are left "
-                "out of the evaluation and the plots; every other quantity in "
-                "those rows, and the exported values themselves, are unchanged."
+                "incoming and reflected radiance pair is wrong, and the "
+                "calibration age reported below is the first thing to check. "
+                "They are still plotted, so the period the instrument actually "
+                "covered stays visible, and marked as not usable; they are kept "
+                "out of the statistics, and every other quantity in those rows, "
+                "and the exported values themselves, are unchanged."
             )
+    return messages
+
+
+# iFLD subtracts two nearly equal products, so the incoming and reflected
+# channels have to agree to about a percent. On Flight_CCT0803 they disagree by
+# about nine: reflectance outside the O2-A band is 0.2021, which makes pure
+# reflection 7.571 mW m-2 nm-1 sr-1 inside it against 6.869 measured, so the
+# retrieval reports -0.703 where fluorescence should be positive. The counts are
+# healthy - 92% and 82% above dark - and the two channels sit at the same
+# wavelength to 0.000 nm, so it is neither noise nor misalignment. What is left
+# is the radiometric scale, and the calibration in use was taken 3.2 years
+# before the flight.
+CALIBRATION_AGE_WARNING_DAYS = 550
+
+
+def _calibration_age_warnings(
+    calibration_files: Mapping[str, str], flight_time: datetime | None
+) -> list[str]:
+    """Say when the calibration is far older than the flight it is applied to."""
+    if flight_time is None:
+        return []
+    messages: list[str] = []
+    for mode in sorted(calibration_files):
+        name = Path(str(calibration_files[mode])).name
+        match = re.search(r"(\d{4})-(\d{2})-(\d{2})", name)
+        if not match:
+            continue
+        try:
+            taken = datetime(*(int(part) for part in match.groups()))
+        except ValueError:
+            continue
+        days = (flight_time.replace(tzinfo=None) - taken).days
+        if days < CALIBRATION_AGE_WARNING_DAYS:
+            continue
+        messages.append(
+            f"The {mode} calibration {name} was taken {days} days "
+            f"({days / 365.25:.1f} years) before this flight. iFLD subtracts two "
+            "nearly equal products, so the incoming and reflected channels have "
+            "to agree to about a percent; a calibration this old is the first "
+            "thing to check when SIF comes out negative."
+        )
     return messages
 
 
