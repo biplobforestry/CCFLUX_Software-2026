@@ -610,3 +610,121 @@ class TestAFailedRetrievalIsReportedNotFatal:
         script = (ASSETS / "sif.js").read_text(encoding="utf-8")
         assert "non-positive retrieval(s) left out" in script
         assert "sif_retrieval_audit" in script
+
+
+class TestTheIntegrationCeilingIsReported:
+    """A starved reflected channel predicts unusable SIF before anyone plots it.
+
+    On Flight_CCT0803 the FLUO reflected channel sat at 4000 ms on 94.6% of
+    spectra, and on the 4 August flight at 100%. SIF came out negative on both -
+    307 of 311 rows and 11 of 11. A channel asking for its maximum integration
+    time wanted more light than the optics gave it and is running where the
+    detector is least linear.
+    """
+
+    def test_the_default_threshold_is_half_the_spectra(self):
+        from instruments.sif.adapter import VEG_CEILING_WARNING_FRACTION
+
+        assert VEG_CEILING_WARNING_FRACTION == 0.5
+
+    def test_a_zero_threshold_switches_the_check_off(self):
+        """A campaign that has accepted the situation should not be nagged."""
+        from instruments.sif.adapter import _veg_ceiling_warnings
+
+        assert _veg_ceiling_warnings(None, {"FLUO": [Path("x.CSV")]}, 0.0) == []
+
+    def test_an_unreadable_file_is_skipped_not_raised(self):
+        from instruments.sif.adapter import _veg_ceiling_warnings
+
+        class Broken:
+            def essentials(self, *a, **k):
+                raise RuntimeError("no calibration")
+
+        assert _veg_ceiling_warnings(
+            Broken(), {"FLUO": [Path("missing.CSV")]}, 0.5
+        ) == []
+
+    def test_no_files_means_nothing_to_say(self):
+        from instruments.sif.adapter import _veg_ceiling_warnings
+
+        assert _veg_ceiling_warnings(None, {"FLUO": []}, 0.5) == []
+
+    def test_the_message_names_the_ceiling_and_the_share(self):
+        """Built from a stub so the assertion is about the wording, not a file."""
+        from types import SimpleNamespace
+
+        from instruments.sif.adapter import _veg_ceiling_warnings
+
+        class Bridge:
+            module = SimpleNamespace(
+                read_full_calibration=lambda path: {"wl": [0] * 4},
+                read_drox_full=lambda *a, **k: SimpleNamespace(
+                    it_l_ms=[4000.0, 4000.0, 4000.0, 100.0]
+                ),
+            )
+
+            def essentials(self, mode, overrides=None):
+                return Path("CAL.csv"), Path("IDX.txt")
+
+        messages = _veg_ceiling_warnings(Bridge(), {"FLUO": [Path("a.CSV")]}, 0.5)
+        assert len(messages) == 1
+        assert "4000 ms" in messages[0]
+        assert "75.0% of spectra" in messages[0]
+        assert "least linear" in messages[0]
+        assert "NL coefficient block" in messages[0]
+
+
+class TestTheWarningThresholdsAreSettings:
+    """Both are operator-editable, so a campaign can retune without a code change."""
+
+    def test_they_have_defaults(self):
+        from app.scan_backend import DEFAULT_SIF_OPTIONS
+
+        assert DEFAULT_SIF_OPTIONS["calibration_age_warning_days"] == 550
+        assert DEFAULT_SIF_OPTIONS["veg_ceiling_warning_fraction"] == 0.5
+
+    def test_they_can_be_changed(self, tmp_path):
+        backend = DashboardScanBackend(tmp_path)
+        options = backend.update_sif_options({
+            "calibration_age_warning_days": 400,
+            "veg_ceiling_warning_fraction": 0.8,
+        })
+        assert options["calibration_age_warning_days"] == 400
+        assert options["veg_ceiling_warning_fraction"] == 0.8
+
+    @pytest.mark.parametrize("payload,expected", [
+        ({"calibration_age_warning_days": -1}, "between 0 and 20,000 days"),
+        ({"calibration_age_warning_days": 99999}, "between 0 and 20,000 days"),
+        ({"veg_ceiling_warning_fraction": 2}, "between 0 and 1"),
+        ({"veg_ceiling_warning_fraction": -0.5}, "between 0 and 1"),
+    ])
+    def test_an_impossible_value_is_refused(self, tmp_path, payload, expected):
+        backend = DashboardScanBackend(tmp_path)
+        with pytest.raises(ValueError, match=expected):
+            backend.update_sif_options(payload)
+
+    def test_zero_is_allowed_because_it_means_off(self, tmp_path):
+        backend = DashboardScanBackend(tmp_path)
+        options = backend.update_sif_options({
+            "calibration_age_warning_days": 0, "veg_ceiling_warning_fraction": 0,
+        })
+        assert options["calibration_age_warning_days"] == 0
+        assert options["veg_ceiling_warning_fraction"] == 0
+
+    def test_an_older_calibration_below_the_threshold_is_quiet(self):
+        from datetime import datetime
+
+        from instruments.sif.adapter import _calibration_age_warnings
+
+        args = ({"FLUO": "CAL_2023-05-31.csv"}, datetime(2026, 8, 3))
+        assert _calibration_age_warnings(*args, 20000) == []
+        assert _calibration_age_warnings(*args, 0) == []
+        assert len(_calibration_age_warnings(*args, 550)) == 1
+
+    def test_the_dialog_offers_both(self):
+        script = (ASSETS / "dashboard.js").read_text(encoding="utf-8")
+        assert 'id="sifCalAgeDays"' in script
+        assert 'id="sifVegCeiling"' in script
+        assert "calibration_age_warning_days: Number(value('sifCalAgeDays'))" in script
+        assert "veg_ceiling_warning_fraction: Number(value('sifVegCeiling'))" in script
+        assert "Set either to 0 to switch that warning off" in script

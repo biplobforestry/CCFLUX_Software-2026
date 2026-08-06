@@ -199,6 +199,12 @@ DEFAULT_SIF_OPTIONS: dict[str, object] = {
     "apply_nonlinearity_correction": False,
     "spectral_shift_correction": False,
     "drop_unmatched_telemetry": True,
+    # Diagnostic thresholds, exposed so a campaign can retune them without a
+    # code change. A calibration older than this is reported with its age; a
+    # reflected channel at its integration ceiling on more than this fraction of
+    # spectra is reported as unreliable for SIF. Neither ever blocks a run.
+    "calibration_age_warning_days": 550,
+    "veg_ceiling_warning_fraction": 0.5,
     "drop_invalid_spectral_rows": False,
     "altitude_filter": False,
     "max_position_gap_seconds": 0.2,
@@ -3586,6 +3592,29 @@ class DashboardScanBackend:
             raise ValueError(
                 "SIF raw-file minimum size must be between 0 and 1,000,000 KB"
             )
+        # Diagnostic thresholds. Zero switches a check off, which is a legitimate
+        # choice for a campaign that has accepted an old calibration and does not
+        # want to be told about it on every flight.
+        age_days = int(
+            request.get(
+                "calibration_age_warning_days",
+                self._sif_options["calibration_age_warning_days"],
+            )
+        )
+        if not 0 <= age_days <= 20_000:
+            raise ValueError(
+                "Calibration age warning must be between 0 and 20,000 days"
+            )
+        ceiling_fraction = float(
+            request.get(
+                "veg_ceiling_warning_fraction",
+                self._sif_options["veg_ceiling_warning_fraction"],
+            )
+        )
+        if not 0 <= ceiling_fraction <= 1:
+            raise ValueError(
+                "Integration-ceiling warning fraction must be between 0 and 1"
+            )
         options = {
             "modes": modes,
             "position_mode": position_mode,
@@ -3613,6 +3642,8 @@ class DashboardScanBackend:
             "static_lat": _optional_float(request.get("static_lat")),
             "static_lon": _optional_float(request.get("static_lon")),
             "static_alt": _optional_float(request.get("static_alt")),
+            "calibration_age_warning_days": age_days,
+            "veg_ceiling_warning_fraction": ceiling_fraction,
             **self._validated_sif_essentials(request),
         }
         if position_mode == "tower":

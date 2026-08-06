@@ -298,6 +298,15 @@ class SifAdapter(InstrumentBase):
                 for mode in sorted(self._products)
             },
             all_times.min().to_pydatetime() if len(all_times) else None,
+            int(options.get("calibration_age_warning_days",
+                            CALIBRATION_AGE_WARNING_DAYS)),
+        )
+        quicklook_warnings += _veg_ceiling_warnings(
+            self.bridge,
+            {mode: selected_files.get(mode, ()) for mode in sorted(self._products)},
+            float(options.get("veg_ceiling_warning_fraction",
+                              VEG_CEILING_WARNING_FRACTION)),
+            essentials_overrides,
         )
         self._emit(100, "SIF quicklook complete")
         if self.logger: self.logger.log(LogLevel.SUCCESS, "sif-adapter", "SIF quicklook completed", instrument="sif")
@@ -541,11 +550,82 @@ def _sif_retrieval_warnings(audits: Mapping[str, Mapping[str, object]]) -> list[
 CALIBRATION_AGE_WARNING_DAYS = 550
 
 
-def _calibration_age_warnings(
-    calibration_files: Mapping[str, str], flight_time: datetime | None
+# A reflected channel that asks for its maximum integration time on most
+# spectra is starved: it wanted more light than the optics could give it, and it
+# is running where linearity is worst. On Flight_CCT0803 it sat at 4000 ms on
+# 90.7% of FLUO spectra and on 100% of the 4 August flight, and SIF came out
+# negative on both - 1% and 0% positive. It predicts an unusable retrieval before
+# anyone plots one, which is why it is reported.
+VEG_CEILING_WARNING_FRACTION = 0.5
+
+
+def _veg_ceiling_warnings(
+    bridge: Any,
+    selected_files: Mapping[str, Sequence[Path]],
+    fraction_threshold: float,
+    essentials_overrides: Mapping[str, Any] | None = None,
 ) -> list[str]:
-    """Say when the calibration is far older than the flight it is applied to."""
-    if flight_time is None:
+    """Say when the reflected channel ran at its integration ceiling.
+
+    Reads only the integration-time columns of the retained raw files, which are
+    a few hundred KB each. Any file that cannot be read is skipped rather than
+    raised: this is a diagnostic and must never cost a flight.
+    """
+    if fraction_threshold <= 0:
+        return []
+    messages: list[str] = []
+    for mode in sorted(selected_files):
+        paths = [Path(value) for value in selected_files[mode] or ()]
+        if not paths:
+            continue
+        at_ceiling = total = 0
+        ceiling = 0.0
+        for path in paths:
+            try:
+                calibration, _ = bridge.essentials(mode, essentials_overrides)
+                wavelengths = bridge.module.read_full_calibration(calibration)["wl"]
+                raw = bridge.module.read_drox_full(
+                    path, len(wavelengths),
+                    drop_e500_zero=(mode == "FLUO"), drop_zero_gps=False,
+                )
+                values = np.asarray(raw.it_l_ms, dtype=float)
+            except Exception:
+                continue
+            values = values[np.isfinite(values)]
+            if not values.size:
+                continue
+            highest = float(values.max())
+            ceiling = max(ceiling, highest)
+            at_ceiling += int((values >= highest).sum())
+            total += int(values.size)
+        if not total:
+            continue
+        fraction = at_ceiling / total
+        if fraction < fraction_threshold:
+            continue
+        messages.append(
+            f"The {mode} reflected channel ran at its longest integration time "
+            f"({ceiling:.0f} ms) on {fraction * 100:.1f}% of spectra "
+            f"({at_ceiling} of {total}). It was asking for more light than the "
+            "optics gave it, which is where the detector is least linear, so any "
+            "SIF retrieval from these spectra is unreliable however good the rest "
+            "of the products are. Applying the nonlinearity correction needs a "
+            "calibration file carrying an NL coefficient block."
+        )
+    return messages
+
+
+def _calibration_age_warnings(
+    calibration_files: Mapping[str, str],
+    flight_time: datetime | None,
+    threshold_days: int = CALIBRATION_AGE_WARNING_DAYS,
+) -> list[str]:
+    """Say when the calibration is far older than the flight it is applied to.
+
+    A threshold of zero switches the check off, which is a legitimate choice for
+    a campaign that has accepted an old calibration deliberately.
+    """
+    if flight_time is None or threshold_days <= 0:
         return []
     messages: list[str] = []
     for mode in sorted(calibration_files):
@@ -558,7 +638,7 @@ def _calibration_age_warnings(
         except ValueError:
             continue
         days = (flight_time.replace(tzinfo=None) - taken).days
-        if days < CALIBRATION_AGE_WARNING_DAYS:
+        if days < threshold_days:
             continue
         messages.append(
             f"The {mode} calibration {name} was taken {days} days "

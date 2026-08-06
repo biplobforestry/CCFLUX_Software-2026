@@ -1527,6 +1527,12 @@
         <label class="form-row"><span>Static longitude</span><input id="sifStaticLon" type="number" step="any" value="${escapeAttribute(options.static_lon ?? '')}"></label>
         <label class="form-row"><span>Static altitude [m]</span><input id="sifStaticAlt" type="number" step="any" value="${escapeAttribute(options.static_alt ?? '')}"></label>
       </div>
+      <h4 class="section-heading">Quality warnings</h4>
+      <p class="muted">Both are reported and never stop a run. Set either to 0 to switch that warning off — reasonable for a campaign that has accepted an old calibration on purpose.</p>
+      <div class="detail-grid">
+        <label class="form-row"><span>Warn when the calibration is older than [days]</span><input id="sifCalAgeDays" type="number" min="0" max="20000" step="1" value="${escapeAttribute(options.calibration_age_warning_days ?? 550)}"><small>iFLD subtracts two nearly equal products, so the incoming and reflected channels have to agree to about a percent. 550 days lets a year-old file pass quietly.</small></label>
+        <label class="form-row"><span>Warn when the reflected channel is at its integration ceiling on more than [fraction]</span><input id="sifVegCeiling" type="number" min="0" max="1" step="0.05" value="${escapeAttribute(options.veg_ceiling_warning_fraction ?? 0.5)}"><small>A channel asking for its maximum integration time wanted more light than the optics gave it, and is running where the detector is least linear. Flight_CCT0803 sat there on 94.6% of spectra and its SIF came out negative on 307 of 311 rows.</small></label>
+      </div>
       <h4 class="section-heading">Calibration and vegetation indices</h4>
       <p class="muted">The validated CAL_FROG and Indices_ICOS files shipped with CC-FLUX are used unless you choose your own. A recalibrated instrument or a different index list goes here.</p>
       <div class="detail-grid">
@@ -1582,8 +1588,20 @@
         max_position_gap_seconds: Number(value('sifPositionGap')),
         static_lat: value('sifStaticLat') || null,
         static_lon: value('sifStaticLon') || null,
-        static_alt: value('sifStaticAlt') || null
+        static_alt: value('sifStaticAlt') || null,
+        calibration_age_warning_days: Number(value('sifCalAgeDays')),
+        veg_ceiling_warning_fraction: Number(value('sifVegCeiling'))
       };
+      for (const [id, label, lo, hi] of [
+        ['sifCalAgeDays', 'Calibration age warning', 0, 20000],
+        ['sifVegCeiling', 'Integration-ceiling warning fraction', 0, 1]
+      ]) {
+        const given = Number(value(id));
+        if (!Number.isFinite(given) || given < lo || given > hi) {
+          showToast(`${label} must be between ${lo} and ${hi}.`);
+          return;
+        }
+      }
       try {
         const response = await api('/api/sif/options', {
           method: 'POST',
