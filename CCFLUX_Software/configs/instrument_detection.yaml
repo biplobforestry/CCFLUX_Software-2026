@@ -63,7 +63,7 @@
       "pattern_set": "micasense",
       "requires_confirmation": true,
       "todo": [
-        "Discovery from ZIP deliveries is confirmed. Reading the acquisition metadata needs the TIFF files extracted from each archive, which is not implemented, so MicaSense is discovered and reported but not processed."
+        "Discovery from ZIP deliveries is confirmed. One band of each capture is read from its archive for the acquisition metadata; the remaining bands are read from the archive file list."
       ]
     },
     {
