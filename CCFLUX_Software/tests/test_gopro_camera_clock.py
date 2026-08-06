@@ -304,6 +304,16 @@ class TestCameraProductsCanBeSelected:
         backend._scan_channels["flight"]["phase"] = "complete"
         assert backend.snapshot()["camera_scan_ready"] is False
 
+    def test_starting_them_uses_the_same_rule_as_selecting_them(self):
+        """Selecting the products and then being refused at the start is worse
+        than not offering them: the operator has no way to tell what changed."""
+        source = (
+            Path(__file__).resolve().parents[1] / "app" / "scan_backend.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("Camera scanning must finish successfully")
+        block = source[max(0, start - 700):start]
+        assert "self._camera_products_ready_locked()" in block
+
     def test_a_failed_flight_scan_is_not_ready(self, tmp_path):
         from core.enums import DetectionStatus
 

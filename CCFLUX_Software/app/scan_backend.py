@@ -4903,12 +4903,12 @@ class DashboardScanBackend:
                 if self.processing_queue.get(job_id).instrument_id in wanted
             }
         with self._lock:
-            camera_channel = self._scan_channels["camera"]
-            if (
-                camera_channel["phase"] != "complete"
-                or camera_channel["cancelled"]
-                or camera_channel["error"] is not None
-            ):
+            # The same rule the selection dialog uses: a separate Camera Folder
+            # scan proves the products ready, and so does a finished flight scan
+            # that found them. Requiring the channel here let the operator
+            # select the products and then be refused at the point of starting
+            # them, on a flight whose cameras live inside the Flight Folder.
+            if not self._camera_products_ready_locked():
                 raise ValueError(
                     "Camera scanning must finish successfully before remote-sensing processing"
                 )
