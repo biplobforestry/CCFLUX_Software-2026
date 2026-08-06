@@ -644,3 +644,124 @@ class TestTheFiguresActuallyDraw:
         assert "{xaxis:{type:'category'},bargap:.6}" in self.script
 
 
+
+
+class TestPortedFromTheReferenceQaModule:
+    """micasense_postflight_qa.py's definitions, so the two agree.
+
+    Its make_dashboard plots against image number and derives cadence from the
+    boot clock divided by the image-number gap. Both matter on Flight_CCT0803:
+    the EXIF clock is unreliable on 24 captures, and a gap in the numbering
+    would otherwise read as a cadence spike.
+    """
+
+    def test_sharpness_is_the_normalised_squared_gradient(self):
+        """Normalising by the 1-99 spread makes captures of different brightness
+        comparable, which is the point of the reference's formula."""
+        import io
+
+        from instruments.micasense.adapter import _sharpness_and_exposure
+
+        flat = np.full((64, 64), 8000, dtype=np.uint16)
+        buffer = io.BytesIO()
+        Image.fromarray(flat, mode="I;16").save(buffer, format="TIFF")
+        quiet = _sharpness_and_exposure(buffer.getvalue())
+
+        # Stripes wider than the 4x decimation the reference applies, or every
+        # sampled column lands on the same phase and the gradient reads zero.
+        edges = flat.copy()
+        edges[:, ::16] = 30000
+        edges[:, 1::16] = 30000
+        buffer = io.BytesIO()
+        Image.fromarray(edges, mode="I;16").save(buffer, format="TIFF")
+        busy = _sharpness_and_exposure(buffer.getvalue())
+
+        assert busy["sharpness"] > quiet["sharpness"]
+        for key in ("dark_fraction", "saturated_fraction", "p01", "p50", "p99"):
+            assert key in busy
+
+    def test_the_capture_number_comes_from_the_img_name(self):
+        """Not from the XMP CaptureId, which is a random token: reading digits
+        out of mxPsuh847qgEuwZespyY returned 847 and collapsed the axis."""
+        from instruments.micasense.adapter import _capture_number
+
+        assert _capture_number("IMG_0294_1.tif") == 294
+        assert _capture_number("mxPsuh847qgEuwZespyY") is None
+        assert _capture_number(None, "/a/IMG_1500.zip::IMG_1500_1.tif") == 1500
+
+    def test_cadence_is_normalised_by_the_image_number_gap(self):
+        """A gap in the numbering is one slow interval, not a spike."""
+        from instruments.micasense.adapter import _normalised_intervals
+
+        captures = [
+            {"image_number": 0, "boot_timestamp": 100.0},
+            {"image_number": 1, "boot_timestamp": 106.0},
+            # Five captures missing: 30 s of boot clock over 5 images.
+            {"image_number": 6, "boot_timestamp": 136.0},
+        ]
+        intervals = _normalised_intervals(captures)
+        assert [round(value, 3) for _, value in intervals] == [6.0, 6.0]
+
+    def test_cadence_ignores_a_pair_that_cannot_be_ordered(self):
+        from instruments.micasense.adapter import _normalised_intervals
+
+        assert _normalised_intervals([
+            {"image_number": 5, "boot_timestamp": 100.0},
+            {"image_number": 5, "boot_timestamp": 106.0},
+        ]) == []
+
+    def test_the_summary_carries_the_reference_metrics(self):
+        from instruments.micasense.adapter import _capture_quality_summary
+
+        captures = [
+            {"image_number": index, "boot_timestamp": 100.0 + 6.0 * index,
+             "sharpness": 0.05, "saturated_fraction": 0.0}
+            for index in range(20)
+        ]
+        summary = _capture_quality_summary(captures, None)
+        assert summary["median_capture_interval_seconds"] == pytest.approx(6.0)
+        assert summary["capture_frequency_hz"] == pytest.approx(1 / 6.0)
+        assert summary["cadence_warning_threshold_seconds"] == pytest.approx(9.0)
+        assert summary["sharpness_samples"] == 20
+        assert summary["saturation_flags_over_1_percent"] == 0
+
+    def test_the_warning_line_follows_the_camera_when_none_is_stated(self):
+        """The reference CLI defaults to 2.5 s. This camera triggers every
+        6.26 s, which put 229 of 237 intervals past the threshold and reported a
+        steady camera as almost entirely late."""
+        from instruments.micasense.adapter import _capture_quality_summary
+
+        captures = [
+            {"image_number": index, "boot_timestamp": 100.0 + 6.26 * index}
+            for index in range(30)
+        ]
+        measured = _capture_quality_summary(captures, None)
+        assert measured["cadence_outliers"] == 0
+        stated = _capture_quality_summary(captures, 2.5)
+        assert stated["cadence_outliers"] > 20
+
+    def test_a_stated_expected_interval_is_honoured(self):
+        from instruments.micasense.adapter import _capture_quality_summary
+
+        captures = [
+            {"image_number": index, "boot_timestamp": 100.0 + 2.5 * index}
+            for index in range(10)
+        ]
+        summary = _capture_quality_summary(captures, 2.5)
+        assert summary["expected_interval_seconds"] == pytest.approx(2.5)
+        assert summary["cadence_warning_threshold_seconds"] == pytest.approx(3.75)
+
+    def test_sharpness_is_sampled_not_exhaustive(self):
+        """Band 6 is 10 MB and a flight holds thousands."""
+        from instruments.micasense.adapter import SHARPNESS_SAMPLE_STEP
+
+        assert SHARPNESS_SAMPLE_STEP == 10
+
+    def test_the_page_plots_all_three(self):
+        html = (ASSETS / "micasense.html").read_text(encoding="utf-8")
+        script = (ASSETS / "micasense.js").read_text(encoding="utf-8")
+        for element in ("integrityPlot", "sharpnessPlot", "cadencePlot"):
+            assert f'id="{element}"' in html
+            assert element in script
+        assert "Normalized capture interval" in script
+        assert "Bottom 5% of this flight" in script

@@ -50,7 +50,7 @@
     const evaluated = summary.image_count ?? 0;
     const delivered = summary.delivered_image_count;
     const interval = summary.median_trigger_interval_seconds;
-    $('summaryGrid').innerHTML = [
+    const cards = [
       card('Images evaluated', number(evaluated),
         delivered && delivered !== evaluated ? `${number(delivered)} delivered` : 'Inside the Time Filter'),
       card('Captures', number(summary.capture_count),
@@ -60,7 +60,20 @@
         Number.isFinite(Number(interval)) ? `${Number(interval).toFixed(2)} s` : '—', 'Median between captures'),
       card('GPS present', number(summary.gps_present_count), 'Of the evaluated images'),
       card('Exposure present', number(summary.exposure_present_count), 'Of the evaluated images')
-    ].join('');
+    ];
+    // The standalone QA's own metrics, on its definitions.
+    const hz = summary.capture_frequency_hz;
+    if (Number.isFinite(Number(hz))) {
+      cards.push(card('Capture frequency', `${Number(hz).toFixed(3)} Hz`,
+        `${number(summary.cadence_outliers)} interval(s) past ${
+          Number(summary.cadence_warning_threshold_seconds || 0).toFixed(2)} s`));
+    }
+    if (summary.sharpness_samples) {
+      cards.push(card('Sharpness sampled', number(summary.sharpness_samples),
+        `${number(summary.relative_blur_flags)} in this flight's softest 5% · ${
+          number(summary.saturation_flags_over_1_percent)} over 1% saturated`));
+    }
+    $('summaryGrid').innerHTML = cards.join('');
   }
   // A file the camera wrote badly is reported, not hidden, and never stops the
   // rest of the delivery being shown.
@@ -113,21 +126,76 @@
       .filter(row => row.trigger_time && !String(row.trigger_time).startsWith('19'));
   }
 
-  function renderCadence(captures) {
-    const timed = timedCaptures(captures);
-    if (timed.length < 2) return noData('cadencePlot', 'Fewer than two timed captures; there is no interval to show.');
-    const times = timed.map(row => row.trigger_time);
-    const intervals = timed.slice(1).map((row, index) =>
-      (new Date(row.trigger_time) - new Date(timed[index].trigger_time)) / 1000);
-    const sorted = [...intervals].sort((a, b) => a - b);
-    const nominal = sorted[Math.floor(sorted.length / 2)];
-    Plotly.react('cadencePlot', [
-      {type:'scatter',mode:'markers',x:times.slice(1),y:intervals,name:'Trigger interval',
-       marker:{color:COLOURS.a,size:4},
-       hovertemplate:'%{x}<br>%{y:.3f} s<extra></extra>'},
-      {type:'scatter',mode:'lines',x:[times[1],times[times.length-1]],y:[nominal,nominal],
-       name:`Median ${nominal.toFixed(2)} s`,line:{color:COLOURS.b,width:1.6,dash:'dash'}}
-    ], layout('Time between camera triggers','Capture time (UTC)','Interval [s]'), plotConfig);
+  // The reference's definition, not a wall-clock difference: seconds per trigger
+  // from the boot clock divided by the image-number gap, plotted against image
+  // number. A break in the numbering then reads as one slow interval instead of
+  // a spike, and the boot clock keeps counting when the GPS never locks.
+  function renderCadence(quality) {
+    const intervals = (quality || {}).normalised_intervals || [];
+    if (intervals.length < 1) return noData('cadencePlot',
+      'No capture pair carries both an image number and a boot timestamp, so there is no interval to show.');
+    const x = intervals.map(item => item.image_number);
+    const y = intervals.map(item => item.seconds);
+    const target = quality.expected_interval_seconds || quality.median_capture_interval_seconds;
+    const limit = quality.cadence_warning_threshold_seconds;
+    const traces = [{type:'scatter',mode:'lines',x,y,name:'Seconds per trigger',
+      line:{color:COLOURS.a,width:1},
+      hovertemplate:'Image %{x}<br>%{y:.3f} s<extra></extra>'}];
+    const span = [x[0], x[x.length-1]];
+    if (target) traces.push({type:'scatter',mode:'lines',x:span,y:[target,target],
+      name:`Target ${Number(target).toFixed(2)} s`,line:{color:COLOURS.c,width:1.6}});
+    if (limit) traces.push({type:'scatter',mode:'lines',x:span,y:[limit,limit],
+      name:`Warning ${Number(limit).toFixed(2)} s`,
+      line:{color:COLOURS.b,width:1.4,dash:'dash'}});
+    Plotly.react('cadencePlot', traces,
+      layout('Normalized capture interval','Image number','Seconds per trigger'),
+      plotConfig);
+  }
+
+  // Every trigger and what it delivered, against image number as the reference
+  // plots it. Kept separate from the band histogram: the histogram says how many
+  // captures were short, this says which ones and when.
+  function renderIntegrity(captures) {
+    const rows = captures || [];
+    if (!rows.length) return noData('integrityPlot', 'No capture was grouped for this flight.');
+    const groups = [
+      ['Complete, timed', COLOURS.c, r => r.complete && r.trigger_time && !String(r.trigger_time).startsWith('19')],
+      ['Complete, no usable time', COLOURS.warn, r => r.complete && (!r.trigger_time || String(r.trigger_time).startsWith('19'))],
+      ['Bands missing', COLOURS.b, r => !r.complete]
+    ];
+    const traces = groups.map(([name, colour, test]) => {
+      const picked = rows.filter(test);
+      return picked.length ? {
+        type:'scatter',mode:'markers',
+        x:picked.map(r => r.image_number),
+        y:picked.map(() => name),
+        marker:{color:colour,size:6},name:`${name}: ${picked.length}`,
+        text:picked.map(r => (r.found_bands||[]).length + ' band(s)'),
+        hovertemplate:'Image %{x}<br>%{text}<extra></extra>'
+      } : null;
+    }).filter(Boolean);
+    Plotly.react('integrityPlot', traces,
+      layout('Capture integrity timeline','Image number','',
+        {yaxis:{type:'category',automargin:true}}), plotConfig);
+  }
+
+  // Sampled panchromatic sharpness, with this flight's bottom 5% marked - a
+  // relative threshold, as the reference computes it, not an absolute blur limit.
+  function renderSharpness(captures, quality) {
+    const rows = (captures || []).filter(row => finite(row.sharpness) !== null);
+    if (!rows.length) return noData('sharpnessPlot',
+      'No panchromatic band was sampled for this flight.');
+    const x = rows.map(row => row.image_number);
+    const traces = [{type:'scatter',mode:'markers',x,y:series(rows,'sharpness'),
+      name:`Sharpness sample (${rows.length})`,marker:{color:COLOURS.a,size:7},
+      hovertemplate:'Image %{x}<br>sharpness %{y:.5f}<extra></extra>'}];
+    const limit = (quality || {}).sharpness_bottom_5_percent;
+    if (limit) traces.push({type:'scatter',mode:'lines',x:[x[0],x[x.length-1]],
+      y:[limit,limit],name:'Bottom 5% of this flight',
+      line:{color:COLOURS.b,width:1.4,dash:'dash'}});
+    Plotly.react('sharpnessPlot', traces,
+      layout('Panchromatic image quality sample','Image number','Normalized sharpness'),
+      plotConfig);
   }
 
   function renderTrack(captures) {
@@ -265,8 +333,11 @@
 
   function renderPlots(data) {
     const captures = data.captures || [];
+    const quality = data.capture_quality || {};
     renderTraceability(data.summary || {});
-    renderCadence(captures);
+    renderIntegrity(captures);
+    renderCadence(quality);
+    renderSharpness(captures, quality);
     renderTrack(captures);
     renderAltitude(captures);
     renderIrradiance(captures);

@@ -38,9 +38,13 @@
         <ul class="traceability" id="traceability"></ul>
         <div class="science-note">Read from the XMP of the band this review decodes for each capture. Nothing here is calibrated or corrected.</div>
       </article>
+      <article class="chart-card wide"><div class="card-head"><h2>Capture integrity</h2></div>
+        <div class="plot" id="integrityPlot"></div>
+        <p class="interpretation">Every trigger by image number and what it delivered. A capture short of six bands cannot be band-aligned downstream; one with no usable acquisition time cannot be placed on the flight at all.</p>
+      </article>
       <article class="chart-card wide"><div class="card-head"><h2>Capture cadence</h2></div>
         <div class="plot" id="cadencePlot"></div>
-        <p class="interpretation">Time between consecutive camera triggers. A flat line at the nominal interval is a camera that kept its rate; spikes are missed or delayed triggers.</p>
+        <p class="interpretation">Seconds per trigger from the camera's boot clock, divided by the image-number gap, as the standalone MicaSense QA computes it. Dividing by the gap makes a break in the numbering read as one slow interval rather than a spike, and the boot clock keeps working when the GPS never locks. The dashed line is 1.5× the expected interval.</p>
       </article>
       <article class="chart-card"><div class="card-head"><h2>Flight track</h2></div>
         <div class="plot" id="trackPlot"></div>
@@ -69,6 +73,10 @@
       <article class="chart-card"><div class="card-head"><h2>Imager temperature</h2></div>
         <div class="plot" id="temperaturePlot"></div>
         <p class="interpretation">Sensor body temperature per capture. Dark current rises with it, which matters for any later radiometric work.</p>
+      </article>
+      <article class="chart-card"><div class="card-head"><h2>Panchromatic image quality</h2></div>
+        <div class="plot" id="sharpnessPlot"></div>
+        <p class="interpretation">Sharpness of every tenth capture's panchromatic band: mean squared gradient normalised by the 1–99 percentile spread, so captures of different brightness are comparable. Sampled, because that band is 10 MB and a flight holds thousands. The dashed line is the bottom 5% of this flight — points below it are its softest frames, not an absolute blur limit.</p>
       </article>
       <article class="chart-card"><div class="card-head"><h2>Band completeness</h2></div>
         <div class="plot" id="completenessPlot"></div>

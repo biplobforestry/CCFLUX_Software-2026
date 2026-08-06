@@ -6795,7 +6795,9 @@ class DashboardScanBackend:
         # The workspace reads this, so the metadata check has somewhere to be
         # seen instead of only landing in files beside the project.
         quicklook = self._micasense_browser_payload(
-            project, result, outputs, captures=adapter.capture_rows()
+            project, result, outputs,
+            captures=adapter.capture_rows(),
+            quality=adapter.capture_quality(),
         )
         with self._lock:
             state = self._instruments["micasense"]
@@ -6811,6 +6813,7 @@ class DashboardScanBackend:
         result: Any,
         outputs: Sequence[Any],
         captures: Sequence[Mapping[str, Any]] = (),
+        quality: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Write and return what the MicaSense workspace shows."""
         from instruments.hatchbox_payload import write_json_atomic
@@ -6835,6 +6838,11 @@ class DashboardScanBackend:
             # captures attribute, so getattr always returned () here and
             # every plot on the page drew nothing.
             "captures": [_json_safe_capture(row) for row in captures],
+            # Cadence and image-quality metrics on the reference dashboard's
+            # definitions, including the per-interval series it plots.
+            "capture_quality": json.loads(
+                json.dumps(dict(quality or {}), default=str)
+            ),
         }
         target = project.flight_output_root / "quicklooks" / "micasense_browser.json"
         target.parent.mkdir(parents=True, exist_ok=True)

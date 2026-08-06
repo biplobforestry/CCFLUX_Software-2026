@@ -15,6 +15,8 @@ import re
 import threading
 import time
 import zipfile
+
+import numpy as np
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -22,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from math import degrees
 from pathlib import Path
 from statistics import median
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, MutableMapping, Sequence
 from xml.etree import ElementTree
 
 from PIL import ExifTags, Image, UnidentifiedImageError
@@ -112,6 +114,11 @@ class MicaSenseLevel1Adapter(InstrumentBase):
         self._cancelled = threading.Event()
         self._records: list[dict[str, Any]] = []
         self._captures: list[dict[str, Any]] = []
+        self._capture_quality: dict[str, Any] = {}
+
+    def capture_quality(self) -> Mapping[str, Any]:
+        """Cadence, sharpness and saturation on the reference's definitions."""
+        return dict(self._capture_quality)
 
     def capture_rows(self) -> tuple[Mapping[str, Any], ...]:
         """One row per camera trigger, with the conditions it was taken in.
@@ -304,6 +311,23 @@ class MicaSenseLevel1Adapter(InstrumentBase):
             self._records = selected_records
 
         self._captures = _capture_rows(self._records)
+        # Panchromatic quality on every tenth capture, as the reference samples
+        # it. Bounded on purpose: band 6 is 10 MB and a flight has thousands.
+        self._emit(76, "Sampling panchromatic sharpness and saturation")
+        sharpness_samples = _sample_panchromatic_quality(
+            self._captures, check_cancelled=self._check_cancelled
+        )
+        release_archive_handle()
+        # No expected interval unless the operator states one, so the warning
+        # line follows this camera. The reference's CLI defaults it to 2.5 s,
+        # which on Flight_CCT0803 - triggering every 6.26 s - put 229 of 237
+        # intervals past the threshold and reported a steady camera as almost
+        # entirely late. target falls back to the measured median, which is what
+        # make_dashboard does whenever the argument is absent.
+        expected = options.get("expected_interval_seconds")
+        self._capture_quality = _capture_quality_summary(
+            self._captures, None if expected is None else float(expected)
+        )
         complete = sum(row["complete"] for row in self._captures)
         incomplete = len(self._captures) - complete
         timestamps = [
@@ -405,6 +429,14 @@ class MicaSenseLevel1Adapter(InstrumentBase):
                 "unusually_small_files": small,
                 "thumbnail_count": len(thumbnail_paths),
                 "camera_identity": _camera_identity(self._records),
+                # The reference dashboard's derived metrics, on its definitions,
+                # so a number here and a number in its summary JSON agree.
+                **{
+                    key: value
+                    for key, value in self._capture_quality.items()
+                    if key != "normalised_intervals"
+                },
+                "sharpness_sampled_captures": sharpness_samples,
                 "batch_size": batch_size,
                 "cpu_limit": self.resource_limits.worker_count,
                 "ram_limit_bytes": self.resource_limits.memory_bytes,
@@ -668,6 +700,63 @@ def _image_files(paths: Sequence[Path]) -> tuple[Path, ...]:
     )
 
 
+# Panchromatic image quality, ported from micasense_postflight_qa.py so the two
+# report the same number. Sharpness is the mean squared gradient normalised by
+# the 1-99 percentile spread, which makes it comparable between captures of
+# different brightness; dark and saturated fractions are measured against the
+# band's own recorded black level. Decimated 4x in each direction for speed, as
+# the reference does - the edges that matter for relative blur survive it.
+SHARPNESS_SAMPLE_STEP = 10
+SHARPNESS_DECIMATION = 4
+SATURATION_WHITE_LEVEL = 65535.0
+
+
+def _sharpness_and_exposure(data: bytes) -> dict[str, float]:
+    """The reference implementation's panchromatic QA, on one band's bytes."""
+    import numpy as np
+
+    with Image.open(io.BytesIO(data)) as image:
+        array = np.asarray(image, dtype=np.float32)
+        sample = array[::SHARPNESS_DECIMATION, ::SHARPNESS_DECIMATION]
+        p01, p99 = np.percentile(sample, [1, 99])
+        dynamic = max(float(p99 - p01), 1.0)
+        gx = np.diff(sample, axis=1)
+        gy = np.diff(sample, axis=0)
+        sharpness = float((np.mean(gx * gx) + np.mean(gy * gy)) / (dynamic * dynamic))
+        black_value = image.tag_v2.get(50714, 0)
+        if isinstance(black_value, (tuple, list)):
+            black_value = median(float(value) for value in black_value)
+        black_value = float(black_value or 0)
+        dark_limit = black_value + 0.01 * (SATURATION_WHITE_LEVEL - black_value)
+        return {
+            "sharpness": sharpness,
+            "dark_fraction": float(np.mean(sample <= dark_limit)),
+            "saturated_fraction": float(
+                np.mean(sample >= 0.99 * SATURATION_WHITE_LEVEL)
+            ),
+            "p01": float(p01),
+            "p50": float(np.median(sample)),
+            "p99": float(p99),
+        }
+
+
+# The reference's image_number(): the number after IMG_, from the file or archive
+# name. Deliberately not "the first digits in the string" - the XMP CaptureId is
+# a random token like mxPsuh847qgEuwZespyY, and reading digits out of it returned
+# 847 for that capture and 0 for others, which collapsed the image-number axis
+# and left 13 usable intervals out of 238.
+CAPTURE_NUMBER_RE = re.compile(r"IMG_(\d+)", re.IGNORECASE)
+
+
+def _capture_number(*candidates: object) -> int | None:
+    """IMG_0294 -> 294. The reference keys its sampling and its x axis on this."""
+    for value in candidates:
+        match = CAPTURE_NUMBER_RE.search(str(value or ""))
+        if match:
+            return int(match.group(1))
+    return None
+
+
 def _is_apple_double(path: Any) -> bool:
     """A macOS resource-fork stub, not a delivery.
 
@@ -869,6 +958,10 @@ XMP_QA_FIELDS = (
 # The subset that is a number and worth a series. FlightId, Serial, SwVersion
 # and RigName are traceability strings and are reported once, not plotted.
 NUMERIC_QA_FIELDS = (
+    # The reference derives cadence from BootTimestamp rather than the EXIF
+    # clock, because a camera whose GPS never locked still counts seconds since
+    # power-on correctly.
+    "BootTimestamp",
     "Irradiance",
     "SpectralIrradiance",
     "HorizontalIrradiance",
@@ -1136,6 +1229,7 @@ def _gps_present(metadata: Mapping[str, Any]) -> bool:
 # one of these comes from metadata already read; none is a derived radiometric
 # quantity. Order is the order the workspace plots them in.
 CAPTURE_CONDITION_FIELDS = (
+    "boot_timestamp",
     "gps_latitude",
     "gps_longitude",
     "gps_altitude",
@@ -1209,6 +1303,107 @@ def _static_solar_geometry_warning(
     )
 
 
+def _sample_panchromatic_quality(
+    captures: Sequence[MutableMapping[str, Any]],
+    step: int = SHARPNESS_SAMPLE_STEP,
+    check_cancelled: Callable[[], None] | None = None,
+) -> int:
+    """Decode band 6 of every step-th capture and attach its quality.
+
+    Sampled, not exhaustive: the panchromatic band is 10 MB and a flight has
+    thousands, so the reference reads every tenth and so does this. A capture
+    whose band 6 cannot be read is left without the fields rather than failing
+    the flight.
+    """
+    sampled = 0
+    for capture in captures:
+        number = capture.get("image_number")
+        archive = capture.get("archive")
+        if number is None or archive is None or step <= 0 or number % step:
+            continue
+        if check_cancelled is not None:
+            check_cancelled()
+        try:
+            with _open_archive(Path(archive)) as bundle:
+                member = next(
+                    (name for name in bundle.namelist() if name.endswith("_6.tif")),
+                    None,
+                )
+                if member is None:
+                    continue
+                data = bundle.read(member)
+            capture.update(_sharpness_and_exposure(data))
+            sampled += 1
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile,
+                UnidentifiedImageError):
+            continue
+    return sampled
+
+
+def _normalised_intervals(
+    captures: Sequence[Mapping[str, Any]],
+) -> list[tuple[int, float]]:
+    """Seconds per trigger, from the boot clock and the image-number gap.
+
+    The reference's definition. Dividing by the image-number difference is what
+    makes a gap in the numbering read as one slow interval instead of a spike,
+    and using the boot clock means a camera whose GPS never locked still gives a
+    usable cadence.
+    """
+    timed = [
+        (row["image_number"], row["boot_timestamp"])
+        for row in captures
+        if row.get("image_number") is not None
+        and row.get("boot_timestamp") is not None
+    ]
+    timed.sort()
+    intervals: list[tuple[int, float]] = []
+    for (n1, t1), (n2, t2) in zip(timed, timed[1:]):
+        dn, dt = n2 - n1, t2 - t1
+        if dn > 0 and dt > 0:
+            intervals.append((n2, dt / dn))
+    return intervals
+
+
+def _capture_quality_summary(
+    captures: Sequence[Mapping[str, Any]], expected_interval: float | None
+) -> dict[str, Any]:
+    """The reference dashboard's derived metrics, on the same definitions."""
+    intervals = _normalised_intervals(captures)
+    values = [value for _, value in intervals]
+    median_interval = median(values) if values else None
+    target = expected_interval or median_interval
+    gap_limit = target * 1.5 if target else None
+    sharpness = [
+        float(row["sharpness"]) for row in captures
+        if row.get("sharpness") is not None
+    ]
+    sharp_limit = (
+        float(np.percentile(sharpness, 5)) if sharpness else None
+    )
+    return {
+        "normalised_intervals": [
+            {"image_number": number, "seconds": value} for number, value in intervals
+        ],
+        "median_capture_interval_seconds": median_interval,
+        "capture_frequency_hz": (1 / median_interval) if median_interval else None,
+        "expected_interval_seconds": expected_interval,
+        "cadence_warning_threshold_seconds": gap_limit,
+        "cadence_outliers": (
+            sum(value > gap_limit for value in values) if gap_limit else 0
+        ),
+        "sharpness_samples": len(sharpness),
+        "sharpness_bottom_5_percent": sharp_limit,
+        "relative_blur_flags": (
+            sum(value <= sharp_limit for value in sharpness) if sharp_limit else 0
+        ),
+        "saturation_flags_over_1_percent": sum(
+            1 for row in captures
+            if float(row.get("saturated_fraction") or 0) > 0.01
+        ),
+    }
+
+
 def _capture_conditions(group: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """The first recorded value of each condition across a capture's bands."""
     result: dict[str, Any] = {}
@@ -1258,6 +1453,19 @@ def _capture_rows(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 "missing_bands": missing,
                 "duplicate_band_files": duplicate_count,
                 "complete": not missing and len(group) == len(EXPECTED_BANDS) and not duplicate_count,
+                # The reference plots against image number and samples on it.
+                "image_number": _capture_number(
+                    *(record.get("file_name") for record in group),
+                    *(record.get("source_file") for record in group),
+                ),
+                "archive": next(
+                    (
+                        str(record["source_file"]).split("::", 1)[0]
+                        for record in group
+                        if "::" in str(record.get("source_file") or "")
+                    ),
+                    None,
+                ),
                 # One trigger fires all six bands, so the conditions belong to
                 # the capture. Taken from whichever band was read: the others
                 # are listed from the archive and carry no metadata.
