@@ -146,3 +146,52 @@ def test_pre_campaign_timestamps_are_dropped_from_the_calculation(adapter):
     assert MINIMUM_CAPTURE_YEAR == 2025
     assert "stamp.year < MINIMUM_CAPTURE_YEAR" in source
     assert "GPS had not" in source or "GPS had not locked" in source
+
+
+def test_the_time_range_pass_reads_one_band_per_capture(adapter, tmp_path):
+    """It decompressed all six, including the 10 MB panchromatic one.
+
+    On Flight_CCT0803 that was 14,226 decompressions for 2,371 captures, and it
+    is where MicaSense spent most of a 55-minute run. All six bands are written
+    by one trigger and carry one acquisition time, so the other five tell the
+    time range nothing new - which is what ArchiveImage.read_metadata already
+    marks and this pass ignored.
+    """
+    archives = [
+        _capture_archive(tmp_path / f"IMG_{index:04d}.zip", f"IMG_{index:04d}")
+        for index in range(3)
+    ]
+    release_archive_handle()
+
+    decoded: list[str] = []
+    original = adapter._metadata
+
+    def counting(source, payload=None):
+        decoded.append(getattr(source, "member", str(source)))
+        return original(source, payload)
+
+    adapter._metadata = counting
+    adapter.extract_time_range(InputCandidate("micasense", tuple(archives), 1.0, "t"))
+    release_archive_handle()
+
+    # Three captures of six bands each: three decodes, not eighteen.
+    assert len(decoded) == 3, decoded
+    assert not [name for name in decoded if name.endswith("_6.tif")]
+
+
+def test_a_loose_tiff_is_still_read(adapter, tmp_path):
+    """The skip keys on ArchiveImage.read_metadata; a plain file has no flag."""
+    import io as _io
+
+    from PIL import Image as _Image
+
+    path = tmp_path / "IMG_0000_1.tif"
+    buffer = _io.BytesIO()
+    _Image.new("L", (8, 8), color=5).save(buffer, format="TIFF")
+    path.write_bytes(buffer.getvalue())
+
+    decoded: list[str] = []
+    original = adapter._metadata
+    adapter._metadata = lambda s, p=None: (decoded.append(str(s)), original(s, p))[1]
+    adapter.extract_time_range(InputCandidate("micasense", (path,), 1.0, "t"))
+    assert len(decoded) == 1

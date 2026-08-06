@@ -167,6 +167,14 @@ class MicaSenseLevel1Adapter(InstrumentBase):
     def extract_time_range(self, candidate: InputCandidate) -> TimeRange:
         values: list[datetime] = []
         for path in _all_images(candidate.paths):
+            # One band per capture, the same rule the metadata pass follows. All
+            # six bands are written by one trigger and carry one acquisition
+            # time, so decompressing the other five tells us nothing new - and
+            # this pass was doing exactly that, 14,226 decompressions for 2,371
+            # captures, including the 10 MB panchromatic band each time. That is
+            # where MicaSense spent most of its 55 minutes on Flight_CCT0803.
+            if not getattr(path, "read_metadata", True):
+                continue
             self._check_cancelled()
             try:
                 value = _parse_timestamp(self._metadata(path))
