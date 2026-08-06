@@ -265,20 +265,35 @@ class SifAdapter(InstrumentBase):
                     )
                     valid = _valid_positions(metadata)
                 self._emit(mode_start + 22, f"Preparing {mode} exports and map data")
+                # A failed iFLD retrieval is recorded and excluded from what is
+                # evaluated and drawn; it never stops the mode or the flight.
                 self._products[mode] = {
                     "raw": raw_path,
                     "metadata": metadata,
                     "spectra": spectra,
                     "valid": valid,
+                    "sif_retrieval_audit": _sif_retrieval_audit(metadata),
+                    "sif_retrieval_valid": _positive_sif_mask(metadata),
                 }
             except Exception as exc:
                 if self.logger: self.logger.capture_exception("sif-adapter", "SIF quicklook failed", exc, instrument="sif")
                 raise
         if not self._products: raise ValueError("No selected SIF mode could be processed")
+        retrieval_audits = {
+            mode: product.get("sif_retrieval_audit") or {}
+            for mode, product in self._products.items()
+        }
+        quicklook_warnings = _sif_retrieval_warnings(retrieval_audits)
+        for message in quicklook_warnings:
+            if self.logger:
+                self.logger.log(
+                    LogLevel.WARNING, "sif-adapter", message, instrument="sif",
+                    processing_step="sif-retrieval-quality",
+                )
         all_times = pd.concat([pd.to_datetime(p["metadata"]["datetime [UTC]"], utc=True) for p in self._products.values()]).dropna()
         self._emit(100, "SIF quicklook complete")
         if self.logger: self.logger.log(LogLevel.SUCCESS, "sif-adapter", "SIF quicklook completed", instrument="sif")
-        return InstrumentResult("sif", "Solar-Induced Fluorescence / FLOX", "HATCHBOX", DetectionStatus.READY, ProcessingStatus.COMPLETE, _sources(retained_paths), len(retained_paths), all_times.min().to_pydatetime(), all_times.max().to_pydatetime(), all_times.min().to_pydatetime(), all_times.max().to_pydatetime(), progress=100.0, metadata={"processed_modes": sorted(self._products), "rows_by_mode": {mode: len(p["metadata"]) for mode, p in self._products.items()}, "raw_file_filter_kb": raw_min_kb, "retained_raw_files": [str(path) for path in retained_paths], "skipped_raw_files": [{"path": str(path), "size_kb": round(path.stat().st_size / 1024, 1)} for path in skipped_paths], "scientific_source": str(self.bridge.source_path), "essentials_directory": str(self.bridge.essentials("FULL", essentials_overrides)[0].parent), "calibration_files": {m: str(self.bridge.essentials(m, essentials_overrides)[0]) for m in sorted(self._products)}, "index_file": str(self.bridge.essentials("FULL", essentials_overrides)[1]), "position_mode": position_mode, "telemetry_log": str(telemetry_log) if telemetry_log else None, "options": _json_safe(dict(options))}, elapsed_time=timedelta(seconds=time.monotonic() - started))
+        return InstrumentResult("sif", "Solar-Induced Fluorescence / FLOX", "HATCHBOX", DetectionStatus.READY, ProcessingStatus.COMPLETE, _sources(retained_paths), len(retained_paths), all_times.min().to_pydatetime(), all_times.max().to_pydatetime(), all_times.min().to_pydatetime(), all_times.max().to_pydatetime(), progress=100.0, metadata={"processed_modes": sorted(self._products), "rows_by_mode": {mode: len(p["metadata"]) for mode, p in self._products.items()}, "raw_file_filter_kb": raw_min_kb, "retained_raw_files": [str(path) for path in retained_paths], "skipped_raw_files": [{"path": str(path), "size_kb": round(path.stat().st_size / 1024, 1)} for path in skipped_paths], "scientific_source": str(self.bridge.source_path), "essentials_directory": str(self.bridge.essentials("FULL", essentials_overrides)[0].parent), "calibration_files": {m: str(self.bridge.essentials(m, essentials_overrides)[0]) for m in sorted(self._products)}, "index_file": str(self.bridge.essentials("FULL", essentials_overrides)[1]), "position_mode": position_mode, "telemetry_log": str(telemetry_log) if telemetry_log else None, "sif_retrieval_audit": _json_safe(retrieval_audits), "usable_sif_rows_by_mode": {mode: int(np.count_nonzero(p.get("sif_retrieval_valid", ()))) for mode, p in self._products.items()}, "options": _json_safe(dict(options))}, warnings=quicklook_warnings, elapsed_time=timedelta(seconds=time.monotonic() - started))
 
     def process_detailed(self, loaded, options): return self.process_quicklook(loaded, options)
 
@@ -307,9 +322,26 @@ class SifAdapter(InstrumentBase):
                 )
                 for column in numeric_columns
             }
+            # A failed iFLD retrieval is blanked here and nowhere else: the plots
+            # then draw the rows that worked instead of a trace dragged to
+            # -697 mW m-2 nm-1 sr-1, while the exported CSV keeps every value the
+            # reference computed. Only the two SIF columns are affected - the
+            # radiance, reflectance and vegetation indices in those same rows are
+            # computed independently and stay.
+            for column in SIF_RETRIEVAL_COLUMNS:
+                if column not in series:
+                    continue
+                series[column] = [
+                    None if (value is not None and value <= 0) else value
+                    for value in series[column]
+                ]
             spectra = product["spectra"]
             modes[mode] = {
                 "row_count": int(len(metadata)),
+                "sif_retrieval_audit": product.get("sif_retrieval_audit") or {},
+                "usable_sif_rows": int(
+                    np.count_nonzero(product.get("sif_retrieval_valid", ()))
+                ),
                 "time": [
                     None if pd.isna(value) else value.isoformat()
                     for value in pd.to_datetime(
@@ -402,6 +434,88 @@ def _classify(paths):
     return {key: tuple(value) for key, value in result.items()}
 
 def _sources(paths): return [SourceFile(path, size_bytes=path.stat().st_size) for path in paths]
+
+
+# Fluorescence is emitted, so an iFLD retrieval below zero is not a small
+# quantity - it is a retrieval that did not work, usually because the incoming
+# and reflected radiance pair it divides is wrong. Flight_CCT0803 returns
+# negative SIF_A on 307 of 311 rows, down to -697 mW m-2 nm-1 sr-1.
+#
+# Such a row is reported and left out of evaluation and plots, never used to
+# fail the flight: everything else in it - radiance, reflectance, the vegetation
+# indices, the position - is computed independently and is still good. The
+# exported CSV keeps the value exactly as the reference computed it, because
+# that is the scientific record; only what is evaluated and drawn skips it.
+SIF_RETRIEVAL_COLUMNS = (
+    "SIF_A_ifld [mW m-2nm-1sr-1]",
+    "SIF_B_ifld [mW m-2nm-1sr-1]",
+)
+
+
+def _sif_retrieval_audit(frame) -> dict[str, object]:
+    """Count the physically impossible iFLD retrievals in one mode.
+
+    Deliberately total: any column it cannot read is reported as unavailable
+    rather than raised, because no shape of this data is worth losing a flight
+    over.
+    """
+    audit: dict[str, object] = {}
+    for column in SIF_RETRIEVAL_COLUMNS:
+        short = column.split(" ")[0]
+        # FULL has no iFLD columns at all, and pd.to_numeric(None) answers with a
+        # scalar NaN rather than an empty Series, so ask the frame first.
+        if column not in getattr(frame, "columns", ()):
+            audit[short] = {"available": False}
+            continue
+        try:
+            values = pd.to_numeric(frame[column], errors="coerce")
+            finite = values.notna()
+            negative = finite & (values <= 0)
+            audit[short] = {
+                "available": True,
+                "rows": int(finite.sum()),
+                "non_positive": int(negative.sum()),
+                "minimum": (None if not finite.any() else float(values[finite].min())),
+            }
+        except (TypeError, ValueError, AttributeError, KeyError):
+            audit[short] = {"available": False}
+    return audit
+
+
+def _positive_sif_mask(frame):
+    """Which rows carry a usable iFLD retrieval. Never raises."""
+    try:
+        mask = pd.Series(True, index=frame.index)
+        for column in SIF_RETRIEVAL_COLUMNS:
+            if column not in getattr(frame, "columns", ()):
+                continue
+            values = pd.to_numeric(frame[column], errors="coerce")
+            # A row with no retrieval at all is not a failed one, so it stays.
+            mask &= values.isna() | (values > 0)
+        return mask.to_numpy()
+    except (TypeError, ValueError, AttributeError):
+        return np.ones(len(frame), dtype=bool)
+
+
+def _sif_retrieval_warnings(audits: Mapping[str, Mapping[str, object]]) -> list[str]:
+    """One sentence per mode whose iFLD retrieval did not work."""
+    messages: list[str] = []
+    for mode in sorted(audits):
+        for short, entry in sorted((audits[mode] or {}).items()):
+            if not entry.get("available") or not entry.get("non_positive"):
+                continue
+            rows = entry.get("rows") or 0
+            minimum = entry.get("minimum")
+            floor = "" if minimum is None else f", as low as {minimum:.3f}"
+            messages.append(
+                f"{mode} {short} is zero or negative on "
+                f"{entry['non_positive']} of {rows} row(s){floor}. Fluorescence "
+                "is emitted, so those retrievals did not work - most often the "
+                "incoming and reflected radiance pair is wrong. They are left "
+                "out of the evaluation and the plots; every other quantity in "
+                "those rows, and the exported values themselves, are unchanged."
+            )
+    return messages
 
 
 def _valid_positions(frame):

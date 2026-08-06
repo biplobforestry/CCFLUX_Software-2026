@@ -137,6 +137,16 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
       ['Corrections', option.spectral_shift_correction ? 'Spectral shift on' : 'Spectral shift off', option.apply_nonlinearity_correction ? 'Nonlinearity on' : 'Nonlinearity off'],
       ['Raw-file filter', `${summary.raw_file_filter_kb ?? option.raw_min_kb ?? 100} KB`, `${(summary.skipped_raw_files || []).length} small file(s) skipped`]
     ];
+    // Fluorescence is emitted, so a retrieval at or below zero did not work.
+    // Say how many, rather than letting the operator read a plot whose gaps
+    // have no stated reason.
+    const failed = Object.entries(mode?.sif_retrieval_audit || {})
+      .filter(([, entry]) => entry && entry.available && entry.non_positive)
+      .map(([name, entry]) => `${name} ${entry.non_positive}/${entry.rows}`);
+    if (failed.length) {
+      cards.push(['iFLD retrievals', `${mode.usable_sif_rows ?? 0} usable`,
+        `not positive: ${failed.join(' · ')}`]);
+    }
     document.getElementById('summaryGrid').innerHTML = cards.map(([label, value, note]) =>
       `<div class="summary"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || '—')}</strong><small>${escapeHtml(note || '')}</small></div>`
     ).join('');
@@ -150,7 +160,11 @@ Each immutable SIF run writes incoming radiance, reflected radiance, reflectance
     Plotly.react('overviewPlot', [{x: time.x, y: time.y, type: 'scattergl', mode: 'lines+markers', marker: {size: 4, color: '#008ec4'}, line: {width: 1.4, color: '#008ec4'}, name: variable}], layout('Capture time [UTC]', variable), config);
     Plotly.react('timePlot', [{x: time.x, y: time.y, type: 'scattergl', mode: 'lines', line: {width: 1.6, color: '#0b8f88'}, name: variable}], layout('Capture time [UTC]', variable), config);
     renderDistribution(values, variable);
-    document.getElementById('selectionNote').textContent = `${mode.row_count.toLocaleString()} ${document.getElementById('modeSelect').value} spectra · ${variable}`;
+    const audit = (mode.sif_retrieval_audit || {})[String(variable).split(' ')[0]];
+    const skipped = audit && audit.available && audit.non_positive
+      ? ` · ${audit.non_positive} non-positive retrieval(s) left out`
+      : '';
+    document.getElementById('selectionNote').textContent = `${mode.row_count.toLocaleString()} ${document.getElementById('modeSelect').value} spectra · ${variable}${skipped}`;
     renderMap(mode, mapVariable(mode));
     renderSummary();
   }

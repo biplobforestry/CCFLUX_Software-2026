@@ -452,3 +452,123 @@ class TestASkippedBlockDoesNotKillTheChannel:
         block = source[source.index("if _gps_is_unusable(utc,record_clock) or fixes==0"):]
         head = block[:block.index("if offset is not None:")]
         assert head.count("_backfill_missing_times(") == 3
+
+
+class TestAFailedRetrievalIsReportedNotFatal:
+    """Fluorescence is emitted, so iFLD at or below zero did not work.
+
+    Flight_CCT0803 returns negative SIF_A on 307 of 311 FLUO rows, to
+    -697 mW m-2 nm-1 sr-1. Those rows are reported and left out of the
+    evaluation and the plots; everything else in them is computed independently
+    and stays, and the flight is never failed over it.
+    """
+
+    def _frame(self, values_a, values_b=None):
+        import pandas as pd
+
+        from instruments.sif.adapter import SIF_RETRIEVAL_COLUMNS
+
+        data = {SIF_RETRIEVAL_COLUMNS[0]: values_a}
+        if values_b is not None:
+            data[SIF_RETRIEVAL_COLUMNS[1]] = values_b
+        return pd.DataFrame(data)
+
+    def test_negatives_are_counted_with_their_floor(self):
+        from instruments.sif.adapter import _sif_retrieval_audit
+
+        audit = _sif_retrieval_audit(self._frame([-697.2, -1.0, 0.5, 0.2]))
+        entry = audit["SIF_A_ifld"]
+        assert entry["available"] is True
+        assert entry["rows"] == 4
+        assert entry["non_positive"] == 2
+        assert entry["minimum"] == pytest.approx(-697.2)
+
+    def test_zero_counts_as_a_failed_retrieval(self):
+        from instruments.sif.adapter import _sif_retrieval_audit
+
+        assert _sif_retrieval_audit(self._frame([0.0, 1.0]))["SIF_A_ifld"]["non_positive"] == 1
+
+    def test_a_mode_without_the_columns_is_not_applicable(self):
+        """FULL carries no iFLD at all, and must not be reported as failing."""
+        import pandas as pd
+
+        from instruments.sif.adapter import _sif_retrieval_audit
+
+        audit = _sif_retrieval_audit(pd.DataFrame({"NDVI": [0.4, 0.5]}))
+        assert audit["SIF_A_ifld"] == {"available": False}
+
+    def test_only_the_failed_rows_are_excluded(self):
+        from instruments.sif.adapter import _positive_sif_mask
+
+        mask = _positive_sif_mask(self._frame([-1.0, 0.5, 0.0, 2.0]))
+        assert list(mask) == [False, True, False, True]
+
+    def test_a_row_with_no_retrieval_at_all_is_kept(self):
+        """Missing is not failed; FULL rows must survive the same mask."""
+        import numpy as np
+
+        from instruments.sif.adapter import _positive_sif_mask
+
+        mask = _positive_sif_mask(self._frame([np.nan, 1.0]))
+        assert list(mask) == [True, True]
+
+    def test_both_channels_must_be_positive(self):
+        from instruments.sif.adapter import _positive_sif_mask
+
+        mask = _positive_sif_mask(self._frame([1.0, 1.0], [1.0, -3.0]))
+        assert list(mask) == [True, False]
+
+    def test_the_warning_names_the_counts_and_the_reason(self):
+        from instruments.sif.adapter import _sif_retrieval_warnings
+
+        messages = _sif_retrieval_warnings({
+            "FLUO": {"SIF_A_ifld": {"available": True, "rows": 311,
+                                    "non_positive": 307, "minimum": -697.2284}}
+        })
+        assert len(messages) == 1
+        assert "307 of 311" in messages[0]
+        assert "-697.228" in messages[0]
+        assert "did not work" in messages[0]
+        assert "left out of the evaluation" in messages[0]
+
+    def test_nothing_is_warned_about_when_every_retrieval_worked(self):
+        from instruments.sif.adapter import _sif_retrieval_warnings
+
+        assert _sif_retrieval_warnings({
+            "FLUO": {"SIF_A_ifld": {"available": True, "rows": 10,
+                                    "non_positive": 0, "minimum": 0.4}}
+        }) == []
+
+    def test_the_audit_never_raises_on_odd_input(self):
+        """No shape of this data is worth losing a flight over."""
+        from instruments.sif.adapter import _positive_sif_mask, _sif_retrieval_audit
+
+        for odd in (None, object()):
+            assert _sif_retrieval_audit(odd)["SIF_A_ifld"] == {"available": False}
+        assert len(_positive_sif_mask(self._frame([1.0]))) == 1
+
+    def test_the_flight_is_not_failed_over_it(self):
+        adapter = (
+            Path(__file__).resolve().parents[1] / "instruments" / "sif" / "adapter.py"
+        ).read_text(encoding="utf-8")
+        for name in ("_sif_retrieval_audit", "_positive_sif_mask",
+                     "_sif_retrieval_warnings"):
+            start = adapter.index(f"def {name}(")
+            end = adapter.index("\ndef ", start + 1)
+            statements = [
+                line.strip() for line in adapter[start:end].splitlines()
+                if line.strip().startswith("raise ")
+            ]
+            assert not statements, (name, statements)
+
+    def test_the_exported_values_are_left_alone(self):
+        """The CSV is the scientific record; only the plots skip a bad row."""
+        adapter = (
+            Path(__file__).resolve().parents[1] / "instruments" / "sif" / "adapter.py"
+        ).read_text(encoding="utf-8")
+        assert "exported CSV keeps every value" in adapter
+
+    def test_the_page_says_how_many_were_left_out(self):
+        script = (ASSETS / "sif.js").read_text(encoding="utf-8")
+        assert "non-positive retrieval(s) left out" in script
+        assert "sif_retrieval_audit" in script
