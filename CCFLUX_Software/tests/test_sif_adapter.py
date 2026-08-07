@@ -234,3 +234,78 @@ class TestTheResultMetadataSurvivesJson:
         json.dumps(safe)
         assert safe["count"] == 4
         assert safe["when"].startswith("2026-08-06")
+
+
+class TestTheNegativeRetrievalWarningNamesTheCause:
+    """iFLD divides by the depth of the oxygen band in the incoming channel.
+
+    A clipped E has no depth left, so the retrieval explodes. That flag is in
+    the same table the audit already reads, and Flight_CC0806 sends the
+    operator to the calibration date without it. It is a partial cause there -
+    71 of 938 negative SIF_A rows - so the message reports the share and leaves
+    calibration age as what to check for the rest.
+    """
+
+    def _frame(self, saturated, values):
+        return pd.DataFrame({
+            "SIF_A_ifld [mW m-2nm-1sr-1]": values,
+            "sat value E FLUO": saturated,
+        })
+
+    def test_saturated_rows_are_counted_among_the_failures(self):
+        from instruments.sif.adapter import _sif_retrieval_audit
+
+        audit = _sif_retrieval_audit(
+            self._frame([1, 1, 0, 0], [-5.0, -3.0, -1.0, 2.0])
+        )
+        assert audit["SIF_A_ifld"]["non_positive"] == 3
+        assert audit["SIF_A_ifld"]["saturated_incoming"] == 2
+
+    def test_a_saturated_row_with_a_good_retrieval_is_not_counted(self):
+        from instruments.sif.adapter import _sif_retrieval_audit
+
+        audit = _sif_retrieval_audit(self._frame([1, 1], [4.0, 5.0]))
+        assert audit["SIF_A_ifld"]["non_positive"] == 0
+
+    def test_the_message_names_saturation_and_the_cure(self):
+        from instruments.sif.adapter import (
+            _sif_retrieval_audit, _sif_retrieval_warnings,
+        )
+
+        audit = _sif_retrieval_audit(
+            self._frame([1, 1, 0], [-5.0, -3.0, -1.0])
+        )
+        text = _sif_retrieval_warnings({"FLUO": audit})[0]
+        assert "saturated on 2 of them" in text
+        assert "integration time" in text
+
+    def test_without_saturation_it_keeps_the_original_advice(self):
+        from instruments.sif.adapter import (
+            _sif_retrieval_audit, _sif_retrieval_warnings,
+        )
+
+        audit = _sif_retrieval_audit(self._frame([0, 0], [-5.0, -3.0]))
+        text = _sif_retrieval_warnings({"FLUO": audit})[0]
+        assert "calibration age" in text
+        assert "saturated on" not in text
+
+    def test_a_delivery_without_the_flag_says_nothing_about_it(self):
+        from instruments.sif.adapter import (
+            _sif_retrieval_audit, _sif_retrieval_warnings,
+        )
+
+        frame = pd.DataFrame({"SIF_A_ifld [mW m-2nm-1sr-1]": [-5.0, -3.0]})
+        audit = _sif_retrieval_audit(frame)
+        assert audit["SIF_A_ifld"]["saturated_incoming"] is None
+        assert "saturated on" not in _sif_retrieval_warnings({"FLUO": audit})[0]
+
+    def test_the_audit_still_survives_an_unreadable_column(self):
+        from instruments.sif.adapter import _sif_retrieval_audit
+
+        frame = pd.DataFrame({
+            "SIF_A_ifld [mW m-2nm-1sr-1]": [-5.0, -3.0],
+            "sat value E FLUO": ["yes", "no"],
+        })
+        audit = _sif_retrieval_audit(frame)
+        assert audit["SIF_A_ifld"]["non_positive"] == 2
+        assert audit["SIF_A_ifld"]["saturated_incoming"] == 0

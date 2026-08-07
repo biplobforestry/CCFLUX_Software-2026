@@ -501,10 +501,38 @@ def _sif_retrieval_audit(frame) -> dict[str, object]:
                 "rows": int(finite.sum()),
                 "non_positive": int(negative.sum()),
                 "minimum": (None if not finite.any() else float(values[finite].min())),
+                # iFLD divides by the depth of the O2 band in the incoming
+                # channel. A clipped E has no depth left to divide by, so the
+                # retrieval explodes. That column sits in this same frame, and
+                # naming it is the difference between an operator checking the
+                # calibration date and checking the integration time.
+                "saturated_incoming": _saturated_incoming(frame, negative),
             }
         except (TypeError, ValueError, AttributeError, KeyError):
             audit[short] = {"available": False}
     return audit
+
+
+def _saturated_incoming(frame, rows) -> int | None:
+    """How many of ``rows`` were taken with the incoming channel at the ceiling.
+
+    None when this delivery carries no saturation flag, so the caller says
+    nothing rather than implying a count of zero.
+    """
+    column = next(
+        (
+            name for name in getattr(frame, "columns", ())
+            if str(name).lower().startswith("sat value e")
+        ),
+        None,
+    )
+    if column is None:
+        return None
+    try:
+        flag = pd.to_numeric(frame[column], errors="coerce").fillna(0) > 0
+        return int((rows & flag).sum())
+    except (TypeError, ValueError, AttributeError, KeyError):
+        return None
 
 
 def _positive_sif_mask(frame):
@@ -532,12 +560,29 @@ def _sif_retrieval_warnings(audits: Mapping[str, Mapping[str, object]]) -> list[
             rows = entry.get("rows") or 0
             minimum = entry.get("minimum")
             floor = "" if minimum is None else f", as low as {minimum:.3f}"
+            # Where the incoming channel was clipped there is no O2 band depth
+            # left for iFLD to divide by, and the retrieval explodes. Say so,
+            # because the cure is a shorter integration time and the operator
+            # would otherwise be sent to the calibration date.
+            saturated = entry.get("saturated_incoming")
+            cause = (
+                "most often the incoming and reflected radiance pair is wrong, "
+                "and the calibration age reported below is the first thing to "
+                "check. "
+            )
+            if saturated:
+                share = saturated * 100.0 / max(1, int(entry["non_positive"]))
+                cause = (
+                    f"the incoming channel was saturated on {saturated} of them "
+                    f"({share:.0f}%), which leaves iFLD no oxygen-band depth to "
+                    "divide by; a shorter integration time is the cure, and the "
+                    "calibration age reported below is what to check for the "
+                    "rest. "
+                )
             messages.append(
                 f"{mode} {short} is zero or negative on "
                 f"{entry['non_positive']} of {rows} row(s){floor}. Fluorescence "
-                "is emitted, so those retrievals did not work - most often the "
-                "incoming and reflected radiance pair is wrong, and the "
-                "calibration age reported below is the first thing to check. "
+                f"is emitted, so those retrievals did not work - {cause}"
                 "They are still plotted, so the period the instrument actually "
                 "covered stays visible, and marked as not usable; they are kept "
                 "out of the statistics, and every other quantity in those rows, "
