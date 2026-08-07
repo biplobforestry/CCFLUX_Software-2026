@@ -3927,6 +3927,20 @@ class DashboardScanBackend:
             if lon is not None and not -180 <= lon <= 180:
                 raise ValueError("SIF static longitude must be between -180 and 180")
         with self._lock:
+            # The record-clock declaration does not belong to this dialog: it is
+            # answered once, when the scan finds SIF. Replacing the options
+            # wholesale discarded it, so opening the processing options and
+            # pressing Save silently un-declared the clock. Before the guard in
+            # _sif_task that failed quietly, as an AirFloX record clock read for
+            # UTC - which on Flight_CC0806 put every spectrum two hours from its
+            # own position. Carry across anything this dialog does not own.
+            options = {
+                **{
+                    key: value for key, value in self._sif_options.items()
+                    if key not in options
+                },
+                **options,
+            }
             self._sif_options = options
             if self._flight_project is not None:
                 self._flight_project.instrument_options["sif"] = dict(options)

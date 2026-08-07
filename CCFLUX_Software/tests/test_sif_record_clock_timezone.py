@@ -365,6 +365,47 @@ class TestProcessingRefusesAnUndeclaredClock:
         assert backend._sif_record_clock_offset_seconds() == 0.0
         assert backend._sif_record_clock_offset_seconds() is not None
 
+    def test_saving_the_processing_options_keeps_the_declaration(self, tmp_path):
+        """The dialog rebuilt the options dict and dropped the answer.
+
+        Declared at scan, then Save on the SIF/FLOX processing options, and the
+        clock was silently un-declared: the reader fell back to reading the
+        AirFloX record clock as UTC, which on Flight_CC0806 matched every
+        spectrum to a Noseboom position two hours away. The guard in _sif_task
+        turned that into a visible failure; this keeps it from happening.
+        """
+        backend, _ = _sif_backend(tmp_path)
+        backend.set_sif_timezone("cest")
+        assert backend._sif_record_clock_offset_seconds() == 7200.0
+
+        backend.update_sif_options({"calibration_age_warning_days": 400})
+
+        assert backend._sif_record_clock_offset_seconds() == 7200.0
+        assert backend._sif_options["calibration_age_warning_days"] == 400
+
+    def test_the_declaration_survives_repeated_saves(self, tmp_path):
+        backend, _ = _sif_backend(tmp_path)
+        backend.set_sif_timezone("cest")
+        for fraction in (0.7, 0.8, 0.9):
+            backend.update_sif_options({"veg_ceiling_warning_fraction": fraction})
+        assert backend._sif_record_clock_offset_seconds() == 7200.0
+
+    def test_the_saved_project_keeps_the_declaration_too(self, tmp_path):
+        """Reloading must not resurrect an un-declared clock."""
+        backend, _ = _sif_backend(tmp_path)
+        backend.set_sif_timezone("cest")
+        backend.update_sif_options({"calibration_age_warning_days": 400})
+        if backend._flight_project is not None:
+            stored = backend._flight_project.instrument_options["sif"]
+            assert stored.get("record_clock_timezone") == "cest"
+
+    def test_the_dialog_still_owns_its_own_fields(self, tmp_path):
+        """Carrying keys across must not make the dialog's own values sticky."""
+        backend, _ = _sif_backend(tmp_path)
+        backend.update_sif_options({"calibration_age_warning_days": 400})
+        backend.update_sif_options({"calibration_age_warning_days": 90})
+        assert backend._sif_options["calibration_age_warning_days"] == 90
+
 
 class TestReapplicationOnRestore:
     backend_source = (
