@@ -179,9 +179,11 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 self.server.dashboard_file.with_name("trace_gas.html")
             )
         elif path == "/miro_rack/trace_gas.js":
-            self._send_file(
-                self.server.dashboard_file.with_name("trace_gas.js"),
-                "application/javascript; charset=utf-8",
+            # Through the bundle helper, not _send_file: that one takes its
+            # content type from mimetypes, and a Windows registry that maps .js
+            # to text/plain makes the browser refuse to execute the script.
+            self._send_javascript_bundle(
+                self.server.dashboard_file.with_name("trace_gas.js")
             )
         elif path in {"/miro_rack/plotly.min.js", "/vendor/plotly.min.js"}:
             status, content_type, body, headers = self.server.miro_rack.forward_get(

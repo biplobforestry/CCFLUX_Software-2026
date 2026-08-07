@@ -569,6 +569,48 @@ class TestThePageIsReachable:
         assert "/miro_rack/trace_gas.js" in html
         assert "/vendor/plotly.min.js" in html
 
+    def test_the_script_is_served_through_the_javascript_helper(self):
+        """_send_file takes its type from mimetypes and download= is keyword-only.
+
+        Passing a content type positionally raised TypeError, the handler
+        answered 400, and the page came up with every control inert: no error,
+        no plots, just the static HTML. The bundle helper sets
+        text/javascript itself, which a Windows registry mapping .js to
+        text/plain would otherwise break even had the call been legal.
+        """
+        server = (ROOT / "app" / "server.py").read_text(encoding="utf-8")
+        route = server[server.index('elif path == "/miro_rack/trace_gas.js":'):]
+        route = route[:route.index("\n        elif ")]
+        assert "self._send_javascript_bundle(" in route
+        assert "self._send_file(" not in route
+
+    def test_no_route_passes_send_file_a_positional_content_type(self):
+        """The signature is (path, *, download): a second positional is a 400."""
+        import ast
+        import inspect
+
+        from app.server import DashboardRequestHandler
+
+        signature = inspect.signature(DashboardRequestHandler._send_file)
+        positional = [
+            name for name, parameter in signature.parameters.items()
+            if parameter.kind is parameter.POSITIONAL_OR_KEYWORD and name != "self"
+        ]
+        assert positional == ["path"]
+
+        tree = ast.parse((ROOT / "app" / "server.py").read_text(encoding="utf-8"))
+        offenders = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_send_file"
+            and len(node.args) > 1
+        ]
+        assert not offenders, (
+            f"_send_file given a second positional argument at line(s) {offenders}"
+        )
+
     def test_the_filters_the_engine_accepts_are_the_ones_the_page_sends(self):
         script = (ROOT / "app" / "assets" / "trace_gas.js").read_text(encoding="utf-8")
         for key in ("resolution_seconds", "start", "end", "altitude_min",
