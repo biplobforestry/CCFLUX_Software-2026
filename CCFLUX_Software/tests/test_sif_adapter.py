@@ -172,3 +172,65 @@ def test_sif_airship_time_range_retains_zero_gps_rows_and_uses_record_clock(
 
     assert time_range.utc_start == min(expected)
     assert time_range.utc_end == max(expected)
+
+
+class TestTheResultMetadataSurvivesJson:
+    """The options block is written to the project, so it must be dumpable.
+
+    Flight_CC0806 ran the whole SIF pipeline - four minutes, both channels,
+    every export - and then failed with "Object of type function is not JSON
+    serializable" five seconds after "SIF quicklook completed". The terrain
+    sampler is a callable the backend passes in options so alt_above_ground_m
+    becomes height above ground, and _json_safe returned anything it did not
+    recognise unchanged, so the function travelled into json.dump.
+    """
+
+    def test_a_callable_option_is_recorded_not_passed_through(self):
+        import json
+
+        from instruments.sif.adapter import _json_safe
+
+        def terrain_sampler(latitudes, longitudes):
+            return []
+
+        safe = _json_safe({"terrain_sampler": terrain_sampler, "pitch": True})
+
+        json.dumps(safe)
+        assert safe["pitch"] is True
+        assert "terrain_sampler" in safe["terrain_sampler"]
+
+    def test_the_ordinary_types_are_untouched(self):
+        from instruments.sif.adapter import _json_safe
+
+        value = _json_safe(
+            {"a": "text", "b": 3, "c": 1.5, "d": True, "e": None, "f": [1, 2]}
+        )
+        assert value == {"a": "text", "b": 3, "c": 1.5, "d": True, "e": None,
+                         "f": [1, 2]}
+
+    def test_anything_else_is_described_rather_than_crashing(self):
+        import json
+
+        from instruments.sif.adapter import _json_safe
+
+        class Opaque:
+            def __repr__(self):
+                return "<opaque>"
+
+        json.dumps(_json_safe({"x": Opaque()}))
+
+    def test_paths_and_times_still_convert(self):
+        import json
+        from datetime import datetime, timezone
+        from pathlib import Path
+
+        from instruments.sif.adapter import _json_safe
+
+        safe = _json_safe({
+            "path": Path("a") / "b",
+            "when": datetime(2026, 8, 6, tzinfo=timezone.utc),
+            "count": np.int64(4),
+        })
+        json.dumps(safe)
+        assert safe["count"] == 4
+        assert safe["when"].startswith("2026-08-06")

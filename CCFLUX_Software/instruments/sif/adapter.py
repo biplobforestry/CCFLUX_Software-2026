@@ -782,4 +782,13 @@ def _json_safe(value):
         return [_json_safe(item) for item in value]
     if isinstance(value, np.generic):
         return value.item()
-    return value
+    if isinstance(value, (str, bool, int, float)) or value is None:
+        return value
+    # Anything else would have travelled unchanged into json.dump and failed
+    # there, four minutes into a run and with the science already computed. The
+    # terrain sampler is the case that found this: it is a function the caller
+    # supplies, and the options block is a record of what the run was given, so
+    # note that one was passed rather than losing the fact or crashing on it.
+    if callable(value):
+        return f"{getattr(value, '__name__', 'callable')}() supplied"
+    return repr(value)
