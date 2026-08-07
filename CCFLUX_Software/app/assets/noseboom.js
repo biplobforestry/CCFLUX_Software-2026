@@ -552,7 +552,53 @@
   async function startStatisticsExport(){const formats=Array.from(document.querySelectorAll('[name=exportFormat]:checked')).map(input=>input.value);if(!formats.length){alert('Select at least one export format.');return;}const dpi=Number(byId('exportDpi').value);closeExport();showBusy('Exporting publication figures','Starting the background renderer.',1);try{await api('/api/noseboom/statistics/export',{method:'POST',body:JSON.stringify({formats,dpi})});await pollStatisticsExport();}catch(error){hideBusy();alert(error.message);log(`Noseboom statistics export failed to start: ${error.message}`);}}
   async function pollStatisticsExport(){for(;;){await new Promise(resolve=>setTimeout(resolve,350));const state=await api('/api/noseboom/statistics/export/progress');showBusy('Exporting publication figures',state.step||'Rendering figures',state.progress||0);if(state.status==='running')continue;if(state.status==='failed'){hideBusy();throw new Error(state.error||'Publication export failed');}hideBusy();byId('exportResults').innerHTML=`<h3>Export complete</h3>${(state.files||[]).map(file=>`<a href="${escapeHtml(file.url)}">Download ${escapeHtml(file.name)}</a>`).join('')}`;byId('exportModal').classList.add('show');log(`Noseboom statistics export complete: ${(state.files||[]).length} files`);return;}}
 
-  async function refresh(){showBusy('Loading Noseboom workspace','Reading the active Flight Project and bounded scientific browser data.');try{payload=await api('/api/noseboom');const rawPoints=(payload?.data?.points||[]).filter(point=>finite(point.lat)&&finite(point.lon)),pointLimit=Math.max(500,Number(payload?.data?.browser_limits?.map_points)||6000),pointStep=Math.max(1,Math.ceil(rawPoints.length/pointLimit));browserPoints=rawPoints.filter((_,index)=>index%pointStep===0);byId('flightName').textContent=payload.flight_id||'No project';if(!payload.ready||!payload.data?.available){byId('statusText').textContent=payload.processing_status==='processing'?payload.processing_step:'Noseboom processing has not produced a map yet.';showMapError(payload.data?.reason||'Noseboom processing has not produced a valid route.');byId('statisticsExportBtn').disabled=true;return;}byId('statusDot').classList.add('ready');byId('statusText').textContent='Processed Noseboom data loaded from the active Flight Project';byId('mapMessage').hidden=true;byId('statisticsExportBtn').disabled=false;const route=points();if(ensureMap()){await makeLayers(route);showLayer(activeLayer,false,false);resetMap(false);setTimeout(()=>map.invalidateSize(false),120);}showBusy('Preparing scientific plots','Rendering the selected Noseboom statistical view.',62);await renderStats(activeStat,false,false);byId('dataExportBtn').style.display='';syncDownloadOptions();log('Noseboom browser data rendered successfully');}catch(error){byId('statusText').textContent=`Noseboom view failed: ${error.message}`;showMapError(error.message);log(`Noseboom browser error: ${error.message}`);}finally{hideBusy();}}
+  // Investigation time filter. A histogram, a spectrum and a wind comparison
+  // over the whole flight say nothing about ten minutes inside it, so the
+  // server recomputes every product for the chosen window; the page only asks
+  // for it and redraws. The saved project is untouched.
+  function stampText(value){return String(value||'').replace('T',' ').replace('+00:00','').replace('Z','').split('.')[0];}
+  function investigationState(){return payload?.investigation||{};}
+  function showInvestigationLabel(){const state=investigationState(),label=byId('investigationLabel');if(!label)return;label.textContent=state.active&&state.interval?`Investigation ${stampText(state.interval.start)} → ${stampText(state.interval.end)} UTC`:'';}
+  function openInvestigation(){
+    const state=investigationState(),bounds=state.bounds||{};
+    byId('investigationBounds').textContent=bounds.start&&bounds.end?`Allowed inside the main Time Filter: ${stampText(bounds.start)} to ${stampText(bounds.end)} UTC.`:'Apply the main Time Filter first.';
+    byId('investigationStart').value=stampText(state.interval?.start||bounds.start||'');
+    byId('investigationEnd').value=stampText(state.interval?.end||bounds.end||'');
+    byId('investigationError').hidden=true;byId('investigationStep').textContent='';byId('investigationTrack').hidden=true;byId('investigationFill').style.width='0%';
+    byId('investigationClear').hidden=!state.active;
+    byId('investigationModal').classList.add('show');
+  }
+  function closeInvestigation(){byId('investigationModal').classList.remove('show');}
+  function investigationFailed(message){const box=byId('investigationError');box.hidden=false;box.textContent=message;byId('investigationUpdate').disabled=false;}
+  async function applyInvestigation(){
+    const body=JSON.stringify({start:byId('investigationStart').value.trim(),end:byId('investigationEnd').value.trim()});
+    byId('investigationError').hidden=true;byId('investigationUpdate').disabled=true;byId('investigationTrack').hidden=false;
+    try{
+      const response=await fetch('/api/noseboom/investigation',{method:'POST',headers:{'Content-Type':'application/json'},body});
+      if(!response.ok){const detail=await response.json().catch(()=>({}));throw new Error(detail.error||`Investigation filter failed (${response.status})`);}
+      for(;;){
+        await new Promise(resolve=>setTimeout(resolve,400));
+        const state=await api('/api/noseboom/investigation/progress');
+        byId('investigationFill').style.width=`${Math.round(Number(state.progress)||0)}%`;
+        byId('investigationStep').textContent=state.message||'Recomputing the interval';
+        if(state.running)continue;
+        if(state.error)throw new Error(state.error);
+        break;
+      }
+      closeInvestigation();
+      log('Noseboom investigation interval applied');
+      await refresh();
+    }catch(error){investigationFailed(error.message);log(`Noseboom investigation filter failed: ${error.message}`);}
+  }
+  async function clearInvestigation(){
+    byId('investigationUpdate').disabled=true;
+    try{
+      await api('/api/noseboom/investigation/clear',{method:'POST',body:'{}'});
+      closeInvestigation();await refresh();
+    }catch(error){investigationFailed(error.message);}
+  }
+
+  async function refresh(){showBusy('Loading Noseboom workspace','Reading the active Flight Project and bounded scientific browser data.');try{payload=await api('/api/noseboom');const rawPoints=(payload?.data?.points||[]).filter(point=>finite(point.lat)&&finite(point.lon)),pointLimit=Math.max(500,Number(payload?.data?.browser_limits?.map_points)||6000),pointStep=Math.max(1,Math.ceil(rawPoints.length/pointLimit));browserPoints=rawPoints.filter((_,index)=>index%pointStep===0);byId('flightName').textContent=payload.flight_id||'No project';showInvestigationLabel();if(!payload.ready||!payload.data?.available){byId('statusText').textContent=payload.processing_status==='processing'?payload.processing_step:'Noseboom processing has not produced a map yet.';showMapError(payload.data?.reason||'Noseboom processing has not produced a valid route.');byId('statisticsExportBtn').disabled=true;return;}byId('statusDot').classList.add('ready');byId('statusText').textContent='Processed Noseboom data loaded from the active Flight Project';byId('mapMessage').hidden=true;byId('statisticsExportBtn').disabled=false;const route=points();if(ensureMap()){await makeLayers(route);showLayer(activeLayer,false,false);resetMap(false);setTimeout(()=>map.invalidateSize(false),120);}showBusy('Preparing scientific plots','Rendering the selected Noseboom statistical view.',62);await renderStats(activeStat,false,false);byId('dataExportBtn').style.display='';syncDownloadOptions();log('Noseboom browser data rendered successfully');}catch(error){byId('statusText').textContent=`Noseboom view failed: ${error.message}`;showMapError(error.message);log(`Noseboom browser error: ${error.message}`);}finally{hideBusy();}}
 
   const initial=viewFromPath();if(initial.layer)activeLayer=initial.layer;if(initial.stat)activeStat=initial.stat;
   byId('mainGuiBtn').onclick=()=>{window.location.href='/';};byId('refreshBtn').onclick=refresh;
@@ -561,6 +607,8 @@
   byId('resetMapBtn').onclick=()=>resetMap();byId('mapFullscreenBtn').onclick=()=>openFullscreen('map');byId('menuFullscreen').onclick=()=>openFullscreen(viewMenuContext.panel);byId('menuNewTab').onclick=()=>{closeViewMenu();window.open(viewMenuContext.path, '_blank', 'noopener');};byId('menuCurrentSettings').onclick=()=>showSettings(false);byId('menuChangeSettings').onclick=()=>showSettings(true);byId('methodsBtn').onclick=showMethods;byId('methodsClose').onclick=closeMethods;byId('methodsDone').onclick=closeMethods;byId('methodsCopy').onclick=()=>navigator.clipboard?.writeText(methodsStatement());byId('settingsClose').onclick=closeSettings;byId('settingsModal').onclick=event=>{if(event.target===byId('settingsModal'))closeSettings();};
   byId('bufferInput').oninput=()=>resetMap(false);byId('lineWidthInput').onchange=async()=>{showBusy('Updating map','Rebuilding bounded route layers.');try{await makeLayers(points());showLayer(activeLayer,false,false);}finally{hideBusy();}};byId('colorScheme').onchange=byId('lineWidthInput').onchange;
   byId('dataExportBtn').onclick=openDownload;byId('downloadClose').onclick=closeDownload;byId('downloadCancel').onclick=closeDownload;byId('downloadStart').onclick=startDataDownload;byId('downloadVariables').onchange=syncDownloadOptions;byId('downloadProgressClose').onclick=()=>byId('downloadProgressModal').classList.remove('show');syncDownloadOptions();byId('statisticsExportBtn').onclick=openExport;byId('exportClose').onclick=closeExport;byId('exportCancel').onclick=closeExport;byId('exportStart').onclick=startStatisticsExport;
+  byId('investigationBtn').onclick=openInvestigation;byId('investigationClose').onclick=closeInvestigation;byId('investigationCancel').onclick=closeInvestigation;byId('investigationUpdate').onclick=applyInvestigation;byId('investigationClear').onclick=clearInvestigation;
+  byId('investigationModal').onclick=event=>{if(event.target===byId('investigationModal'))closeInvestigation();};
   document.addEventListener('click',event=>{if(!event.target.closest('#viewMenu'))closeViewMenu();});window.addEventListener('popstate',()=>{const view=viewFromPath();if(view.layer)showLayer(view.layer,false,false);if(view.stat)renderStats(view.stat,false);});window.addEventListener('fullscreenchange',()=>setTimeout(()=>{if(map)map.invalidateSize(false);document.querySelectorAll('#statsView .js-plotly-plot, #qcView .js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));},180));
   let resizeTimer=null;new ResizeObserver(()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>document.querySelectorAll('#statsView .js-plotly-plot').forEach(plot=>window.Plotly&&Plotly.Plots.resize(plot)),120);}).observe(byId('statsView'));
   byId('logBtn').onclick=async()=>{const panel=byId('logPanel');panel.classList.toggle('show');if(!panel.classList.contains('show'))return;try{const result=await api('/api/logs');panel.innerHTML=(result.records||[]).map(record=>`${escapeHtml(record.timestamp)} [${escapeHtml(record.severity)}] ${escapeHtml(record.message)}`).join('<br>')||'No log entries.';panel.scrollTop=panel.scrollHeight;}catch(error){panel.textContent=error.message;}};

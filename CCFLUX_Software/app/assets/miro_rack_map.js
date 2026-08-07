@@ -17,7 +17,9 @@
   let flightTrackLayer = null, flightTrackEnabled = true;
   let currentView = {selected:[], groupStyles:new Map()};
   let updateGeneration = 0, busyOwner = null, zoomTimer = null;
-  const selections = [...document.querySelectorAll('.selection')];
+  // The investigation filter shares the toolbar's card styling but is not a
+  // layer: it carries no instrument select, and treating it as one threw.
+  const selections = [...document.querySelectorAll('.selection:not(.investigation)')];
   const byId = id => document.getElementById(id);
   const nextFrame = () => new Promise(resolve => requestAnimationFrame(resolve));
   const canonicalGas = value => String(value).replace(/\s+(wet|dry|raw|sync)$/i,'').trim().toUpperCase();
@@ -95,11 +97,81 @@
     });
   }
 
+  // Investigation time filter. Every sample carries its recorded time, so one
+  // interval reaches every instrument, every trace gas and the flight track,
+  // and the colour range is taken from what survives it - otherwise the scale
+  // would still be stretched by concentrations that are no longer drawn.
+  let investigation = null;
+  function insideInvestigation(point) {
+    if (!investigation) return true;
+    const stamp = utcMilliseconds(point.time);
+    if (!Number.isFinite(stamp)) return false;
+    return stamp >= investigation.start && stamp <= investigation.end;
+  }
+  function layerPoints(instrument, gas) {
+    return (payload.layers[instrument]?.[gas] || []).filter(insideInvestigation);
+  }
+  function recordedExtent() {
+    let low = Infinity, high = -Infinity;
+    Object.values(payload.layers || {}).forEach(gases =>
+      Object.values(gases || {}).forEach(rows => (rows || []).forEach(point => {
+        const stamp = utcMilliseconds(point.time);
+        if (!Number.isFinite(stamp)) return;
+        if (stamp < low) low = stamp;
+        if (stamp > high) high = stamp;
+      })));
+    return Number.isFinite(low) && Number.isFinite(high) ? [low,high] : null;
+  }
+  function investigationText(value) {
+    const date = new Date(Number(value));
+    return Number.isFinite(date.getTime())
+      ? `${date.toISOString().slice(0,10)} ${date.toISOString().slice(11,19)}` : '';
+  }
+  function describeInvestigation() {
+    const note = byId('investigationNote');
+    const extent = recordedExtent();
+    if (!note) return;
+    const recorded = extent
+      ? `Recorded ${investigationText(extent[0])} to ${investigationText(extent[1])} UTC.`
+      : '';
+    note.textContent = investigation
+      ? `Investigation only: ${investigationText(investigation.start)} to ${investigationText(investigation.end)} UTC. ${recorded} The main GUI Time Filter is unchanged.`
+      : `${recorded} Showing everything recorded inside the main GUI Time Filter.`;
+  }
+  function applyInvestigation() {
+    const start = utcMilliseconds(byId('investigationStart').value.trim());
+    const end = utcMilliseconds(byId('investigationEnd').value.trim());
+    const extent = recordedExtent();
+    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+      show('Give both investigation times as UTC, for example 2026-08-03 11:30:00.');
+      return;
+    }
+    if (end <= start) { show('The investigation end must be after its start.'); return; }
+    if (extent && (start > extent[1] || end < extent[0])) {
+      show('The investigation interval lies outside the recorded data.');
+      return;
+    }
+    investigation = {start,end};
+    describeInvestigation();
+    requestUpdate('Applying the investigation time filter to every layer');
+  }
+  function clearInvestigation() {
+    investigation = null;
+    const extent = recordedExtent();
+    if (extent) {
+      byId('investigationStart').value = investigationText(extent[0]);
+      byId('investigationEnd').value = investigationText(extent[1]);
+    }
+    describeInvestigation();
+    requestUpdate('Showing the whole recorded interval again');
+  }
+
   function flightTrackPoints(selected = []) {
-    const prepared = (payload.flight_track || []).filter(point => finite(point.lat) && finite(point.lon));
+    const prepared = (payload.flight_track || []).filter(point =>
+      finite(point.lat) && finite(point.lon) && insideInvestigation(point));
     if (prepared.length > 1) return prepared.map(point => ({...point,lat:Number(point.lat),lon:Number(point.lon)}));
     for (const item of selected) {
-      const records = (payload.layers[item.instrument]?.[item.gas] || []).filter(point => finite(point.lat) && finite(point.lon));
+      const records = layerPoints(item.instrument,item.gas).filter(point => finite(point.lat) && finite(point.lon));
       if (records.length > 1) return records.map(point => ({...point,lat:Number(point.lat),lon:Number(point.lon)}));
     }
     return [];
@@ -177,6 +249,12 @@
         clearTimeout(zoomTimer);
         zoomTimer = setTimeout(() => closeBusy('zoom'), 120);
       });
+      const extent = recordedExtent();
+      if (extent) {
+        byId('investigationStart').value = investigationText(extent[0]);
+        byId('investigationEnd').value = investigationText(extent[1]);
+      }
+      describeInvestigation();
       closeBusy('load');
       await update('Rendering the saved trace-gas map');
       fetch('/api/miro-rack/log', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:'MIRO Rack Mapview opened from saved map product'})}).catch(()=>{});
@@ -226,7 +304,7 @@
     groups.forEach((group,index) => {
       const members = selected.filter(item => groupKey(item) === group);
       const allValues = members
-        .flatMap(item => payload.layers[item.instrument]?.[item.gas] || [])
+        .flatMap(item => layerPoints(item.instrument,item.gas))
         .map(point => Number(point.value)).filter(Number.isFinite).sort((a,b)=>a-b);
       if (!allValues.length) return;
       const low = allValues[Math.floor((allValues.length-1)*.02)];
@@ -245,7 +323,7 @@
     for (let layerIndex=0; layerIndex<selected.length; layerIndex+=1) {
       if (generation !== updateGeneration) return;
       const item = selected[layerIndex];
-      const points = (payload.layers[item.instrument]?.[item.gas] || []).filter(point => finite(point.lat) && finite(point.lon) && finite(point.value));
+      const points = layerPoints(item.instrument,item.gas).filter(point => finite(point.lat) && finite(point.lon) && finite(point.value));
       const style = groupStyles.get(groupKey(item));
       if (!style || points.length < 2) continue;
       const shifted = offsetTrack(points,item.offsetMetres);
@@ -281,7 +359,9 @@
       map.fitBounds(mapHomeBounds,{padding:[35,35],animate:false});
       fitted=true;
     }
-    if (!groupStyles.size) show('The selected layer has no synchronized GPS samples.');
+    if (!groupStyles.size) show(investigation
+      ? 'No synchronized GPS samples fall inside the investigation interval.'
+      : 'The selected layer has no synchronized GPS samples.');
     closeBusy('update');
   }
 
@@ -298,8 +378,10 @@
   }
 
   function visibleTimeframe() {
+    // The exported header states the interval that was drawn, so it follows
+    // the investigation filter rather than the whole recorded range.
     const times = currentView.selected
-      .flatMap(item => payload.layers[item.instrument]?.[item.gas] || [])
+      .flatMap(item => layerPoints(item.instrument,item.gas))
       .map(point => utcMilliseconds(point.time)).filter(Number.isFinite).sort((a,b)=>a-b);
     const fallback = flightTrackPoints(currentView.selected)
       .map(point => utcMilliseconds(point.time)).filter(Number.isFinite).sort((a,b)=>a-b);
@@ -395,7 +477,7 @@
       context.drawImage(tile,tileRect.left-rect.left,headerHeight+tileRect.top-rect.top,tileRect.width,tileRect.height);
     }
     for (const item of currentView.selected) {
-      const points=(payload.layers[item.instrument]?.[item.gas] || []).filter(point=>finite(point.lat)&&finite(point.lon)&&finite(point.value));
+      const points=layerPoints(item.instrument,item.gas).filter(point=>finite(point.lat)&&finite(point.lon)&&finite(point.value));
       const style=currentView.groupStyles.get(groupKey(item));
       if (!style || points.length<2) continue;
       const shifted=offsetTrack(points,item.offsetMetres);
@@ -508,6 +590,8 @@
     event.currentTarget.textContent=`Flight track: ${flightTrackEnabled ? 'Enabled' : 'Disabled'}`;
     requestUpdate(flightTrackEnabled ? 'Drawing the black dotted flight track' : 'Hiding the flight track');
   });
+  byId('investigationApply').addEventListener('click',applyInvestigation);
+  byId('investigationClear').addEventListener('click',clearInvestigation);
   byId('exportMap').addEventListener('click',exportCurrentMapPdf);
   byId('resetMapPosition').addEventListener('click',resetMapPosition);
   byId('update').addEventListener('click',()=>requestUpdate('Refreshing all selected map layers'));

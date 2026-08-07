@@ -156,3 +156,91 @@ def test_a_disk_without_the_saved_captures_is_refused(backend, tmp_path):
         backend.reconnect_gopro_media(
             {"has_hard_disk": True, "directory": str(disk)}
         )
+
+
+class TestTheDiskIsNotAskedForWhenItIsAlreadyMounted:
+    """A separate camera folder is chosen only when the camera sits apart.
+
+    On Flight_CCT0803 the GoPro folder is inside the flight folder, so no camera
+    folder was ever selected and camera_folder_path is None. Looking only there
+    declared the media unreachable and asked the operator whether they had the
+    disk the software was reading the flight from - and every image 404ed.
+    """
+
+    def _project(self, backend, flight_root: Path, tmp_path: Path):
+        from core.flight_project import FlightProject
+
+        project = FlightProject(
+            flight_id="Flight_CCT0803",
+            flight_folder_path=flight_root,
+            output_folder_path=tmp_path / "out",
+        )
+        backend._flight_project = project
+        return project
+
+    def test_the_folder_the_scan_recorded_is_used(self, backend, tmp_path):
+        flight = _media(tmp_path / "Flight_CCT0803", "GPAA7798.JPG")
+        project = self._project(backend, flight, tmp_path)
+        state = project.detected_instruments.setdefault(
+            "gopro", _detected("gopro")
+        )
+        state.selected_source_folders = [flight / GOPRO_FOLDER_NAME / "DCIM"]
+
+        assert backend.gopro_media_root() == flight / GOPRO_FOLDER_NAME / "DCIM"
+        status = backend.gopro_media_status()
+        assert status["media_available"] is True
+        assert status["prompt"] is None
+        assert backend.gopro_image_file("1").name == "GPAA7798.JPG"
+
+    def test_a_recorded_file_locates_its_own_folder(self, backend, tmp_path):
+        flight = _media(tmp_path / "Flight_CCT0803", "GPAA7798.JPG")
+        project = self._project(backend, flight, tmp_path)
+        state = project.detected_instruments.setdefault(
+            "gopro", _detected("gopro")
+        )
+        state.selected_source_files = [
+            flight / GOPRO_FOLDER_NAME / "DCIM" / "169GOPRO" / "GPAA7798.JPG"
+        ]
+
+        assert backend.gopro_image_file("1").name == "GPAA7798.JPG"
+
+    def test_the_flight_folder_gopro_folder_is_the_last_resort(
+        self, backend, tmp_path
+    ):
+        flight = _media(tmp_path / "Flight_CCT0803", "GPAA7798.JPG")
+        self._project(backend, flight, tmp_path)
+
+        assert backend.gopro_media_root() == flight / GOPRO_FOLDER_NAME
+        assert backend.gopro_image_file("1").name == "GPAA7798.JPG"
+
+    def test_a_flight_without_camera_media_still_asks(self, backend, tmp_path):
+        flight = tmp_path / "Flight_no_camera"
+        (flight / "Noseboom").mkdir(parents=True)
+        self._project(backend, flight, tmp_path)
+
+        assert backend.gopro_media_root() is None
+        assert "hard disk" in backend.gopro_media_status()["prompt"]
+
+
+def _detected(instrument_id: str):
+    from core.flight_project import InstrumentProjectState
+
+    return InstrumentProjectState(instrument_id=instrument_id)
+
+
+def test_opening_a_second_image_rebuilds_the_loading_box():
+    """The reconnect offer replaces the loading box and its children.
+
+    imageTitle, imageProgress and imagePercent all live inside it, so the next
+    open touched a removed element before the modal was shown: clicking "more"
+    on any other capture did nothing at all for the rest of the session.
+    """
+    script = (
+        Path(__file__).resolve().parents[1] / "app" / "assets" / "gopro.js"
+    ).read_text(encoding="utf-8")
+
+    assert "function resetLoadingBox()" in script
+    body = script.split("async function loadImage(captureId)", 1)[1]
+    rebuild = body.index("resetLoadingBox()")
+    assert rebuild < body.index("byId('imageProgress')")
+    assert rebuild < body.index("modal.classList.add('show')")

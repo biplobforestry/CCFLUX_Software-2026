@@ -267,6 +267,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 self.server.backend.noseboom_data_export_progress(),
             )
+        elif path == "/api/noseboom/investigation/progress":
+            self._send_json(
+                HTTPStatus.OK,
+                self.server.backend.noseboom_investigation_progress(),
+            )
+        elif path == "/api/noseboom/investigation":
+            self._send_json(
+                HTTPStatus.OK, self.server.backend.noseboom_investigation_bounds()
+            )
         elif path == "/api/noseboom/statistics/export/progress":
             self._send_json(
                 HTTPStatus.OK,
@@ -293,6 +302,17 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, self.server.backend.hatchbox_view("partector"))
         elif path == "/api/ins-gimbal":
             self._send_json(HTTPStatus.OK, self.server.backend.hatchbox_view("ins_gimbal"))
+        elif path == "/api/ins-gimbal/export/progress":
+            self._send_json(
+                HTTPStatus.OK, self.server.backend.ins_gimbal_export_progress()
+            )
+        elif path.startswith("/api/ins-gimbal/export/download/"):
+            self._send_file(
+                self.server.backend.ins_gimbal_export_file(
+                    path.removeprefix("/api/ins-gimbal/export/download/")
+                ),
+                download=True,
+            )
         elif path == "/api/micasense":
             self._send_json(HTTPStatus.OK, self.server.backend.hatchbox_view("micasense"))
         elif path.startswith("/api/micasense/thumbnail/"):
@@ -531,6 +551,32 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 body = self._json_body()
                 result = self.server.backend.start_noseboom_statistics_export(body)
                 self._send_json(HTTPStatus.ACCEPTED, result)
+            elif path == "/api/noseboom/investigation":
+                self._send_json(
+                    HTTPStatus.ACCEPTED,
+                    self.server.backend.start_noseboom_investigation(
+                        self._json_body()
+                    ),
+                )
+            elif path == "/api/noseboom/investigation/clear":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.backend.clear_noseboom_investigation(),
+                )
+            elif path == "/api/ins-gimbal/export":
+                body = self._json_body()
+                self._send_json(
+                    HTTPStatus.ACCEPTED,
+                    self.server.backend.start_ins_gimbal_export(body),
+                )
+            elif path == "/api/flir/map/export":
+                filename, content, media_type = (
+                    self.server.backend.export_flir_map_figure(self._json_body())
+                )
+                self._send_bytes(
+                    HTTPStatus.OK, content, media_type,
+                    {"Content-Disposition": f'attachment; filename="{filename}"'},
+                )
             elif path in {"/api/opc/map/export", "/api/partector/map/export"}:
                 body = self._json_body()
                 filename, pdf = self.server.backend.export_size_distribution_map_pdf(

@@ -5,6 +5,28 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>INS Gimbal · CC-FLUX Campaign 2026</title>
   <link rel="stylesheet" href="/hatchbox_science.css">
+  <style>
+    .modal{position:fixed;inset:0;z-index:6000;display:none;align-items:center;justify-content:center;padding:24px;background:#020912d9}
+    .modal.show{display:flex}
+    .modal-card{width:min(760px,94vw);max-height:88vh;overflow:auto;border:1px solid #3c6782;border-top:5px solid var(--cyan);border-radius:16px;background:#0d1d2d;box-shadow:0 22px 72px #000b}
+    .modal-head{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid var(--line)}
+    .modal-head h2{margin:0;font-size:1.2rem}
+    .modal-body{padding:18px;color:#c7dceb;line-height:1.5}
+    .modal-actions{display:flex;justify-content:flex-end;gap:9px;padding:0 18px 18px}
+    .format-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:14px 0}
+    .format-choice{display:flex;align-items:center;gap:9px;padding:13px;border:1px solid #35566f;border-radius:9px;background:#091827;font-weight:750}
+    .format-choice input{width:20px;height:20px}
+    .export-option{padding:12px;border:1px solid #294a62;border-radius:10px;background:#091827}
+    .export-option label{display:block;color:#e8f7ff;font-weight:750;margin-bottom:5px}
+    .export-option select{width:100%;min-height:42px;padding:8px 10px;border:1px solid #3a6078;border-radius:8px;background:#06131f;color:white}
+    .export-option small{display:block;color:var(--muted);margin-top:5px}
+    .progress-track{height:14px;border-radius:99px;background:#07131f;border:1px solid #33566e;overflow:hidden;margin:14px 0}
+    .progress-fill{height:100%;width:0;background:linear-gradient(90deg,#17b6d8,#438dff);transition:width .2s}
+    .result-list a{display:block;color:#6fe0ff;margin:7px 0;word-break:break-all}
+    .result-list .warn{color:#ffb4b4;font-weight:700}
+    .nav-tabs .spacer{flex:1}
+    @media(max-width:760px){.format-grid{grid-template-columns:1fr}}
+  </style>
 </head>
 <body>
   <header class="topbar">
@@ -22,6 +44,8 @@
       <a class="btn active" data-view="overview" href="/ins_gimbal/overview">Overview</a>
       <a class="btn" data-view="motion" href="/ins_gimbal/motion">Motion diagnostics</a>
       <a class="btn" data-view="frequency" href="/ins_gimbal/frequency">Frequency analysis</a>
+      <span class="spacer"></span>
+      <button class="btn primary" id="exportBtn" type="button" title="Render this page as a publication figure">Export</button>
     </nav>
     <section class="summary-grid" id="summaryGrid"></section>
     <section class="chart-grid">
@@ -33,6 +57,35 @@
       <article class="chart-card wide" data-section="frequency"><div class="card-head"><h2>Welch amplitude spectral density</h2><button class="btn" data-fullscreen="asdPlot">Full screen</button></div><div class="plot" id="asdPlot"></div></article>
     </section>
   </main>
+  <div class="modal" id="exportModal" role="dialog" aria-modal="true" aria-labelledby="exportTitle">
+    <div class="modal-card">
+      <div class="modal-head"><h2 id="exportTitle">Export figure</h2><button class="btn" id="exportClose">Close</button></div>
+      <div class="modal-body">
+        <p id="exportSubject">Render the open page as one publication figure.</p>
+        <p class="science-note" style="padding:0">Figures are seven inches wide, set in Times New Roman, and nothing is drawn below 8 pt.</p>
+        <div class="format-grid">
+          <label class="format-choice"><input type="checkbox" name="exportFormat" value="pdf" checked> PDF</label>
+          <label class="format-choice"><input type="checkbox" name="exportFormat" value="png" checked> PNG</label>
+          <label class="format-choice"><input type="checkbox" name="exportFormat" value="svg"> SVG</label>
+        </div>
+        <div class="export-option">
+          <label for="exportDpi">Resolution (DPI)</label>
+          <select id="exportDpi">
+            <option value="150">150 DPI</option>
+            <option value="300" selected>300 DPI</option>
+            <option value="600">600 DPI</option>
+            <option value="1200">1200 DPI</option>
+            <option value="1500">1500 DPI · highest offered</option>
+          </select>
+          <small>PDF and SVG stay vector; the resolution applies to PNG and to any raster the figure contains.</small>
+        </div>
+        <div class="progress-track" id="exportTrack" hidden><div class="progress-fill" id="exportFill"></div></div>
+        <p id="exportStep" class="science-note" style="padding:0"></p>
+        <div class="result-list" id="exportResults"></div>
+      </div>
+      <div class="modal-actions"><button class="btn" id="exportCancel">Cancel</button><button class="btn primary" id="exportStart">Export figure</button></div>
+    </div>
+  </div>
   <div class="busy show" id="busy"><div class="busy-card"><div class="spinner"></div><h2>Preparing INS Gimbal scientific workspace</h2><p>Loading saved, precomputed Gremsy products from the Flight Project.</p></div></div>
   <footer class="app-footer">© 2026 Biplob Dey · Forschungszentrum Jülich GmbH · <span class="app-version">Version 1.0.2</span></footer>
   <script src="/vendor/plotly.min.js"></script>

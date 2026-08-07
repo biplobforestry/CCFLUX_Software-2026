@@ -7,7 +7,7 @@
   async function api(url){const response=await fetch(url,{cache:'no-store'});if(!response.ok)throw new Error(`Request failed (${response.status})`);return response.json();}
   function numericAxis(digits=3){return {separatethousands:true,exponentformat:'none',showexponent:'none',tickformat:`,.${digits}f`,automargin:true};}
   function layout(title,yTitle,extra={}){
-    const base={title:{text:title,x:.5,y:1,yanchor:'top',pad:{t:10},font:{size:18}},paper_bgcolor:'#f7fafc',plot_bgcolor:'#fff',font:{family:'Arial, sans-serif',size:14,color:'#172431'},margin:{l:98,r:52,t:96,b:78},xaxis:{title:'Recorded UTC',gridcolor:'#dce5ea',automargin:true},yaxis:{title:yTitle,gridcolor:'#dce5ea',...numericAxis(3)},legend:{orientation:'h',y:1.02,yanchor:'bottom',x:0},hovermode:'closest'};
+    const base={title:{text:title,x:.5,y:1,yanchor:'top',pad:{t:10},font:{size:18}},paper_bgcolor:'#f7fafc',plot_bgcolor:'#fff',font:{family:'Arial, sans-serif',size:14,color:'#172431'},margin:{l:98,r:52,t:96,b:78},xaxis:{title:'Recorded UTC',gridcolor:'#dce5ea',automargin:true},yaxis:{title:yTitle,gridcolor:'#dce5ea',...numericAxis(3)},legend:{orientation:'h',y:1.02,yanchor:'bottom',x:0,bgcolor:'rgba(0,0,0,0)',bordercolor:'rgba(0,0,0,0)',borderwidth:0},hovermode:'closest'};
     return {...base,...extra,xaxis:{...base.xaxis,...(extra.xaxis||{})},yaxis:{...base.yaxis,...(extra.yaxis||{})}};
   }
   function sessionTraces(key,name,color,width=1.2,dash='solid'){
@@ -67,6 +67,37 @@
     Plotly.react('asdPlot',traces,layout('Welch amplitude spectral density · Duration-weighted spectra use every acquisition session','Acceleration ASD [g/√Hz]',{xaxis:{title:'Frequency [Hz]',gridcolor:'#dce5ea',...numericAxis(3)},yaxis:{title:{text:'Acceleration ASD [g/√Hz]',font:{color:colours.x}},gridcolor:'#dce5ea',...decadeAxis(colours.x)},yaxis2:{title:{text:'Angular-rate ASD [(deg/s)/√Hz]',font:{color:colours.y}},overlaying:'y',side:'right',gridcolor:'rgba(0,0,0,0)',...decadeAxis(colours.y)},margin:{l:112,r:126,t:96,b:78},shapes}),config);
   }
   function pathView(){if(location.pathname.includes('/motion'))return'motion';if(location.pathname.includes('/frequency'))return'frequency';return'overview';}
+  // The export renders the open page server-side, at the seven-inch width and
+  // eight-point floor a manuscript needs; a browser image capture cannot hold
+  // either, and cannot write PDF at all.
+  const viewTitles={overview:'Recorded RAW_IMU acceleration and angular rate',motion:'Unfiltered motion diagnostics',frequency:'Acceleration spectrogram and amplitude spectral density'};
+  function escapeHtml(value){return String(value).replace(/[&<>"']/g,character=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));}
+  function openExport(){const view=pathView();$('exportSubject').textContent=`Render “${viewTitles[view]}” as one publication figure.`;$('exportResults').innerHTML='';$('exportStep').textContent='';$('exportTrack').hidden=true;$('exportFill').style.width='0%';$('exportStart').disabled=false;$('exportModal').classList.add('show');}
+  function closeExport(){$('exportModal').classList.remove('show');}
+  async function startExport(){
+    const formats=Array.from(document.querySelectorAll('[name=exportFormat]:checked')).map(input=>input.value);
+    if(!formats.length){$('exportResults').innerHTML='<p class="warn">Select at least one export format.</p>';return;}
+    const body=JSON.stringify({view:pathView(),formats,dpi:Number($('exportDpi').value)});
+    $('exportStart').disabled=true;$('exportResults').innerHTML='';$('exportTrack').hidden=false;
+    try{
+      const response=await fetch('/api/ins-gimbal/export',{method:'POST',headers:{'Content-Type':'application/json'},body});
+      if(!response.ok){const detail=await response.json().catch(()=>({}));throw new Error(detail.error||`Export failed (${response.status})`);}
+      await pollExport();
+    }catch(error){$('exportStep').textContent='';$('exportResults').innerHTML=`<p class="warn">${escapeHtml(error.message)}</p>`;$('exportStart').disabled=false;}
+  }
+  async function pollExport(){
+    for(;;){
+      await new Promise(resolve=>setTimeout(resolve,350));
+      const state=await api('/api/ins-gimbal/export/progress');
+      $('exportFill').style.width=`${Math.round(Number(state.progress)||0)}%`;
+      $('exportStep').textContent=state.step||'Rendering the figure';
+      if(state.status==='running')continue;
+      $('exportStart').disabled=false;
+      if(state.status==='failed')throw new Error(state.error||'Publication export failed');
+      $('exportResults').innerHTML=`<h3>Export complete</h3>${(state.files||[]).map(file=>`<a href="${escapeHtml(file.url)}">Download ${escapeHtml(file.name)}</a>`).join('')}`;
+      return;
+    }
+  }
   function showView(view,push=true){document.querySelectorAll('[data-section]').forEach(card=>card.hidden=card.dataset.section!==view);document.querySelectorAll('[data-view]').forEach(link=>link.classList.toggle('active',link.dataset.view===view));if(push)history.pushState({view},'',`/ins_gimbal/${view}`);setTimeout(resizePlots,60);}
   function resizePlots(){document.querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot));}
   async function load(){
@@ -82,6 +113,8 @@
     finally{$('busy').classList.remove('show');}
   }
   $('refreshBtn').onclick=load;
+  $('exportBtn').onclick=openExport;$('exportClose').onclick=closeExport;$('exportCancel').onclick=closeExport;$('exportStart').onclick=startExport;
+  $('exportModal').onclick=event=>{if(event.target===$('exportModal'))closeExport();};
   document.querySelectorAll('[data-view]').forEach(link=>link.onclick=event=>{event.preventDefault();showView(link.dataset.view);});
   document.querySelectorAll('[data-fullscreen]').forEach(button=>button.onclick=async()=>{await $(button.dataset.fullscreen).closest('.chart-card').requestFullscreen();setTimeout(resizePlots,120);});
   addEventListener('popstate',()=>showView(pathView(),false));addEventListener('resize',resizePlots);addEventListener('fullscreenchange',()=>setTimeout(resizePlots,120));load();

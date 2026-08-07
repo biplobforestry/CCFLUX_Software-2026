@@ -66,6 +66,10 @@ from core.flir_discovery import (
 )
 from core.instrument_registry import InstrumentRegistry
 from core.logging_manager import LogLevel, ProcessingLogManager
+from .ins_gimbal_export import (
+    InsGimbalExportManager,
+    validate_request as validate_ins_gimbal_request,
+)
 from .noseboom_statistics_export import NoseboomStatisticsExportManager
 from core.resource_manager import CameraBatchPolicy, GIB, ResourceLimits, ResourceManager
 from core.priority_manager import create_default_priority_queue
@@ -145,6 +149,9 @@ GOPRO_FOLDER_REQUIREMENT = (
     '"GoPro" holding the camera media.'
 )
 GOPRO_RECONNECT_PROMPT = "Do you have the hard disk with the GoPro data?"
+# Minutes dropped from each end of a Noseboom record before the frequency and
+# spectral products are computed, matching what processing uses.
+NOSEBOOM_TRIM_MINUTES = 2.0
 GOPRO_MEDIA_UNAVAILABLE = (
     "The GoPro image is not available because the camera media is not "
     "reachable. Reconnect the hard disk holding the GoPro folder."
@@ -284,6 +291,23 @@ class InstrumentScanState:
             "output_files": list(self.output_files),
             "quicklook": dict(self.quicklook),
         }
+
+
+def _parse_investigation_time(value: object, field: str) -> datetime:
+    """Read one end of an investigation interval as an aware UTC instant."""
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"Give the investigation {field} time")
+    normalised = text.replace(" ", "T").replace("Z", "+00:00")
+    try:
+        stamp = datetime.fromisoformat(normalised)
+    except ValueError as error:
+        raise ValueError(
+            f"The investigation {field} time is not a valid time: {text}"
+        ) from error
+    # The workspace states its times in UTC, so a bare stamp is UTC. Guessing a
+    # local zone here would move the interval by the operator's offset.
+    return stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp
 
 
 def _instrument_is_processable(state: InstrumentScanState) -> bool:
@@ -748,6 +772,15 @@ class DashboardScanBackend:
         self._noseboom_straight_settings: dict[str, float] = {}
         self._noseboom_preview_quicklook: dict[str, object] | None = None
         self._noseboom_preview_settings: dict[str, float] | None = None
+        # A narrower interval than the main Time Filter, for looking at one part
+        # of a flight. It never changes the project: the products are recomputed
+        # from the raw record for that window and held here until it is cleared.
+        self._noseboom_investigation: dict[str, object] | None = None
+        self._noseboom_investigation_job: dict[str, object] = {
+            "job_id": None, "running": False, "ready": False, "progress": 0.0,
+            "message": "No investigation interval is being prepared.",
+            "error": None, "interval": None,
+        }
         self._noseboom_recalculation: dict[str, object] = {
             "job_id": None,
             "running": False,
@@ -761,6 +794,9 @@ class DashboardScanBackend:
         self._noseboom_recalculation_thread: threading.Thread | None = None
         self._noseboom_statistics_export = NoseboomStatisticsExportManager(
             self.logger, self._save_noseboom_statistics_exports
+        )
+        self._ins_gimbal_export = InsGimbalExportManager(
+            self.logger, self._save_ins_gimbal_exports
         )
         self._miro_rack_bridge: object | None = None
         self._hatchbox_view_lock = threading.RLock()
@@ -1042,6 +1078,13 @@ class DashboardScanBackend:
             self.processing_queue = create_default_priority_queue()
             self._noseboom_preview_quicklook = None
             self._noseboom_preview_settings = None
+            self._noseboom_investigation = None
+            self._noseboom_investigation_job = {
+                "job_id": None, "running": False, "ready": False,
+                "progress": 0.0,
+                "message": "No investigation interval is being prepared.",
+                "error": None, "interval": None,
+            }
             self._noseboom_recalculation = {
                 "job_id": None,
                 "running": False,
@@ -2499,7 +2542,27 @@ class DashboardScanBackend:
         with self._lock:
             state = self._instruments["noseboom"]
             project = self._flight_project
+            # An investigation interval replaces the products every panel and
+            # the export read, so one filter reaches all of them.
+            investigation = self._noseboom_investigation
+            data = (
+                dict(investigation["data"]) if investigation
+                else dict(state.quicklook)
+            )
+            selected_start = self._time_state.selected_analysis_start
+            selected_end = self._time_state.selected_analysis_end
             return {
+                "investigation": {
+                    "active": bool(investigation),
+                    "interval": (
+                        dict(investigation["interval"]) if investigation else None
+                    ),
+                    "bounds": {
+                        "start": selected_start.isoformat() if selected_start else None,
+                        "end": selected_end.isoformat() if selected_end else None,
+                    },
+                    "job": dict(self._noseboom_investigation_job),
+                },
                 "download": {
                     "source": "original" if raw_available
                     else "project" if archived is not None else "none",
@@ -2511,10 +2574,10 @@ class DashboardScanBackend:
                     "full_variables_available": raw_available,
                     "custodians": self.DATA_CUSTODIANS,
                 },
-                "ready": bool(state.quicklook.get("available")),
+                "ready": bool(data.get("available")),
                 "flight_id": project.flight_id if project else None,
                 "project_file": str(project.project_file) if project else None,
-                "data": dict(state.quicklook),
+                "data": data,
                 "exports": list(state.output_files),
                 "processing_status": state.processing_status,
                 "processing_step": state.processing_step,
@@ -2608,16 +2671,38 @@ class DashboardScanBackend:
         }
 
     def gopro_media_root(self) -> Path | None:
-        """The folder currently holding the GoPro media, if one is reachable."""
+        """The folder currently holding the GoPro media, if one is reachable.
+
+        A separate camera folder is only chosen when the camera data sits apart
+        from the flight; on this campaign it sits inside the flight folder, so
+        ``camera_folder_path`` is unset and looking only there declared the
+        media unreachable while the disk was mounted - and asked the operator
+        whether they had the disk they were already reading from. The folders
+        the scan recorded for GoPro are checked too, and the flight folder's own
+        GoPro folder after them.
+        """
         with self._lock:
             reconnected = self._gopro_media_root
             project = self._flight_project
         if reconnected is not None and reconnected.is_dir():
             return reconnected
-        if project is None or project.camera_folder_path is None:
+        if project is None:
             return None
-        camera_root = Path(project.camera_folder_path)
-        return camera_root if camera_root.is_dir() else None
+        candidates: list[Path] = []
+        if project.camera_folder_path is not None:
+            candidates.append(Path(project.camera_folder_path))
+        saved = project.detected_instruments.get("gopro")
+        if saved is not None:
+            candidates.extend(Path(folder) for folder in saved.selected_source_folders)
+            candidates.extend(
+                Path(file).parent for file in saved.selected_source_files[:1]
+            )
+        if project.flight_folder_path is not None:
+            candidates.append(Path(project.flight_folder_path) / GOPRO_FOLDER_NAME)
+        for candidate in candidates:
+            if candidate.is_dir():
+                return candidate
+        return None
 
     def _gopro_source_index(self, root: Path) -> dict[str, Path]:
         """Map each image file name below ``root`` to its location, once.
@@ -3049,6 +3134,48 @@ class DashboardScanBackend:
             "message": payload["message"],
             "data": payload,
         }
+
+    def export_flir_map_figure(
+        self, request: Mapping[str, Any]
+    ) -> tuple[str, bytes, str]:
+        """Export the thermal map as it is drawn, at manuscript width."""
+        from core.map_pdf_export import render_map_figure
+
+        with self._lock:
+            project = self._flight_project
+            flight_id = project.flight_id if project else "Flight"
+        interval = str(request.get("interval") or "").strip()
+        filename, content, media_type, effective = render_map_figure(
+            str(request.get("image") or ""),
+            flight_name=str(request.get("flight_name") or flight_id or "Flight"),
+            map_name="FLIR apparent land-surface temperature map",
+            subject=str(request.get("subject") or "")
+            or (
+                "Georeferenced FLIR apparent land-surface temperature"
+                + (f", {interval}" if interval else "")
+            ),
+            filename_tag="flir_temperature_map",
+            image_format=str(request.get("format") or "pdf"),
+            dpi=request.get("dpi", 300),
+        )
+        destination: Path | None = None
+        if project is not None:
+            export_root = project.flight_output_root / "exports" / "flir_map"
+            export_root.mkdir(parents=True, exist_ok=True)
+            destination = export_root / filename
+            destination.write_bytes(content)
+            with self._lock:
+                project.output_locations["flir_map_exports"] = export_root
+            self._checkpoint_project()
+        self.logger.log(
+            LogLevel.SUCCESS, "flir-view",
+            "FLIR temperature map exported at "
+            f"{render_map_figure.__globals__['FIGURE_WIDTH_INCHES']:g} inch wide, "
+            f"{effective:,.0f} DPI",
+            file_path=destination, instrument="flir",
+            processing_step="temperature-map-export",
+        )
+        return filename, content, media_type
 
     def export_size_distribution_map_pdf(
         self, page: str, request: Mapping[str, Any]
@@ -3817,6 +3944,229 @@ class DashboardScanBackend:
                     "error": None,
                     "result": result,
                 })
+    # ------------------------------------------------------------------
+    # Investigation interval
+    #
+    # The statistical overview describes the whole selected flight. Looking at
+    # one leg of it means recomputing the statistics for that window, not
+    # cropping a picture of the whole: a histogram, a spectrum and a wind
+    # comparison over two hours say nothing about ten minutes inside it. The
+    # window is recomputed from the raw record and never written to the project.
+    # ------------------------------------------------------------------
+
+    def noseboom_investigation_bounds(self) -> dict[str, object]:
+        """What the main Time Filter allows an investigation interval to be."""
+        with self._lock:
+            start = self._time_state.selected_analysis_start
+            end = self._time_state.selected_analysis_end
+            active = (
+                dict(self._noseboom_investigation["interval"])
+                if self._noseboom_investigation else None
+            )
+        return {
+            "start": start.isoformat() if start else None,
+            "end": end.isoformat() if end else None,
+            "active": active,
+        }
+
+    def start_noseboom_investigation(
+        self, request: Mapping[str, object] | None = None
+    ) -> dict[str, object]:
+        """Recompute the statistical overview for an interval, in a thread."""
+        request = request or {}
+        start = _parse_investigation_time(request.get("start"), "start")
+        end = _parse_investigation_time(request.get("end"), "end")
+        with self._lock:
+            if self._noseboom_investigation_job.get("running"):
+                raise RuntimeError(
+                    "An investigation interval is already being prepared"
+                )
+            selected_start = self._time_state.selected_analysis_start
+            selected_end = self._time_state.selected_analysis_end
+            available = bool(self._instruments["noseboom"].quicklook.get("available"))
+        if not available:
+            raise ValueError("Process Noseboom before applying an investigation filter")
+        if selected_start is None or selected_end is None:
+            raise ValueError("Apply the main Time Filter first")
+        if end <= start:
+            raise ValueError("The investigation end must be after its start")
+        if start < selected_start or end > selected_end:
+            raise ValueError(
+                "The investigation interval must stay inside the main Time "
+                f"Filter, {selected_start.isoformat()} to {selected_end.isoformat()}"
+            )
+        job_id = uuid4().hex
+        with self._lock:
+            self._noseboom_investigation_job = {
+                "job_id": job_id, "running": True, "ready": False,
+                "progress": 1.0,
+                "message": "Preparing the investigation interval.",
+                "error": None,
+                "interval": {"start": start.isoformat(), "end": end.isoformat()},
+            }
+            threading.Thread(
+                target=self._run_noseboom_investigation,
+                args=(job_id, start, end),
+                name="ccflux-noseboom-investigation", daemon=True,
+            ).start()
+        return self.noseboom_investigation_progress()
+
+    def noseboom_investigation_progress(self) -> dict[str, object]:
+        with self._lock:
+            return dict(self._noseboom_investigation_job)
+
+    def clear_noseboom_investigation(self) -> dict[str, object]:
+        """Return the workspace to the whole selected flight."""
+        with self._lock:
+            self._noseboom_investigation = None
+            self._noseboom_investigation_job = {
+                "job_id": None, "running": False, "ready": False,
+                "progress": 0.0,
+                "message": "The whole selected flight is shown.",
+                "error": None, "interval": None,
+            }
+        self.logger.log(
+            LogLevel.INFO, "noseboom-investigation",
+            "Investigation interval cleared; the whole selected flight is shown",
+            instrument="noseboom", processing_step="investigation-filter",
+        )
+        return {"cleared": True}
+
+    def _run_noseboom_investigation(
+        self, job_id: str, start: datetime, end: datetime
+    ) -> None:
+        def report(percent: float, message: str) -> None:
+            with self._lock:
+                if self._noseboom_investigation_job.get("job_id") != job_id:
+                    return
+                self._noseboom_investigation_job["progress"] = max(
+                    0.0, min(100.0, float(percent))
+                )
+                self._noseboom_investigation_job["message"] = str(message)
+
+        try:
+            payload, qc = self._compute_noseboom_investigation(start, end, report)
+        except Exception as exc:
+            self.logger.capture_exception(
+                "noseboom-investigation",
+                f"Investigation interval failed: {exc}", exc,
+                instrument="noseboom", processing_step="investigation-filter",
+            )
+            with self._lock:
+                if self._noseboom_investigation_job.get("job_id") == job_id:
+                    self._noseboom_investigation_job.update({
+                        "running": False, "ready": False, "error": str(exc),
+                        "message": "The investigation interval failed.",
+                    })
+            self._persist_project_logs()
+            return
+        with self._lock:
+            if self._noseboom_investigation_job.get("job_id") != job_id:
+                return
+            self._noseboom_investigation = {
+                "interval": {"start": start.isoformat(), "end": end.isoformat()},
+                "data": payload,
+                "quality_control": qc,
+            }
+            self._noseboom_investigation_job.update({
+                "running": False, "ready": True, "progress": 100.0,
+                "error": None,
+                "message": "The investigation interval is ready.",
+            })
+        self.logger.log(
+            LogLevel.SUCCESS, "noseboom-investigation",
+            "Investigation interval prepared for "
+            f"{start.isoformat()} to {end.isoformat()}"
+            + ("" if qc else "; quality control could not be recomputed"),
+            instrument="noseboom", processing_step="investigation-filter",
+        )
+        self._persist_project_logs()
+
+    def _compute_noseboom_investigation(
+        self, start: datetime, end: datetime,
+        report: Callable[[float, str], None],
+    ) -> tuple[dict[str, object], dict[str, object] | None]:
+        """Recompute every statistical product for one interval."""
+        from instruments.noseboom.adapter import _map_payload
+        from instruments.noseboom.legacy_bridge import LegacyNoseboomBridge
+
+        with self._lock:
+            current = dict(self._instruments["noseboom"].quicklook)
+            straight_settings = dict(self._noseboom_straight_settings)
+        paths = tuple(
+            path for path in self._noseboom_source_paths() if Path(path).is_file()
+        )
+        start_ns = int(start.timestamp() * 1_000_000_000)
+        end_ns = int(end.timestamp() * 1_000_000_000)
+        bridge = LegacyNoseboomBridge()
+        if paths:
+            report(6.0, "Reading the investigation interval from the raw record.")
+            data = bridge.load_csv_window(
+                paths, start_ns, end_ns,
+                progress=lambda percent, message: report(
+                    min(46.0, 8.0 + 0.4 * float(percent)), message
+                ),
+            )
+            report(50.0, f"Loaded {len(data):,} rows for the interval.")
+            one_hz, straight, frequency, spectra, _ = bridge.quicklook(
+                data, NOSEBOOM_TRIM_MINUTES, straight_settings
+            )
+            report(72.0, "Recomputed the statistics for the interval.")
+            payload = _map_payload(straight, frequency, spectra)
+        else:
+            # No raw record on this computer. The 10 Hz table archived with the
+            # project still gives every product except the wind spectra, whose
+            # Nyquist is the recorded rate, so they are reported as unavailable
+            # rather than recomputed from a rate that cannot carry them.
+            archive = self._archived_noseboom_table()
+            if archive is None:
+                raise ValueError(
+                    "This computer has neither the raw Noseboom record nor the "
+                    "archived table, so an investigation interval cannot be "
+                    "recomputed."
+                )
+            report(
+                20.0,
+                f"Reading the {self.ARCHIVED_EXPORT_HZ:g} Hz table held in the project.",
+            )
+            one_hz = self._one_hz_from_archive(archive, start, end)
+            straight = bridge.module.detect_straight(one_hz, straight_settings)
+            report(70.0, "Recomputed the statistics for the interval.")
+            payload = _map_payload(straight)
+            payload["spectra_unavailable"] = (
+                "Wind spectra need the recorded rate; this project carries the "
+                f"{self.ARCHIVED_EXPORT_HZ:g} Hz table only."
+            )
+        if not payload.get("available"):
+            raise ValueError(
+                str(payload.get("reason"))
+                or "The investigation interval holds no valid Noseboom samples"
+            )
+        for key in ("browser_limits", "source", "straight_settings"):
+            if key in current and key not in payload:
+                payload[key] = current[key]
+        payload["time_bounds"] = {"start": start.isoformat(), "end": end.isoformat()}
+        payload["investigation"] = {
+            "start": start.isoformat(), "end": end.isoformat(),
+        }
+        qc: dict[str, object] | None = None
+        if paths:
+            report(84.0, "Running the quality control checks for the interval.")
+            try:
+                from core.noseboom_qc import build_qc_payload, load_qc_window
+
+                qc = build_qc_payload(load_qc_window(paths, start_ns, end_ns))
+            except Exception as exc:
+                # The interval is still reviewable without the comparison.
+                self.logger.capture_exception(
+                    "noseboom-investigation",
+                    "Quality control could not be recomputed for the interval",
+                    exc, instrument="noseboom",
+                    processing_step="investigation-filter",
+                )
+        report(98.0, "Finalizing the investigation interval.")
+        return payload, qc
+
     def preview_noseboom_straight_settings(
         self, settings: dict[str, object], *,
         progress_callback: Callable[[float, str], None] | None = None,
@@ -4303,8 +4653,30 @@ class DashboardScanBackend:
         return target
 
     def noseboom_qc_view(self) -> dict[str, object]:
-        """The stored quality control checks for the active project."""
+        """The quality control checks for what is on screen.
+
+        With an investigation interval applied the checks are the ones
+        recomputed for that window; the stored ones describe the whole flight.
+        """
         with self._lock:
+            investigation = self._noseboom_investigation
+            if investigation is not None:
+                recomputed = investigation.get("quality_control")
+                if recomputed:
+                    return {
+                        "ready": True,
+                        "data": dict(recomputed),
+                        "investigation": dict(investigation["interval"]),
+                    }
+                return {
+                    "ready": False,
+                    "message": (
+                        "The quality control checks could not be recomputed for "
+                        "the investigation interval. Clear the filter to see the "
+                        "checks for the whole selected flight."
+                    ),
+                    "investigation": dict(investigation["interval"]),
+                }
             project = self._flight_project
             status = self._instruments["noseboom"].processing_status
             recorded = project.output_locations.get("noseboom_qc") if project else None
@@ -4522,7 +4894,13 @@ class DashboardScanBackend:
     ) -> dict[str, object]:
         with self._lock:
             project = self._flight_project
-            payload = dict(self._instruments["noseboom"].quicklook)
+            # The figures show what the page shows, so an applied investigation
+            # interval is exported rather than the whole flight beneath it.
+            investigation = self._noseboom_investigation
+            payload = dict(
+                investigation["data"] if investigation
+                else self._instruments["noseboom"].quicklook
+            )
             if project is None:
                 raise ValueError("Load a Flight Project before exporting figures")
             if not payload.get("available"):
@@ -4544,6 +4922,95 @@ class DashboardScanBackend:
         return self._noseboom_statistics_export.start(
             payload, destination, flight_name, formats, dpi
         )
+
+    def start_ins_gimbal_export(
+        self, options: dict[str, object]
+    ) -> dict[str, object]:
+        """Render the requested INS Gimbal page as a publication figure."""
+        view = str(options.get("view") or "overview")
+        # The page reads its products from the saved browser file, not from the
+        # in-memory quicklook, which a restored project never fills. Reading the
+        # same view keeps the figure and the screen the same data.
+        view_payload = self.hatchbox_view("ins_gimbal")
+        payload = dict(view_payload.get("data") or {})
+        with self._lock:
+            project = self._flight_project
+            if project is None:
+                raise ValueError("Load a Flight Project before exporting figures")
+            destination = project.flight_output_root / "reports" / "ins_gimbal"
+            flight_name = project.flight_id
+        if not view_payload.get("ready") or not payload.get("available"):
+            raise ValueError(
+                str(view_payload.get("message"))
+                if view_payload.get("message")
+                else "Process INS Gimbal before exporting figures"
+            )
+        raw_formats = options.get("formats", ["pdf"])
+        if not isinstance(raw_formats, list):
+            raise ValueError("Export formats must be a list")
+        formats, dpi = validate_ins_gimbal_request(
+            tuple(str(value) for value in raw_formats), options.get("dpi", 300)
+        )
+        return self._ins_gimbal_export.start(
+            payload, destination, flight_name, view, formats, dpi
+        )
+
+    def ins_gimbal_export_progress(self) -> dict[str, object]:
+        return self._ins_gimbal_export.snapshot()
+
+    def ins_gimbal_export_file(self, name: str) -> Path:
+        """Resolve an exported figure by name, including earlier ones.
+
+        The manager only remembers its most recent job, so exporting a second
+        page took the first page's download link with it. Figures written to the
+        project are recorded, so they stay reachable.
+        """
+        safe_name = Path(name).name
+        if safe_name != name:
+            raise ValueError("Invalid INS Gimbal export filename")
+        try:
+            return self._ins_gimbal_export.file(safe_name)
+        except ValueError:
+            with self._lock:
+                project = self._flight_project
+                candidates = [
+                    Path(value)
+                    for value in self._instruments["ins_gimbal"].output_files
+                ]
+                if project is not None:
+                    saved = project.detected_instruments.get("ins_gimbal")
+                    if saved is not None:
+                        candidates.extend(saved.output_locations)
+            for candidate in candidates:
+                if (
+                    candidate.name == safe_name
+                    and candidate.suffix.casefold() in {".pdf", ".svg", ".png"}
+                    and candidate.is_file()
+                ):
+                    return candidate
+        raise ValueError("Requested INS Gimbal publication export is unavailable")
+
+    def _save_ins_gimbal_exports(self, outputs: list[Path]) -> None:
+        with self._lock:
+            project = self._flight_project
+            state = self._instruments["ins_gimbal"]
+            for output in outputs:
+                value = str(output)
+                if value not in state.output_files:
+                    state.output_files.append(value)
+            if project is None:
+                return
+            saved = project.detected_instruments.get("ins_gimbal")
+            if saved is not None:
+                for output in outputs:
+                    if output not in saved.output_locations:
+                        saved.output_locations.append(output)
+            if outputs:
+                project.output_locations[
+                    "ins_gimbal_export_directory"
+                ] = outputs[0].parent
+            self._project_store.save_project(project, overwrite=True)
+        self._persist_project_logs()
 
     def noseboom_statistics_export_progress(self) -> dict[str, object]:
         return self._noseboom_statistics_export.snapshot()
@@ -6359,7 +6826,7 @@ class DashboardScanBackend:
             {
                 "analysis_start": selected_start,
                 "analysis_end": selected_end,
-                "trim_minutes": 2.0,
+                "trim_minutes": NOSEBOOM_TRIM_MINUTES,
                 "terrain": True,
                 "straight_settings": dict(self._noseboom_straight_settings),
             },

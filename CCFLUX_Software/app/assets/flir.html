@@ -8,7 +8,11 @@
   <link rel="stylesheet" href="/hatchbox_science.css">
   <style>
     :root{--thermal:#ff8b38;--thermal2:#ff3c5f}
-    .nav-tabs{flex-wrap:wrap}.summary-grid{grid-template-columns:repeat(4,minmax(190px,1fr))}
+    .nav-tabs{flex-wrap:wrap}.flir-spacer{flex:1}
+    .flir-filter{display:flex;flex-direction:column;gap:3px;color:var(--muted);font-size:.76rem;font-weight:700}
+    .flir-filter input{min-height:36px;min-width:172px;padding:6px 9px;border:1px solid #3a6078;border-radius:8px;background:#06131f;color:#fff;font:inherit;font-size:.86rem}
+    .flir-window{margin:0 0 12px;color:var(--muted);font-size:.84rem}
+    .flir-window strong{color:var(--cyan)}.summary-grid{grid-template-columns:repeat(4,minmax(190px,1fr))}
     .chart-card[hidden]{display:none}.map-card{position:relative}.thermal-map{height:min(68vh,760px);min-height:520px;background:#0a1825}
     .map-reset{position:absolute;z-index:900;right:14px;top:74px;height:42px;background:#071827eb;border-color:#ffb66f;box-shadow:0 8px 25px #0008}
     .map-legend{position:absolute;z-index:850;right:14px;bottom:24px;padding:12px 14px;border:1px solid #507084;border-radius:10px;background:#071827f2;box-shadow:0 8px 25px #0008}
@@ -57,14 +61,20 @@
       <a class="btn" data-view="temperature" href="/flir/temperature-map">Temperature map</a>
       <a class="btn" data-view="temperature-plots" href="/flir/temperature-plots">Temperature plots</a>
       <a class="btn" data-view="gallery" href="/flir/gallery">Thermal gallery</a>
+      <span class="flir-spacer"></span>
+      <label class="flir-filter">Investigation start (UTC)<input type="text" id="investigationStart" placeholder="2026-08-03 11:30:00"></label>
+      <label class="flir-filter">Investigation end (UTC)<input type="text" id="investigationEnd" placeholder="2026-08-03 12:30:00"></label>
+      <button class="btn primary" id="investigationApply" type="button" title="Restrict every FLIR view to this interval">Update</button>
+      <button class="btn" id="investigationClear" type="button" title="Show the whole selected FLIR interval again">Whole flight</button>
     </nav>
+    <p class="flir-window" id="investigationNote"></p>
     <section class="summary-grid" id="summaryGrid"></section>
     <section class="chart-grid">
       <article class="chart-card wide" data-section="overview"><div class="card-head"><h2>Frame acquisition interval</h2><button class="btn" data-fullscreen="acquisitionPlot">Full screen</button></div><div class="plot" id="acquisitionPlot"></div></article>
       <article class="chart-card wide" data-section="overview"><div class="card-head"><h2>Acquisition-gap diagnostics</h2><button class="btn" data-fullscreen="gapPlot">Full screen</button></div><div class="plot" id="gapPlot"></div></article>
 
       <article class="chart-card wide map-card" data-section="temperature">
-        <div class="card-head"><h2>Georeferenced apparent land-surface temperature</h2><div class="map-toolbar"><label>Frame statistic <select id="mapMetric"><option value="temperature_median_c">Median temperature</option><option value="temperature_mean_c">Mean temperature</option><option value="temperature_max_c">Maximum temperature</option><option value="temperature_min_c">Minimum temperature</option></select></label><label>Colours <select id="mapPalette"></select></label><button class="btn" id="mapNewTabBtn" type="button" title="Open this statistic on its own, in a new tab">Open in new tab</button><button class="btn" id="mapFullscreenBtn" type="button">Full screen</button></div></div>
+        <div class="card-head"><h2>Georeferenced apparent land-surface temperature</h2><div class="map-toolbar"><label>Frame statistic <select id="mapMetric"><option value="temperature_median_c">Median temperature</option><option value="temperature_mean_c">Mean temperature</option><option value="temperature_max_c">Maximum temperature</option><option value="temperature_min_c">Minimum temperature</option></select></label><label>Colours <select id="mapPalette"></select></label><button class="btn" id="mapNewTabBtn" type="button" title="Open this statistic on its own, in a new tab">Open in new tab</button><button class="btn" id="mapFullscreenBtn" type="button">Full screen</button><label>Export <select id="mapExportFormat"><option value="pdf" selected>PDF</option><option value="png">PNG</option><option value="svg">SVG</option></select></label><label>DPI <select id="mapExportDpi"><option value="150">150</option><option value="300" selected>300</option><option value="600">600</option><option value="1200">1200</option><option value="1500">1500</option></select></label><button class="btn primary" id="mapExportBtn" type="button" title="Export the map as it is drawn now, seven inches wide">Export map</button></div></div>
         <div id="thermalMap" class="thermal-map" role="application" aria-label="Interactive FLIR land-surface-temperature map"></div>
         <button class="btn map-reset" id="resetMapBtn" type="button">Reset map position</button>
         <div class="map-legend" id="mapLegend" hidden><strong class="legend-title" id="legendTitle">Median temperature [°C]</strong><div class="colorbar"><div class="ramp" id="legendRamp"></div><div class="ticks" id="legendTicks"></div></div><span class="legend-note" id="legendNote"></span></div>

@@ -284,33 +284,39 @@ window.CCFLUX.createSizeMap = function createSizeMap(options) {
     }
     return canvas.toDataURL('image/png');
   }
+  // The screen legend carries no panel behind it, so the exported one carries
+  // none either. Labels are read against whatever tiles fall behind them, so
+  // each is stroked white before it is filled dark.
+  function haloText(context, text, x, y) {
+    context.lineJoin = 'round'; context.miterLimit = 2;
+    context.strokeStyle = '#ffffff'; context.lineWidth = 3.4;
+    context.strokeText(text, x, y);
+    context.fillStyle = '#07182a'; context.fillText(text, x, y);
+  }
   function drawExportLegend(context, width, range) {
     if (!range) return;
     const boxWidth = 160, boxHeight = 250, x = width - boxWidth - 18, y = 18;
     const index = selectedChannel();
     context.save();
-    context.fillStyle = '#071827'; context.globalAlpha = .94;
-    context.beginPath(); context.roundRect(x, y, boxWidth, boxHeight, 8); context.fill();
-    context.globalAlpha = 1;
-    context.fillStyle = '#ffffff'; context.font = '700 13px Arial';
-    context.fillText(`${index === null ? 'All sizes' : channelName(index)} [${unit}]`, x + 12, y + 22);
+    context.font = '700 13px Arial';
+    haloText(context, `${index === null ? 'All sizes' : channelName(index)} [${unit}]`, x + 12, y + 22);
     const barX = x + 14, barY = y + 38, barWidth = 22, barHeight = boxHeight - 72;
     const gradient = context.createLinearGradient(0, barY + barHeight, 0, barY);
     paletteStops().forEach((shade, position, list) =>
       gradient.addColorStop(position / (list.length - 1), shade));
     context.fillStyle = gradient; context.fillRect(barX, barY, barWidth, barHeight);
-    context.strokeStyle = '#7d9db4'; context.lineWidth = 1;
+    context.strokeStyle = '#07182a'; context.lineWidth = 1;
     context.strokeRect(barX, barY, barWidth, barHeight);
-    context.fillStyle = '#eaf4fb'; context.font = '11px Arial';
+    context.font = '11px Arial';
     for (let step = 0; step < 5; step += 1) {
       const fraction = step / 4;
       const value = range.log
         ? Math.pow(10, Math.log10(range.low) + fraction * (Math.log10(range.high) - Math.log10(range.low)))
         : range.low + fraction * (range.high - range.low);
-      context.fillText(format(value), barX + barWidth + 8, barY + barHeight - fraction * barHeight + 4);
+      haloText(context, format(value), barX + barWidth + 8, barY + barHeight - fraction * barHeight + 4);
     }
-    context.fillStyle = '#a9c4d6'; context.font = '10px Arial';
-    context.fillText(range.log ? 'logarithmic' : 'linear', x + 12, y + boxHeight - 12);
+    context.font = '10px Arial';
+    haloText(context, range.log ? 'logarithmic' : 'linear', x + 12, y + boxHeight - 12);
     context.restore();
   }
   async function exportPdf(button) {

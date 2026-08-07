@@ -79,8 +79,72 @@
     return `rgb(${a.map((v,i)=>Math.round(v*(1-mix)+b[i]*mix)).join(',')})`;
   }
   function summaryCard(name,value,note=''){return `<div class="summary"><span>${name}</span><strong>${value}</strong>${note?`<small>${note}</small>`:''}</div>`;}
+  // Investigation time filter. Every FLIR view reads the same three arrays, so
+  // one interval reaches all of them: the frame statistics, the distribution,
+  // the variability, the map and the summary. The acquisition intervals carry
+  // no times of their own, but there is one per radiometric frame in the same
+  // order, so they are cut by that frame's time.
+  let window_=null;
+  function windowMilliseconds(value){
+    const text=String(value||'').trim().replace(' ','T');
+    if(!text)return NaN;
+    return Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(text)?text:`${text}Z`);
+  }
+  function insideWindow(stamp){
+    if(!window_)return true;
+    const value=windowMilliseconds(stamp);
+    return Number.isFinite(value)&&value>=window_.start&&value<=window_.end;
+  }
+  function temperatureRows(){return (payload.temperature_records||[]).filter(row=>insideWindow(row.timestamp_utc));}
+  function mapPoints(){return (payload.map_points||[]).filter(point=>insideWindow(point.timestamp_utc));}
+  function acquisitionIntervals(){
+    const intervals=(payload.acquisition_intervals_seconds||[]).map(Number);
+    const rows=payload.temperature_records||[];
+    if(!window_||rows.length!==intervals.length)return intervals.filter(Number.isFinite);
+    return intervals.filter((value,index)=>Number.isFinite(value)&&insideWindow(rows[index]?.timestamp_utc));
+  }
+  function acquisitionGaps(){return (payload.gaps||[]).filter(row=>insideWindow(row.gap_start));}
+  function windowText(value){
+    const date=new Date(Number(value));
+    return Number.isFinite(date.getTime())?`${date.toISOString().slice(0,10)} ${date.toISOString().slice(11,19)}`:'';
+  }
+  function recordedWindow(){
+    const stamps=(payload.temperature_records||[]).map(row=>windowMilliseconds(row.timestamp_utc)).filter(Number.isFinite);
+    if(!stamps.length){
+      const low=windowMilliseconds(payload.utc_start),high=windowMilliseconds(payload.utc_end);
+      return Number.isFinite(low)&&Number.isFinite(high)?[low,high]:null;
+    }
+    return [Math.min(...stamps),Math.max(...stamps)];
+  }
+  function describeWindow(){
+    const note=$('investigationNote'),recorded=recordedWindow();
+    if(!note)return;
+    const span=recorded?`Recorded ${windowText(recorded[0])} to ${windowText(recorded[1])} UTC`:'';
+    note.innerHTML=window_
+      ? `<strong>Investigation interval ${windowText(window_.start)} to ${windowText(window_.end)} UTC</strong> · every view and the map export follow it · ${span} · the main GUI Time Filter and the saved project are unchanged.`
+      : `${span} · showing every frame inside the main GUI Time Filter. The thermal gallery holds fixed representative frames and is not narrowed.`;
+  }
+  async function applyWindow(){
+    const start=windowMilliseconds($('investigationStart').value.trim());
+    const end=windowMilliseconds($('investigationEnd').value.trim());
+    if(!Number.isFinite(start)||!Number.isFinite(end)){$('statusText').textContent='Give both investigation times as UTC, for example 2026-08-03 11:30:00.';return;}
+    if(end<=start){$('statusText').textContent='The investigation end must be after its start.';return;}
+    window_={start,end};
+    describeWindow();
+    await drawEverything();
+    $('statusText').textContent=`Investigation interval applied: ${temperatureRows().length.toLocaleString()} of ${(payload.temperature_records||[]).length.toLocaleString()} frames`;
+  }
+  async function clearWindow(){
+    window_=null;
+    const recorded=recordedWindow();
+    if(recorded){$('investigationStart').value=windowText(recorded[0]);$('investigationEnd').value=windowText(recorded[1]);}
+    describeWindow();
+    await drawEverything();
+    $('statusText').textContent='Showing every FLIR frame inside the main GUI Time Filter';
+  }
+
   function renderSummary(){
-    const summary=payload.summary||{},temperatures=payload.temperature_records||[],mapped=payload.map_points||[];
+    const summary=payload.summary||{},temperatures=temperatureRows(),mapped=mapPoints();
     const medians=temperatures.map(row=>row.temperature_median_c).filter(finite);
     $('summaryGrid').innerHTML=[
       summaryCard('Selected FLIR frames',Number(summary.frame_count||0).toLocaleString(),`${payload.utc_start||'—'} to ${payload.utc_end||'—'}`),
@@ -90,13 +154,13 @@
     ].join('');
   }
   function renderAcquisition(){
-    const intervals=(payload.acquisition_intervals_seconds||[]).map(Number).filter(Number.isFinite);
+    const intervals=acquisitionIntervals();
     Plotly.react('acquisitionPlot',[{type:'scattergl',mode:'lines',x:intervals.map((_,index)=>index+2),y:intervals,name:'Frame interval',line:{color:'#d55e00',width:1.4},hovertemplate:'Frame %{x}<br>Interval %{y:.6f} s<extra></extra>'}],layout('FLIR frame-to-frame acquisition timing','Frame number','Interval [s]'),plotConfig);
-    const gaps=(payload.gaps||[]),x=gaps.map((_,index)=>index+1),y=gaps.map(row=>Number(row.gap_seconds||row.seconds||row.duration_seconds)).map(value=>Number.isFinite(value)?value:null);
+    const gaps=acquisitionGaps(),x=gaps.map((_,index)=>index+1),y=gaps.map(row=>Number(row.gap_seconds||row.seconds||row.duration_seconds)).map(value=>Number.isFinite(value)?value:null);
     Plotly.react('gapPlot',[{type:'bar',x,y,name:'Gap duration',marker:{color:'#8c2d78'},hovertemplate:'Gap %{x}<br>%{y:.6f} s<extra></extra>'}],layout(gaps.length?'Detected FLIR acquisition gaps':'No threshold-exceeding FLIR acquisition gaps','Gap number','Duration [s]'),plotConfig);
   }
   function renderTemperaturePlots(){
-    const rows=(payload.temperature_records||[]).filter(row=>row.timestamp_utc);
+    const rows=temperatureRows().filter(row=>row.timestamp_utc);
     const x=rows.map(row=>row.timestamp_utc);
     const traces=[
       ['temperature_min_c','Minimum','#2c7fb8'],['temperature_median_c','Median','#111111'],
@@ -117,7 +181,7 @@
   }
   function renderMap(){
     ensureMap();mapLayers.forEach(layer=>layer.removeFrom(map));mapLayers=[];
-    const metric=$('mapMetric').value,points=(payload.map_points||[]).filter(point=>finite(point.latitude)&&finite(point.longitude)&&finite(point[metric]));
+    const metric=$('mapMetric').value,points=mapPoints().filter(point=>finite(point.latitude)&&finite(point.longitude)&&finite(point[metric]));
     $('interpretation').textContent=payload.temperature_interpretation||'';
     if(!points.length){$('mapNote').textContent=payload.temperature_reason||'No georeferenced FLIR temperature frames are available.';$('mapLegend').hidden=true;mapBounds=null;return;}
     const palette=paletteName();
@@ -147,6 +211,90 @@
   function renderGallery(){
     const thumbnails=payload.thumbnails||[];
     $('gallery').innerHTML=thumbnails.length?thumbnails.map((item,index)=>`<figure class="thermal-frame"><a href="${item.url}" target="_blank" rel="noopener"><img src="${item.url}" alt="Representative FLIR frame ${index+1}" loading="lazy"></a><figcaption>${item.caption||`Representative FLIR frame ${index+1}`}</figcaption></figure>`).join(''):'<div class="empty-state">No representative FLIR frames have been generated.</div>';
+  }
+  // Leaflet paints tiles and vectors into separate layers, so the export
+  // redraws the visible extent onto one canvas: tiles, the track, the coloured
+  // frames, then the legend. The server sets the physical width to seven inches.
+  function composeMapImage(){
+    const container=$('thermalMap');
+    const width=Math.max(800,container.clientWidth),height=Math.max(500,container.clientHeight);
+    const canvas=document.createElement('canvas');
+    canvas.width=width*2;canvas.height=height*2;
+    const context=canvas.getContext('2d');
+    context.scale(2,2);context.fillStyle='#ffffff';context.fillRect(0,0,width,height);
+    const base=container.getBoundingClientRect();
+    for(const tile of container.querySelectorAll('img.leaflet-tile-loaded')){
+      const rect=tile.getBoundingClientRect();
+      try{context.drawImage(tile,rect.left-base.left,rect.top-base.top,rect.width,rect.height);}
+      catch(error){/* a tile that would taint the canvas is skipped */}
+    }
+    const metric=$('mapMetric').value,palette=paletteName();
+    const points=mapPoints().filter(point=>finite(point.latitude)&&finite(point.longitude)&&finite(point[metric]));
+    if(points.length){
+      const values=points.map(point=>Number(point[metric]));
+      const low=quantile(values,.02),highCandidate=quantile(values,.98),high=highCandidate>low?highCandidate:low+1;
+      const step=Math.max(1,Math.ceil(points.length/4000)),shown=points.filter((_,index)=>index%step===0);
+      context.strokeStyle='#17212b';context.lineWidth=1.6;context.globalAlpha=.6;context.beginPath();
+      shown.forEach((point,index)=>{const at=map.latLngToContainerPoint([point.latitude,point.longitude]);index?context.lineTo(at.x,at.y):context.moveTo(at.x,at.y);});
+      context.stroke();context.globalAlpha=1;
+      shown.forEach(point=>{
+        const at=map.latLngToContainerPoint([point.latitude,point.longitude]);
+        if(at.x<0||at.y<0||at.x>width||at.y>height)return;
+        context.fillStyle=color(Number(point[metric]),low,high,palette);
+        context.beginPath();context.arc(at.x,at.y,4,0,Math.PI*2);context.fill();
+      });
+      drawMapExportLegend(context,width,metric,low,high,palette,points.length);
+    }
+    return canvas.toDataURL('image/png');
+  }
+  // No panel behind the labels, matching the screen; each is stroked white
+  // before it is filled dark so it reads over whatever tiles fall behind it.
+  function drawMapExportLegend(context,width,metric,low,high,palette,count){
+    const boxWidth=168,boxHeight=252,x=width-boxWidth-18,y=18;
+    const halo=(text,left,top)=>{
+      context.lineJoin='round';context.miterLimit=2;
+      context.strokeStyle='#ffffff';context.lineWidth=3.4;context.strokeText(text,left,top);
+      context.fillStyle='#07182a';context.fillText(text,left,top);
+    };
+    context.save();
+    context.font='700 13px Arial';
+    halo(metricLabels[metric]||metric,x+12,y+22);
+    const barX=x+14,barY=y+38,barWidth=22,barHeight=boxHeight-74;
+    const gradient=context.createLinearGradient(0,barY+barHeight,0,barY);
+    paletteStops(palette).forEach((shade,index,list)=>gradient.addColorStop(index/(list.length-1),`rgb(${shade.join(',')})`));
+    context.fillStyle=gradient;context.fillRect(barX,barY,barWidth,barHeight);
+    context.strokeStyle='#07182a';context.lineWidth=1;context.strokeRect(barX,barY,barWidth,barHeight);
+    const format=tickFormatter(low,high);
+    context.font='11px Arial';
+    for(let step=0;step<LEGEND_TICKS;step+=1){
+      const fraction=step/(LEGEND_TICKS-1);
+      halo(format(low+fraction*(high-low)),barX+barWidth+8,barY+barHeight-fraction*barHeight+4);
+    }
+    context.font='10px Arial';
+    halo(`${count.toLocaleString()} frames`,x+12,y+boxHeight-12);
+    context.restore();
+  }
+  async function exportMapFigure(button){
+    const original=button.textContent;
+    button.disabled=true;button.textContent='Exporting…';
+    try{
+      if(!map)throw new Error('Open the Temperature map view first');
+      const format=$('mapExportFormat').value,dpi=Number($('mapExportDpi').value);
+      const body=JSON.stringify({
+        image:composeMapImage(),format,dpi,
+        flight_name:$('flightName').textContent||'Flight',
+        interval:window_?`${windowText(window_.start)} to ${windowText(window_.end)} UTC`:''
+      });
+      const response=await fetch('/api/flir/map/export',{method:'POST',headers:{'Content-Type':'application/json'},body});
+      if(!response.ok){const detail=await response.json().catch(()=>({}));throw new Error(detail.error||`Map export failed (${response.status})`);}
+      const blob=await response.blob();
+      const name=(response.headers.get('Content-Disposition')||'').match(/filename="([^"]+)"/)?.[1]||`flir_temperature_map.${format}`;
+      const link=document.createElement('a');
+      link.href=URL.createObjectURL(blob);link.download=name;link.click();
+      setTimeout(()=>URL.revokeObjectURL(link.href),4000);
+      $('statusText').textContent=`Thermal map exported as ${name}`;
+    }catch(error){$('statusText').textContent=`Map export failed: ${error.message}`;}
+    finally{button.disabled=false;button.textContent=original;}
   }
   function pathView(){return location.pathname.includes('temperature-map')?'temperature':location.pathname.includes('temperature-plots')?'temperature-plots':location.pathname.includes('gallery')?'gallery':'overview';}
   function showView(view,push=true){
@@ -203,6 +351,12 @@
       const requested=new URLSearchParams(location.search).get('metric');
       if(requested&&metricLabels[requested])$('mapMetric').value=requested;
       $('busy').classList.remove('show');
+      const recorded=recordedWindow();
+      if(recorded&&!$('investigationStart').value){
+        $('investigationStart').value=windowText(recorded[0]);
+        $('investigationEnd').value=windowText(recorded[1]);
+      }
+      describeWindow();
       await drawEverything();
       showView(pathView(),false);
       if(!response.temperature_ready){flirRetry=setTimeout(load,4000);}
@@ -253,6 +407,8 @@
   addEventListener('fullscreenchange',()=>setTimeout(()=>map?.invalidateSize(),120));$('resetMapBtn').onclick=()=>{if(map&&mapBounds?.isValid())map.fitBounds(mapBounds,{padding:[30,30],maxZoom:17});};
   document.querySelectorAll('[data-view]').forEach(link=>link.onclick=event=>{event.preventDefault();showView(link.dataset.view);});
   document.querySelectorAll('[data-fullscreen]').forEach(button=>button.onclick=async()=>{await $(button.dataset.fullscreen).closest('.chart-card').requestFullscreen();setTimeout(()=>Plotly.Plots.resize($(button.dataset.fullscreen)),120);});
+  $('investigationApply').onclick=applyWindow;$('investigationClear').onclick=clearWindow;
+  $('mapExportBtn').onclick=event=>exportMapFigure(event.currentTarget);
   addEventListener('popstate',()=>showView(pathView(),false));addEventListener('resize',()=>document.querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot)));load();
 
 })();

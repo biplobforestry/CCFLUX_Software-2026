@@ -28,7 +28,9 @@ class TestTitleAndLegendDoNotCollide:
         assert "y:1,yanchor:'top'" in read(name)
 
     def test_the_legend_sits_above_the_plot_not_in_the_title(self, name):
-        assert "legend:{orientation:'h',y:1.02,yanchor:'bottom',x:0}" in read(name)
+        # The placement is what this checks. A legend may also declare its
+        # colours, so the whole literal is not the assertion.
+        assert "legend:{orientation:'h',y:1.02,yanchor:'bottom',x:0" in read(name)
         assert "y:1.13" not in read(name)
 
     def test_the_top_margin_holds_both(self, name):

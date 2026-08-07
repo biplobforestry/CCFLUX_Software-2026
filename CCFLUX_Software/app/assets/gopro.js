@@ -95,16 +95,30 @@
     }
   }
 
+  // The reconnect offer replaces the whole loading box, which takes the title,
+  // the progress track and the percentage with it. Every open therefore builds
+  // the box again; assuming it survived left the second image opening on a
+  // missing element, before the modal was even shown, so nothing happened at
+  // all for the rest of the session.
+  function resetLoadingBox() {
+    const loading = byId('imageLoading');
+    loading.innerHTML = `
+      <h2 id="imageTitle">Loading image</h2>
+      <div class="progress-track"><div class="progress-fill" id="imageProgress"></div></div>
+      <strong id="imagePercent">1%</strong>`;
+    loading.style.display = '';
+    return loading;
+  }
+
   async function loadImage(captureId) {
     const modal = byId('imageModal');
     const image = byId('captureImage');
-    const loading = byId('imageLoading');
     const actions = byId('imageActions');
     if (imageUrl) URL.revokeObjectURL(imageUrl);
     imageUrl = null;
     image.style.display = 'none';
     image.removeAttribute('src');
-    loading.style.display = '';
+    const loading = resetLoadingBox();
     actions.classList.remove('show');
     byId('imageProgress').style.width = '1%';
     byId('imagePercent').textContent = '1%';
