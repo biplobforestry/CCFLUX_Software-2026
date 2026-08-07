@@ -142,6 +142,14 @@ def test_mapview_has_four_dependent_layer_selectors_and_width_control():
     assert 'id="flightTrackToggle"' in html
     assert 'id="exportMap"' in html
     assert 'id="resetMapPosition"' in html
+    # The three map-wide actions sit in the header, not at the foot of the
+    # toolbar: the four layer cells made that column tall, so Update ended up
+    # a long way from everything it updates.
+    header = html[html.index("<header>"):html.index("</header>")]
+    for control in ("flightTrackToggle", "exportMap", "update"):
+        assert f'id="{control}"' in header, control
+    toolbar = html[html.index('<section class="toolbar"'):html.index("</section>")]
+    assert "map-actions" not in toolbar
     assert 'aria-label="Reset map position"' in html
     assert "dashArray:'2 8'" in script
     assert "exportCurrentMapPdf" in script
