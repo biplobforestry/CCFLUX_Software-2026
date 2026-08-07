@@ -108,6 +108,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         elif path == "/flir.js":
             self._send_javascript_bundle(
                 self.server.dashboard_file.parent / "vendor" / "leaflet" / "leaflet.js",
+                # Scale bar, north arrow and graticule, shared by every exported map.
+                self.server.dashboard_file.with_name("map_furniture.js"),
                 self.server.dashboard_file.with_name("flir.js"),
             )
         elif path == "/opc" or path.startswith("/opc/"):
@@ -145,6 +147,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         elif path in {"/opc.js", "/partector.js"}:
             self._send_javascript_bundle(
                 self.server.dashboard_file.parent / "vendor" / "leaflet" / "leaflet.js",
+                self.server.dashboard_file.with_name("map_furniture.js"),
                 self.server.dashboard_file.with_name("size_map.js"),
                 self.server.dashboard_file.with_name(path.removeprefix("/")),
             )
@@ -167,7 +170,18 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         elif path == "/miro_rack/map.js":
             self._send_javascript_bundle(
                 self.server.dashboard_file.parent / "vendor" / "leaflet" / "leaflet.js",
+                self.server.dashboard_file.with_name("map_furniture.js"),
                 self.server.dashboard_file.with_name("miro_rack_map.js"),
+            )
+        elif path == "/miro_rack/trace_gas":
+            self.server.miro_rack.log_view("Trace Gas Investigation page opened")
+            self._send_file(
+                self.server.dashboard_file.with_name("trace_gas.html")
+            )
+        elif path == "/miro_rack/trace_gas.js":
+            self._send_file(
+                self.server.dashboard_file.with_name("trace_gas.js"),
+                "application/javascript; charset=utf-8",
             )
         elif path in {"/miro_rack/plotly.min.js", "/vendor/plotly.min.js"}:
             status, content_type, body, headers = self.server.miro_rack.forward_get(
@@ -323,6 +337,17 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             )
         elif path == "/api/sif/timezone":
             self._send_json(HTTPStatus.OK, self.server.backend.sif_timezone_prompt())
+        elif path == "/api/sif/log/progress":
+            self._send_json(
+                HTTPStatus.OK, self.server.backend.sif_log_export_progress()
+            )
+        elif path.startswith("/api/sif/log/download/"):
+            self._send_file(
+                self.server.backend.sif_log_export_file(
+                    path.removeprefix("/api/sif/log/download/")
+                ),
+                download=True,
+            )
         elif path == "/api/gopro/timezone":
             self._send_json(
                 HTTPStatus.OK, self.server.backend.gopro_timezone_prompt()
@@ -490,6 +515,11 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                         str(body.get("kind", ""))
                     ),
                 )
+            elif path == "/api/sif/log":
+                self._send_json(
+                    HTTPStatus.ACCEPTED,
+                    self.server.backend.start_sif_log_export(self._json_body()),
+                )
             elif path == "/api/sif/options":
                 body = self._json_body()
                 self._send_json(
@@ -577,6 +607,14 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     HTTPStatus.OK, content, media_type,
                     {"Content-Disposition": f'attachment; filename="{filename}"'},
                 )
+            elif path == "/api/micasense/figures/export":
+                filename, content, media_type = (
+                    self.server.backend.export_micasense_figures(self._json_body())
+                )
+                self._send_bytes(
+                    HTTPStatus.OK, content, media_type,
+                    {"Content-Disposition": f'attachment; filename="{filename}"'},
+                )
             elif path in {"/api/opc/map/export", "/api/partector/map/export"}:
                 body = self._json_body()
                 filename, pdf = self.server.backend.export_size_distribution_map_pdf(
@@ -596,6 +634,16 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     pdf,
                     "application/pdf",
                     {"Content-Disposition": f'attachment; filename="{filename}"'},
+                )
+            elif path == "/api/miro-rack/trace-gas/data":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.miro_rack.trace_gas_investigation(self._json_body()),
+                )
+            elif path == "/api/miro-rack/trace-gas/export":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.miro_rack.export_trace_gas_figure(self._json_body()),
                 )
             elif path == "/api/miro-rack/map/start":
                 self._json_body()

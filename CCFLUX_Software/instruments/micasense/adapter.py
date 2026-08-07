@@ -292,6 +292,17 @@ class MicaSenseLevel1Adapter(InstrumentBase):
             self._records = [
                 record for record in self._records if id(record) not in dropped
             ]
+        # The delivery's own coverage, from every dated capture, before the Time
+        # Filter narrows anything. Discovery can only estimate this from a
+        # bounded sample of the archives; a run has read them all, so this is
+        # what replaces the estimate on the instrument card afterwards.
+        delivered = [
+            stamp
+            for record in self._records
+            if (stamp := _as_utc(record.get("timestamp"))) is not None
+        ]
+        delivered_start = min(delivered) if delivered else None
+        delivered_end = max(delivered) if delivered else None
         excluded_by_time = 0
         undated = 0
         if selected_start is not None or selected_end is not None:
@@ -417,6 +428,9 @@ class MicaSenseLevel1Adapter(InstrumentBase):
                 # here reported 14,226 images beside 42 captures of 6 bands.
                 "image_count": len(self._records),
                 "delivered_image_count": len(files),
+                # Measured over the whole delivery, not the filtered selection.
+                "delivered_utc_start": _iso(delivered_start),
+                "delivered_utc_end": _iso(delivered_end),
                 "capture_count": len(self._captures),
                 "complete_capture_count": complete,
                 "incomplete_capture_count": incomplete,

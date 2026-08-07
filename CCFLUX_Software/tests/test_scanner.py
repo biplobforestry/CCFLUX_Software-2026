@@ -10,6 +10,7 @@ from unittest.mock import patch
 from core.configuration import load_detection_configuration
 from core.detection_configuration import DetectionConfiguration
 from core.scanner import (
+    BOUNDED_COVERAGE_SAMPLES,
     FlightFolderScanner,
     ScanCancellationToken,
     ScanProgress,
@@ -155,16 +156,27 @@ class FlightFolderScannerTests(unittest.TestCase):
             item for item in report.candidates if item.instrument_id == "gopro"
         )
         self.assertEqual(candidate.matching_file_count, 3000)
-        # Bounded, and spanning the delivery. It used to be the first twenty
+        # Bounded, and spread over the delivery. It used to be the first twenty
         # files to arrive, and a camera's coverage is read from this sample:
         # MicaSense delivered 2 371 captures over four and a half hours and was
-        # reported as ending seven minutes in, which put every later capture
-        # outside the Time Filter. Discovery is threaded, so arrival order says
-        # nothing about capture order - both ends are taken by name.
-        self.assertLessEqual(len(candidate.sample_matching_files), 40)
+        # reported as ending seven minutes in. Discovery is threaded, so arrival
+        # order says nothing about capture order.
+        #
+        # Taking the two ends of the name order instead fails when the counter
+        # wraps: on Flight_CC0806 IMG_0000 and IMG_9999 are two seconds apart,
+        # so 9 999 captures over six hours were reported as ninety seconds. The
+        # sample is spread across the whole name order for that reason.
+        self.assertLessEqual(
+            len(candidate.sample_matching_files),
+            BOUNDED_COVERAGE_SAMPLES + 20 + 2,
+        )
         names = [path.name for path in candidate.sample_matching_files]
         self.assertIn("GX000000.mp4", names)
         self.assertIn("GX002999.mp4", names)
+        middle = [
+            name for name in names if "GX001000.mp4" <= name <= "GX002000.mp4"
+        ]
+        self.assertTrue(middle, "a wrapped counter makes the two ends useless")
         self.assertEqual(report.malformed_file_count, 0)
 
     def test_large_scan_throttles_gui_progress_without_losing_final_count(self) -> None:

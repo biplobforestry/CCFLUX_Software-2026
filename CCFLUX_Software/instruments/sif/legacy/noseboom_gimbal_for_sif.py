@@ -60,6 +60,21 @@ SIF_COLUMNS = [
     "yaw",
 ]
 
+# The Gremsy publishes gimbal_pitch_deg relative to the horizon, reading -90 with
+# the sensor at nadir; on Flight_CC0806 it holds that to within a tenth of a
+# degree for 99.5% of the flight. The AirFloX log instead wants the angle off
+# level - "0 = aircraft is level, <0 = towards ground, >0 = to sky" (AirFloX data
+# processing manual, "Log file angle definition"). Both count the same direction
+# as positive, so the conversion is the offset between their zeros: tilting the
+# sensor up off nadir raises both.
+NADIR_GIMBAL_PITCH_DEG = -90.0
+
+
+def pitch_off_level(gimbal_pitch: float) -> float:
+    """Gremsy gimbal pitch as the AirFloX manual's angle off level."""
+    return gimbal_pitch - NADIR_GIMBAL_PITCH_DEG
+
+
 NOSEBOOM_DEMO_COLUMNS = [
     "TIMESTAMP",
     "INS_Filter_LLHPos_Latitude_deg",
@@ -248,7 +263,11 @@ def convert_gimbal(args: argparse.Namespace) -> None:
                 roll = parse_float(source_row.get(args.roll_column))
                 yaw = parse_float(source_row.get(args.yaw_column))
 
-                if args.invert_pitch and pitch is not None:
+                # The reflection already carries the sign change, so the two
+                # pitch options are alternatives rather than a sequence.
+                if args.pitch_from_nadir and pitch is not None:
+                    pitch = pitch_off_level(pitch)
+                elif args.invert_pitch and pitch is not None:
                     pitch = -pitch
                 if args.invert_roll and roll is not None:
                     roll = -roll
@@ -502,7 +521,10 @@ def make_sif(args: argparse.Namespace) -> None:
                 pitch = parse_float(source_row.get(args.pitch_column))
                 roll = parse_float(source_row.get(args.roll_column))
                 yaw = parse_float(source_row.get(args.yaw_column))
-                if args.invert_pitch and pitch is not None:
+                # See convert_gimbal: the reflection already carries the sign.
+                if args.pitch_from_nadir and pitch is not None:
+                    pitch = pitch_off_level(pitch)
+                elif args.invert_pitch and pitch is not None:
                     pitch = -pitch
                 if args.invert_roll and roll is not None:
                     roll = -roll
@@ -562,6 +584,14 @@ def add_convert_gimbal_parser(subparsers: argparse._SubParsersAction) -> None:
             "pitch < 0 points toward ground, pitch > 0 points skyward."
         ),
     )
+    parser.add_argument(
+        "--pitch-from-nadir",
+        action="store_true",
+        help=(
+            "Read the pitch column as Gremsy gimbal pitch (-90 = nadir) and write "
+            "the AirFloX manual's angle off level. Supersedes --invert-pitch."
+        ),
+    )
     parser.add_argument("--invert-roll", action="store_true", help="Invert roll sign")
     parser.add_argument("--invert-yaw", action="store_true", help="Invert yaw sign")
     parser.add_argument(
@@ -583,6 +613,7 @@ def add_convert_gimbal_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.set_defaults(
         func=convert_gimbal,
         invert_pitch=False,
+        pitch_from_nadir=False,
         normalize_yaw=True,
         required_columns=[
             "_time",
@@ -657,6 +688,14 @@ def add_make_sif_parser(subparsers: argparse._SubParsersAction) -> None:
             "pitch < 0 points toward ground, pitch > 0 points skyward."
         ),
     )
+    parser.add_argument(
+        "--pitch-from-nadir",
+        action="store_true",
+        help=(
+            "Read the pitch column as Gremsy gimbal pitch (-90 = nadir) and write "
+            "the AirFloX manual's angle off level. Supersedes --invert-pitch."
+        ),
+    )
     parser.add_argument("--invert-roll", action="store_true", help="Invert roll sign")
     parser.add_argument("--invert-yaw", action="store_true", help="Invert yaw sign")
     parser.add_argument(
@@ -678,6 +717,7 @@ def add_make_sif_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.set_defaults(
         func=make_sif,
         invert_pitch=False,
+        pitch_from_nadir=False,
         normalize_yaw=True,
         required_columns=[
             "_time",
@@ -741,12 +781,106 @@ def find_noseboom_file(hatchbox: Path) -> Path:
     return candidates[0]
 
 
+GEOID_SAMPLE_ROWS = 20000
+
+
+def median_geoid_separation(
+    noseboom_csv: Path, sample_rows: int = GEOID_SAMPLE_ROWS
+) -> float | None:
+    """Ellipsoid height minus mean-sea-level height, from the receiver with both.
+
+    The INS solution is the better position but publishes only an ellipsoid
+    height, while a terrain model is referenced to sea level, so the two cannot
+    be differenced without this. GNSSRecv1 reports both. The separation is a
+    property of the geoid and moves by well under a metre across one flight, so
+    the median of the opening rows stands for the whole record and costs a few
+    megabytes rather than a second pass over the delivery.
+    """
+    ellipsoid = "GNSSRecv1_LLHPos_ElipsoidHeight_m"
+    sea_level = "GNSSRecv1_LLHPos_MSLHeight_m"
+    separations: list[float] = []
+    with open_text(Path(noseboom_csv)) as src:
+        reader = csv.DictReader(src)
+        reader.fieldnames = normalize_noseboom_fieldnames(
+            reader.fieldnames, Path(noseboom_csv).name
+        )
+        names = reader.fieldnames or []
+        if ellipsoid not in names or sea_level not in names:
+            return None
+        for index, row in enumerate(reader):
+            if index >= sample_rows:
+                break
+            high = parse_float(row.get(ellipsoid))
+            low = parse_float(row.get(sea_level))
+            if high is not None and low is not None:
+                separations.append(high - low)
+    if not separations:
+        return None
+    separations.sort()
+    return separations[len(separations) // 2]
+
+
+def to_height_above_ground(
+    csv_path: Path, geoid_separation: float, terrain_sampler
+) -> tuple[int, int, int]:
+    """Rewrite alt_above_ground_m as what its name says.
+
+    The column is filled from the Noseboom's INS ellipsoid height, because that
+    is the only altitude the INS publishes. Height above ground is that minus
+    the geoid separation, which puts it above sea level, minus the ground
+    elevation there. SIF turns this column straight into the footprint radius
+    (Alt x tan 11.5 deg), so the difference is a scientific one and not a label:
+    on Flight_CC0806 the ground sits near 165 m ellipsoid, so an uncorrected
+    column reports a hundred-metre footprint for a spectrometer sitting on it.
+
+    ``terrain_sampler`` takes (latitudes, longitudes) and returns ground
+    elevation in metres above sea level, NaN where it could not be sampled.
+    Returns (rows converted, rows left as delivered, rows below ground).
+
+    A row can come out slightly negative: the terrain model is a raster of
+    roughly forty metres per pixel, so on the ground its elevation and the
+    aircraft's own altitude disagree by a few metres. The reference AirFloX log
+    does the same thing, reaching -6.6 m, so the values are reported as measured
+    rather than clamped - a floor of zero would be an invented altitude.
+    """
+    with open_text(Path(csv_path)) as src:
+        rows = list(csv.DictReader(src))
+    if not rows:
+        return 0, 0, 0
+    latitudes = [parse_float(row.get("lat")) for row in rows]
+    longitudes = [parse_float(row.get("lon")) for row in rows]
+    ground = terrain_sampler(latitudes, longitudes)
+    converted = 0
+    unchanged = 0
+    below_ground = 0
+    for row, elevation in zip(rows, ground):
+        height = parse_float(row.get("alt_above_ground_m"))
+        # NaN compares unequal to itself; that is how the sampler reports a tile
+        # it could not fetch, and a guessed ground is worse than none.
+        if height is None or elevation is None or elevation != elevation:
+            unchanged += 1
+            continue
+        above = height - geoid_separation - float(elevation)
+        row["alt_above_ground_m"] = format_value(above)
+        converted += 1
+        if above < 0:
+            below_ground += 1
+    with Path(csv_path).open("w", newline="", encoding="utf-8") as dst:
+        writer = csv.DictWriter(dst, fieldnames=SIF_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+    return converted, unchanged, below_ground
+
+
 def prepare_sif_log_from_hatchbox(
     flight_root: Path,
     output_dir: Path,
     custom_log: Path | None = None,
     altitude_filter: bool = False,
     max_position_gap_sec: float = 0.2,
+    invert_pitch: bool = False,
+    pitch_from_nadir: bool = False,
+    terrain_sampler=None,
 ) -> Path:
     if custom_log is not None:
         custom_log = Path(custom_log)
@@ -790,7 +924,8 @@ def prepare_sif_log_from_hatchbox(
         max_position_gap_sec=max_position_gap_sec,
         drop_unmatched=True,
         altitude_filter=altitude_filter,
-        invert_pitch=False,
+        invert_pitch=invert_pitch,
+        pitch_from_nadir=pitch_from_nadir,
         invert_roll=False,
         invert_yaw=False,
         normalize_yaw=True,
@@ -799,6 +934,33 @@ def prepare_sif_log_from_hatchbox(
         required_columns=["_time", "gimbal_pitch_deg", "gimbal_roll_deg", "gimbal_yaw_absolute_deg"],
     )
     make_sif(args)
+    if terrain_sampler is not None:
+        separation = median_geoid_separation(noseboom_csv)
+        if separation is None:
+            print(
+                "warning=The Noseboom publishes no mean-sea-level height beside "
+                "its ellipsoid height, so alt_above_ground_m is the ellipsoid "
+                "height and the SIF footprint radius is computed from it."
+            )
+        else:
+            converted, unchanged, below_ground = to_height_above_ground(
+                output_path, separation, terrain_sampler
+            )
+            print(
+                f"note=alt_above_ground_m converted to height above ground on "
+                f"{converted} row(s); geoid separation {separation:.2f} m"
+            )
+            if unchanged:
+                print(
+                    f"warning={unchanged} row(s) had no terrain sample and keep "
+                    "the ellipsoid height."
+                )
+            if below_ground:
+                print(
+                    f"note={below_ground} row(s) sit just below the terrain "
+                    "model, which is a raster of about forty metres per pixel; "
+                    "these are on the ground and are reported as measured."
+                )
     if not is_sif_log(output_path):
         raise RuntimeError(f"Generated log is not a valid SIF log: {output_path}")
     return output_path

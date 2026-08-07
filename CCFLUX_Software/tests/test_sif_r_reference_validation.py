@@ -42,11 +42,37 @@ import numpy as np
 import pandas as pd
 import pytest
 
-DATA = Path("/Users/biplob/Downloads/AirFloX_test_data_240828")
-RAW = DATA / "01_AirFloX/01_raw"
-CALIBRATION = DATA / "01_AirFloX/00_calibration&code"
-TELEMETRY = DATA / "02_UAV_gimbal_log/Including_gimbal_angles/log_86_2024-8-28-14-54-38_conv_ang.csv"
-R_OUTPUT = DATA / "Validation"
+# The same delivery is kept in two shapes: as it arrived from the campaign, and
+# as it is laid out beside the R GUI that produced the validation output. Either
+# will do - the tests only need the four paths below - so whichever is present
+# on this machine is used, and the suite skips when neither is.
+_LAYOUTS = (
+    (
+        Path("/Users/biplob/Downloads/AirFloX_test_data_240828"),
+        "01_AirFloX/01_raw",
+        "01_AirFloX/00_calibration&code",
+        "02_UAV_gimbal_log/Including_gimbal_angles/log_86_2024-8-28-14-54-38_conv_ang.csv",
+        "Validation",
+    ),
+    (
+        Path(r"f:\SIF_VERIFICATION\main"),
+        "Raw",
+        "Cal_files",
+        "log_86_2024-8-28-14-54-38_conv_ang.csv",
+        "Validation",
+    ),
+)
+
+
+def _resolve():
+    for root, raw, calibration, telemetry, output in _LAYOUTS:
+        if (root / raw).is_dir() and (root / output).is_dir() and (root / telemetry).is_file():
+            return root, root / raw, root / calibration, root / telemetry, root / output
+    root, raw, calibration, telemetry, output = _LAYOUTS[0]
+    return root, root / raw, root / calibration, root / telemetry, root / output
+
+
+DATA, RAW, CALIBRATION, TELEMETRY, R_OUTPUT = _resolve()
 BUNDLED = Path(__file__).resolve().parents[1] / "instruments" / "sif" / "legacy"
 
 requires_r_reference = pytest.mark.skipif(
@@ -326,3 +352,231 @@ def test_only_the_longitude_decision_moves_the_zenith_angle(airflox, tmp_path):
 def test_the_per_row_longitude_is_the_shipped_behaviour(airflox):
     """A Zeppelin transect covers kilometres; one longitude for it is not usable."""
     assert airflox.GETCOORDINATES_R_LONGITUDE_MEAN is False
+
+
+class TestNonlinearityFollowsTheDarkCurrent:
+    """R corrects the dark-subtracted signal, not the raw arrays.
+
+        data<-list(DCSubtraction(E,dcE),DCSubtraction(L,dcL),DCSubtraction(E2,dcE))
+        res <- lapply(data, Non_linearity, coeffnl=NL_coeff)
+
+    The correction is a degree-7 polynomial, so NL(E) - NL(dcE) is not
+    NL(E - dcE). Correcting each array separately, as this once did, would
+    diverge from the GUI on any instrument that ships coefficients - silently,
+    because neither campaign calibration file carries them.
+    """
+
+    def _cal(self, airflox, coefficients):
+        frame = pd.DataFrame({
+            "wl": [700.0, 701.0],
+            "up_coef": [1.0, 1.0],
+            "dw_coef": [1.0, 1.0],
+        })
+        frame.attrs["nl_coeff"] = coefficients
+        return frame
+
+    def _raw(self, airflox):
+        counts = lambda v: np.full((2, 1), float(v))
+        return airflox.AirFloXRaw(
+            counts(20000), counts(400), counts(19000), counts(9000), counts(300),
+            np.array([100.0]), np.array([100.0]), ["260806"], ["102028"],
+            np.array([20.0]), np.array([40.0]),
+            ["102028"], ["060826"], ["51.4 N"], ["6.9 E"],
+            np.array([0.0]), np.array([0.0]),
+        )
+
+    def test_the_polynomial_is_the_reference_one(self, airflox):
+        """nl_s = c1 + c2*d + ... + c8*d^7;  out = data / nl_s."""
+        coefficients = np.array([1.0, 1e-6, 1e-11, 0.0, 0.0, 0.0, 0.0, 0.0])
+        data = np.array([[1000.0, 20000.0]])
+        expected = data / (1.0 + 1e-6 * data + 1e-11 * data ** 2)
+        assert np.allclose(airflox.apply_nonlinearity(data, coefficients),
+                           expected, rtol=0, atol=0)
+
+    def test_the_correction_is_applied_after_the_subtraction(self, airflox):
+        coefficients = np.array([1.0, 1e-6, 1e-11, 0.0, 0.0, 0.0, 0.0, 0.0])
+        raw = self._raw(airflox)
+        cal = self._cal(airflox, coefficients)
+
+        e, e2, l = airflox.dark_subtracted_signals(raw, cal, True)
+
+        assert np.allclose(e, airflox.apply_nonlinearity(raw.e - raw.dc_e, coefficients))
+        assert np.allclose(l, airflox.apply_nonlinearity(raw.l - raw.dc_l, coefficients))
+        assert np.allclose(e2, airflox.apply_nonlinearity(raw.e2 - raw.dc_e, coefficients))
+        # The order is not cosmetic: the two ways disagree on real counts.
+        separate = (airflox.apply_nonlinearity(raw.e, coefficients)
+                    - airflox.apply_nonlinearity(raw.dc_e, coefficients))
+        assert not np.allclose(e, separate)
+
+    def test_without_coefficients_it_is_a_plain_subtraction(self, airflox):
+        raw = self._raw(airflox)
+        cal = self._cal(airflox, None)
+        e, e2, l = airflox.dark_subtracted_signals(raw, cal, False)
+        assert np.allclose(e, raw.e - raw.dc_e)
+        assert np.allclose(e2, raw.e2 - raw.dc_e)
+        assert np.allclose(l, raw.l - raw.dc_l)
+
+    def test_asking_for_it_without_coefficients_refuses(self, airflox):
+        """R stops with NO COEFFICIENTS FOR NL CORRECTION!!; so do we."""
+        with pytest.raises(ValueError, match="NL COEF"):
+            airflox.dark_subtracted_signals(
+                self._raw(airflox), self._cal(airflox, None), True)
+
+    @requires_r_reference
+    def test_the_campaign_calibration_files_carry_none(self, airflox):
+        """Which is why the manual says leave the correction off."""
+        for name in ("CAL_FROG_AIRFLOX07_FULL_FZJ_2023-05-31.csv",
+                     "CAL_FROG_AIRFLOX_FLUO_05FZJ_2023-05-31.csv"):
+            frame = pd.read_csv(CALIBRATION / name, sep=";", engine="python")
+            assert airflox.extract_nl_coefficients(frame) is None, name
+
+
+@requires_r_reference
+class TestTheShapefileAttributes:
+    """R's Write_shape writes ID, datetime, SZA, Lat, Lon, Heigh, Radius and
+    either PAR ref (FULL) or the two iFLD columns (FLUO)."""
+
+    def _dbf(self, path):
+        import struct
+
+        data = path.read_bytes()
+        count, header_length, record_length = struct.unpack("<IHH", data[4:12])
+        fields, offset = [], 32
+        while data[offset] != 0x0D:
+            raw = data[offset:offset + 32]
+            fields.append((raw[:11].split(b"\x00")[0].decode("latin-1"),
+                           chr(raw[11]), raw[16], raw[17]))
+            offset += 32
+        rows = []
+        for i in range(count):
+            start = header_length + i * record_length
+            record, cursor, values = data[start:start + record_length], 1, []
+            for _, _, length, _ in fields:
+                values.append(record[cursor:cursor + length].decode("latin-1").strip())
+                cursor += length
+            rows.append(values)
+        return fields, rows
+
+    def test_every_field_r_writes_is_present(self, produced):
+        for mode, folder, stem, _cal, _rdir, _rstem in MODES:
+            path = produced / folder / "GIS" / f"AIRFLOX_{stem}.dbf"
+            names = [f[0] for f in self._dbf(path)[0]]
+            for expected in ("ID", "SZA", "Lat", "Lon", "Heigh", "Radius"):
+                assert expected in names, f"{mode}: {expected} missing from {names}"
+            assert any(n.startswith("datetime") for n in names), mode
+
+    def test_the_position_is_in_the_table_and_not_only_the_geometry(self, produced):
+        """A DBF read on its own - a join, a spreadsheet - needs the position."""
+        for _mode, folder, stem, _cal, _rdir, _rstem in MODES:
+            fields, rows = self._dbf(
+                produced / folder / "GIS" / f"AIRFLOX_{stem}.dbf")
+            names = [f[0] for f in fields]
+            lat = float(rows[0][names.index("Lat")])
+            lon = float(rows[0][names.index("Lon")])
+            assert 40 < lat < 60 and 0 < lon < 20
+
+    def test_the_row_counter_is_written_as_an_integer(self, produced):
+        """R writes ID with no decimals; a reader keying on it expects that."""
+        for _mode, folder, stem, _cal, _rdir, _rstem in MODES:
+            fields, rows = self._dbf(
+                produced / folder / "GIS" / f"AIRFLOX_{stem}.dbf")
+            names = [f[0] for f in fields]
+            assert fields[names.index("ID")][3] == 0, "ID declares decimals"
+            assert rows[0][names.index("ID")] == "1"
+
+    def test_the_geometry_matches_the_r_shapefile_point_for_point(self, produced):
+        """The FULL channel is the one R shipped a GIS folder for."""
+        import struct
+
+        def points(path):
+            data = path.read_bytes()
+            out, offset = [], 100
+            while offset < len(data):
+                _, length = struct.unpack(">II", data[offset:offset + 8])
+                body = data[offset + 8: offset + 8 + length * 2]
+                if struct.unpack("<I", body[:4])[0] == 1:
+                    out.append(struct.unpack("<dd", body[4:20]))
+                offset += 8 + length * 2
+            return out
+
+        _mode, folder, stem, _cal, rdir, _rstem = MODES[0]
+        reference = R_OUTPUT / rdir / "GIS" / f"AIRFLOX_{stem}.shp"
+        if not reference.is_file():
+            pytest.skip("The R run did not ship a GIS folder for this channel.")
+        theirs = points(reference)
+        mine = points(produced / folder / "GIS" / f"AIRFLOX_{stem}.shp")
+        recovered = len(mine) - len(theirs)
+        assert recovered >= 0
+        for (rx, ry), (px, py) in zip(theirs, mine[recovered:]):
+            assert rx == pytest.approx(px, abs=0) and ry == pytest.approx(py, abs=0)
+
+
+@requires_r_reference
+class TestTheTelemetryLogContract:
+    """R cannot build the log, only consume it, so there is no R output to diff
+    the builder against. What is testable is the contract between them: the four
+    columns MATCH_data reads, and that our matcher picks the same rows R's
+    findit() would.
+    """
+
+    R_COLUMNS = ("lat", "lon", "alt_above_ground_m", "date_time_utc")
+
+    def _r_match(self, air, log):
+        """MATCH_data(), transcribed from R lines 968-1012."""
+        t = pd.read_csv(log)
+        stamps = pd.to_datetime(t["date_time_utc"], errors="coerce")
+        one = stamps.to_numpy("datetime64[ns]").astype("int64")
+        two = pd.to_datetime(air["datetime [UTC]"], errors="coerce")
+        two = two.to_numpy("datetime64[ns]").astype("int64")
+        ceiling = np.iinfo("int64").max
+        where = np.full(len(two), -1, dtype=int)
+        for i, x in enumerate(two):
+            y = np.where(one - x < 0, ceiling, one - x)
+            if not (y == ceiling).all():
+                where[i] = int(np.argmin(y))   # R which.min: the first minimum
+        return where, t
+
+    def test_the_reference_log_is_read_by_both(self):
+        table = pd.read_csv(TELEMETRY)
+        for column in self.R_COLUMNS:
+            assert column in table.columns
+
+    def test_our_builder_writes_the_columns_r_reads(self):
+        from instruments.sif.legacy import __name__ as _  # noqa: F401
+        import importlib.util
+
+        path = (Path(__file__).resolve().parents[1] / "instruments" / "sif"
+                / "legacy" / "noseboom_gimbal_for_sif.py")
+        spec = importlib.util.spec_from_file_location("ccflux_nav_contract", path)
+        nav = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(nav)
+        for column in self.R_COLUMNS:
+            assert column in nav.SIF_COLUMNS, column
+
+    def test_our_matcher_picks_the_rows_r_picks(self, airflox, produced):
+        """Run against the reference log, on both channels."""
+        for mode, _folder, stem, calibration, _rdir, _rstem in MODES:
+            processed = (airflox.process_full if mode == "FULL"
+                         else airflox.process_fluo)(
+                RAW / f"{stem}.CSV", CALIBRATION / calibration,
+                CALIBRATION / "Indices_ICOS.txt", False, False, True)
+            mine, kept = airflox.match_data(processed["out"], TELEMETRY)
+            where, log = self._r_match(processed["out"], TELEMETRY)
+
+            assert np.array_equal(np.asarray(kept), where >= 0), mode
+            chosen = where[where >= 0]
+            for ours, theirs in (("Lat", "lat"), ("Lon", "lon"),
+                                 ("Alt", "alt_above_ground_m")):
+                expected = pd.to_numeric(log[theirs], errors="coerce").to_numpy(float)
+                got = pd.to_numeric(mine[ours], errors="coerce").to_numpy(float)
+                assert np.allclose(got[np.asarray(kept)], expected[chosen],
+                                   rtol=0, atol=0), f"{mode}: {ours}"
+
+    def test_the_footprint_radius_is_r_s_formula(self, airflox, produced):
+        """radius_nocos <- 1*dist*tan(FOV_half*pi/180), FOV_half = 11.5."""
+        for mode, folder, stem, _cal, _rdir, _rstem in MODES:
+            frame = _read(produced / folder / f"ALL_INDEX_AIRFLOX_{mode}_{stem}.csv")
+            alt = _numeric(frame["Alt"])
+            radius = _numeric(frame["radius_nocos"])
+            assert np.allclose(radius, alt * np.tan(11.5 * np.pi / 180),
+                               rtol=1e-12, atol=1e-12), mode

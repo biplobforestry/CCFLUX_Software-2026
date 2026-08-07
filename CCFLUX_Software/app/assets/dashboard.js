@@ -124,6 +124,116 @@
   document.getElementById('dataProductsBtn').addEventListener('click', () => {
     openEditableInformation('/data_products.txt', 'Data Products');
   });
+
+  // ------------------------------------------------------------- SIF log
+  // The Noseboom + Gimbal telemetry log, built by the same routine SIF
+  // processing uses, so an analysis in R works from the same rows and the same
+  // column names rather than from a second implementation of the navigation.
+  const SIF_LOG_COLUMNS = [
+    'lat', 'lon', 'alt_above_ground_m', 'date_time_utc', 'pitch', 'roll', 'yaw'
+  ];
+
+  function renderSifLog(state) {
+    const files = state.files || [];
+    const notes = (state.notes || []).map(note => `<li>${escapeHtml(note)}</li>`).join('');
+    const running = state.status === 'running';
+    const choices = state.choices || [
+      {key: 'utc', label: 'UTC', offset_seconds: 0},
+      {key: 'cest', label: 'CEST (UTC+2)', offset_seconds: 7200}
+    ];
+    const chosen = sifLogTimezone;
+    modalBody.innerHTML = `
+      <p>Combines <strong>Noseboom</strong> latitude, longitude and altitude with
+      <strong>Gremsy Gimbal</strong> pitch, roll and yaw into the telemetry log
+      the SIF pipeline itself uses. The columns are those of the original SIF
+      log, unchanged:</p>
+      <p><code>${SIF_LOG_COLUMNS.join(', ')}</code></p>
+      ${running || files.length ? '' : `
+        <p><strong>Which clock should the log be written on?</strong><br>
+        <small class="muted">Noseboom and the Gremsy Gimbal both record UTC, so
+        the log is UTC as built. The AirFloX spectra are written on the campaign
+        record clock, so choose that if the analysis reads the two together.</small></p>
+        ${choices.map(choice => `
+          <label class="detail-row"><input type="radio" name="sifLogTz"
+            value="${escapeAttribute(choice.key)}"
+            ${choice.key === chosen ? 'checked' : ''}><span>
+            <strong>${escapeHtml(choice.label)}</strong><br>
+            <small>${Number(choice.offset_seconds)
+              ? `date_time_utc moved by ${(Number(choice.offset_seconds) / 3600).toFixed(0)} h. `
+                + 'The column keeps its name so the schema matches the original '
+                + 'SIF log, so it then holds ' + escapeHtml(choice.label) + ', not UTC.'
+              : 'Written exactly as Noseboom and the Gimbal recorded it.'}</small>
+          </span></label>`).join('')}`}
+      ${running ? `
+        <p class="muted">${escapeHtml(state.step || 'Working…')}</p>
+        <div class="progress"><span style="width:${Number(state.progress) || 0}%"></span></div>
+        <p class="muted">The whole flight record is read, so this takes a few minutes.</p>
+      ` : ''}
+      ${state.error ? `<p class="danger-warning">${escapeHtml(state.error)}</p>` : ''}
+      ${files.length ? `
+        <p><strong>${escapeHtml(state.step || 'Ready')}</strong></p>
+        <p>${files.map(file => `<a class="btn primary" href="${escapeAttribute(file.url)}"
+            download>Download ${escapeHtml(file.name)}</a>`).join(' ')}</p>
+        <p class="muted">${Number(state.rows_written || 0).toLocaleString()} row(s)
+        · times on <strong>${escapeHtml(state.output_timezone_label || 'UTC')}</strong>
+        · saved with the Flight Project.</p>
+      ` : ''}
+      ${notes ? `<ul class="qc-list">${notes}</ul>` : ''}
+      ${running || files.length ? '' :
+        '<p><button class="btn primary" id="sifLogStart">Build the SIF log</button></p>'}
+      ${files.length ? '<p><button class="btn" id="sifLogAgain">Build another</button></p>' : ''}`;
+    modalBody.querySelectorAll('input[name="sifLogTz"]').forEach(input => {
+      input.onchange = () => { sifLogTimezone = input.value; };
+    });
+    const start = document.getElementById('sifLogStart');
+    if (start) start.onclick = startSifLog;
+    const again = document.getElementById('sifLogAgain');
+    if (again) again.onclick = () => renderSifLog({status: 'idle', files: []});
+  }
+
+  let sifLogPolling = false;
+  let sifLogTimezone = 'utc';
+
+  async function pollSifLog() {
+    if (sifLogPolling) return;
+    sifLogPolling = true;
+    try {
+      for (;;) {
+        const state = await api('/api/sif/log/progress');
+        renderSifLog(state);
+        if (state.status !== 'running') break;
+        await new Promise(done => setTimeout(done, 900));
+      }
+    } catch (error) {
+      modalBody.innerHTML = `<p class="danger-warning">${escapeHtml(error.message)}</p>`;
+    } finally {
+      sifLogPolling = false;
+    }
+  }
+
+  async function startSifLog() {
+    try {
+      renderSifLog({status: 'running', progress: 2, step: 'Starting…'});
+      await api('/api/sif/log', {
+        method: 'POST',
+        body: JSON.stringify({output_timezone: sifLogTimezone})
+      });
+      pollSifLog();
+    } catch (error) {
+      modalBody.innerHTML = `<p class="danger-warning">${escapeHtml(error.message)}</p>`;
+    }
+  }
+
+  document.getElementById('sifLogBtn').addEventListener('click', async () => {
+    modalTitle.textContent = 'SIF Log · Noseboom + Gimbal';
+    showModal();
+    try {
+      renderSifLog(await api('/api/sif/log/progress'));
+      pollSifLog();
+    } catch (error) {
+      modalBody.innerHTML = `<p class="danger-warning">${escapeHtml(error.message)}</p>`;
+    }
+  });
   let updateStatus = null;
 
   function renderUpdateButton() {
@@ -2202,6 +2312,42 @@
 
 
 
+  // Answering a clock question is not a quick save. The declaration is applied
+  // by re-reading that instrument's timestamps - every SIF spectral file, every
+  // GoPro EXIF header - and then rewriting the Flight Project. On a campaign
+  // delivery that runs for many seconds, and the dialog sat there still showing
+  // its own buttons the whole time, so the window looked stuck and the operator
+  // had no way to tell a slow answer from a dead one.
+  //
+  // The choice is replaced by this panel the moment it is made, and the panel
+  // closes itself when the work lands.
+  function showWorkingDialog(title, message) {
+    modalTitle.textContent = title;
+    modalBody.innerHTML = `
+      <p><strong>${escapeHtml(message)}</strong></p>
+      <div class="scan-progress indeterminate"><span></span></div>
+      <p class="muted">This can take a little while on a full delivery. The
+      window closes itself when it is finished.</p>`;
+    showModal();
+  }
+
+  // Left open with the reason, rather than closed behind a toast that a reader
+  // who looked away has already missed.
+  function showDialogFailure(title, message, retry) {
+    modalTitle.textContent = title;
+    modalBody.innerHTML = `
+      <p class="danger-warning">${escapeHtml(message)}</p>
+      <div class="modal-actions">
+        <button class="btn" id="dialogFailureClose">Close</button>
+        ${retry ? '<button class="btn primary" id="dialogFailureRetry">Try again</button>' : ''}
+      </div>`;
+    showModal();
+    document.getElementById('dialogFailureClose').onclick =
+      () => modal.classList.remove('show');
+    const again = document.getElementById('dialogFailureRetry');
+    if (again) again.onclick = retry;
+  }
+
   // FLOX and FULL write campaign local time, and their GPS often never locks,
   // so nothing in the files says how far that is from UTC. The operator is
   // asked as soon as the scan finds SIF, because every stored timestamp
@@ -2234,6 +2380,11 @@
     document.getElementById('sifTimezoneUse').onclick = async () => {
       const picked = document.querySelector('[name=sifTimezone]:checked');
       if (!picked) return;
+      const label = picked.parentElement.textContent.trim();
+      showWorkingDialog(
+        'SIF record-clock timezone',
+        `Applying ${label} and re-reading the SIF timestamps…`
+      );
       try {
         await api('/api/sif/timezone', {
           method: 'POST',
@@ -2242,13 +2393,20 @@
         // Only now. Latching before the answer landed meant a dismissed or
         // failed dialog was never shown again, and SIF ran undeclared.
         sifTimezoneAsked = true;
+        // Closed before the refresh, not after: pollScan asks the GoPro clock
+        // question next, and closing the window afterwards would shut that
+        // dialog the moment it opened.
         modal.classList.remove('show');
-        showToast(`SIF record clock read as ${picked.parentElement.textContent.trim()}.`);
+        showToast(`SIF record clock read as ${label}.`);
         // The card was filled in before the answer, so refresh it to show the
         // converted window rather than the raw record clock.
         await pollScan();
       } catch (error) {
-        showToast(`Could not set the SIF timezone: ${error.message}`);
+        showDialogFailure(
+          'SIF record-clock timezone',
+          `Could not set the SIF timezone: ${error.message}`,
+          () => askSifTimezone()
+        );
       }
     };
   }
@@ -2328,6 +2486,12 @@
         }
         body.manual_offset_seconds = offset;
       }
+      // The slowest of the two: accepting this rereads the EXIF header of every
+      // frame on the card before the answer is stored.
+      showWorkingDialog(
+        'GoPro camera-clock timezone',
+        'Applying the camera clock and re-reading every frame’s EXIF time…'
+      );
       try {
         await api('/api/gopro/timezone', { method: 'POST', body: JSON.stringify(body) });
         goproTimezoneAsked = true;
@@ -2335,7 +2499,11 @@
         showToast('GoPro camera clock recorded; its coverage has been reread.');
         await pollScan();
       } catch (error) {
-        showToast(`Could not set the GoPro clock: ${error.message}`);
+        showDialogFailure(
+          'GoPro camera-clock timezone',
+          `Could not set the GoPro clock: ${error.message}`,
+          () => askGoproTimezone()
+        );
       }
     };
   }

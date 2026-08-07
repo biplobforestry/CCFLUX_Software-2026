@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import pandas as pd
 from uuid import uuid4
@@ -29,6 +29,7 @@ from core.configuration import load_detection_configuration
 from core.detector import InputCandidate
 from core.dashboard_time import (
     CAMERA_INSTRUMENTS,
+    SAMPLED_COVERAGE_INSTRUMENTS,
     DashboardTimeState,
     recorded_coverage_segments,
     parse_dashboard_datetime,
@@ -71,8 +72,12 @@ from .ins_gimbal_export import (
     validate_request as validate_ins_gimbal_request,
 )
 from .noseboom_statistics_export import NoseboomStatisticsExportManager
+from .sif_log_export import PITCH_FROM_NADIR, SifLogExportManager, terrain_sampler
 from core.resource_manager import CameraBatchPolicy, GIB, ResourceLimits, ResourceManager
-from core.priority_manager import create_default_priority_queue
+from core.priority_manager import (
+    CAMPAIGN_PROCESSING_ORDER,
+    create_default_priority_queue,
+)
 from core.exceptions import ProcessingCancelledError
 from core.processing_manager import (
     JobOutcome,
@@ -176,11 +181,9 @@ LOGGER = logging.getLogger(__name__)
 
 # Shown on the packages so a worker can see which campaign they belong to.
 CAMPAIGN_NAME = "CC-FLUX Campaign 2026"
-# Presentation order for the hybrid plan; the same order the cards use.
-INSTRUMENT_ORDER = (
-    "noseboom", "miro", "picarro", "opc_hbx4", "opc_hbx5",
-    "partector", "ins_gimbal", "sif", "gopro", "flir", "micasense",
-)
+# Presentation order for the hybrid plan. The campaign processing order, taken
+# from the queue definition so the two cannot drift apart.
+INSTRUMENT_ORDER = CAMPAIGN_PROCESSING_ORDER
 
 # Defined in core.time_manager, where the SIF adapter can reach it too, and
 # re-exported here because the dashboard API is its other caller.
@@ -797,6 +800,9 @@ class DashboardScanBackend:
         )
         self._ins_gimbal_export = InsGimbalExportManager(
             self.logger, self._save_ins_gimbal_exports
+        )
+        self._sif_log_export = SifLogExportManager(
+            self.logger, self._save_sif_log_exports
         )
         self._miro_rack_bridge: object | None = None
         self._hatchbox_view_lock = threading.RLock()
@@ -2788,9 +2794,15 @@ class DashboardScanBackend:
             selected_end = self._time_state.selected_analysis_end
             if payload.get("available"):
                 message = (
+                    # Selecting FLIR converts temperature; there is nothing
+                    # further to configure. So when the map is empty the useful
+                    # thing to show is why, which the payload now carries.
                     "FLIR acquisition plots, gap diagnostics, and thermal "
-                    "gallery are ready. Configure FLIR Level 2 in the Main GUI "
-                    "to create temperature plots and the Noseboom-matched map."
+                    "gallery are ready. The temperature map is not available: "
+                    + str(
+                        payload.get("temperature_reason")
+                        or "the temperature conversion produced no matched frame."
+                    )
                     if not payload.get("temperature_available")
                     else
                     "FLIR acquisition plots, radiometric temperature plots, "
@@ -3218,6 +3230,56 @@ class DashboardScanBackend:
         )
         return filename, pdf
 
+    def export_micasense_figures(
+        self, request: Mapping[str, Any]
+    ) -> tuple[str, bytes, str]:
+        """Every MicaSense panel in one file, at manuscript width."""
+        from core.map_pdf_export import render_figure_report
+
+        with self._lock:
+            project = self._flight_project
+            flight_id = project.flight_id if project else "Flight"
+        raw = request.get("figures")
+        if not isinstance(raw, list):
+            raise ValueError("figures must be a list of captured panels")
+        figures = [
+            {"name": str(item.get("name", "")), "image": str(item.get("image", ""))}
+            for item in raw
+            if isinstance(item, dict) and item.get("image")
+        ]
+        filename, content, media_type, effective = render_figure_report(
+            figures,
+            flight_name=flight_id,
+            report_name="MicaSense acquisition review",
+            subject=(
+                "MicaSense acquisition metadata review: capture integrity, "
+                "cadence, position, altitude, irradiance, exposure, light-sensor "
+                "attitude, solar geometry, imager temperature and band "
+                "completeness. Metadata only; no radiometric conversion."
+            ),
+            filename_tag="micasense_figures",
+            image_format=str(request.get("format") or "pdf"),
+            dpi=request.get("dpi", 300),
+        )
+        destination: Path | None = None
+        if project is not None:
+            export_root = project.flight_output_root / "exports" / "micasense"
+            export_root.mkdir(parents=True, exist_ok=True)
+            destination = export_root / filename
+            destination.write_bytes(content)
+            with self._lock:
+                project.output_locations["micasense_figure_exports"] = export_root
+            self._checkpoint_project()
+        self.logger.log(
+            LogLevel.SUCCESS, "hatchbox-view",
+            f"MicaSense workspace exported: {len(figures)} figure(s) at "
+            f"{render_figure_report.__globals__['FIGURE_WIDTH_INCHES']:g} inch wide, "
+            f"{effective:,.0f} DPI",
+            instrument="micasense", file_path=destination,
+            processing_step="figure-export",
+        )
+        return filename, content, media_type
+
     def micasense_thumbnail_file(self, name: str) -> Path:
         """One saved MicaSense thumbnail, by file name only."""
         safe = Path(str(name)).name
@@ -3329,6 +3391,69 @@ class DashboardScanBackend:
             return {"cancelled": True}
         options = self.update_sif_options({kind: str(selected)})
         return {"cancelled": False, "path": str(selected), "options": options}
+
+    def start_sif_log_export(
+        self, request: Mapping[str, object] | None = None
+    ) -> dict[str, object]:
+        """Build the Noseboom + Gimbal telemetry log for analysis elsewhere.
+
+        The same routine and the same options SIF processing uses, so a run in R
+        works from the same rows and the same column names rather than from a
+        second implementation of the campaign's navigation.
+        """
+        request = request or {}
+        with self._lock:
+            project = self._flight_project
+            flight_root = self._selected_folder
+            options = dict(self._sif_options)
+        if flight_root is None or not Path(flight_root).is_dir():
+            raise ValueError(
+                "Select the Flight Folder before building the SIF log; the "
+                "Gimbal and Noseboom deliveries are read from it."
+            )
+        if project is None or self._selected_output_folder is None:
+            raise ValueError("Select an Output Folder before building the SIF log")
+        destination = project.flight_output_root / "exports" / "sif"
+        return self._sif_log_export.start(
+            flight_root=Path(flight_root),
+            output_dir=destination,
+            flight_name=project.flight_id,
+            altitude_filter=bool(
+                request.get("altitude_filter", options.get("altitude_filter", False))
+            ),
+            max_position_gap_seconds=float(
+                request.get(
+                    "max_position_gap_seconds",
+                    options.get("max_position_gap_seconds", 0.2),
+                )
+            ),
+            # Noseboom and the Gremsy gimbal both record UTC, so the log is UTC
+            # unless the operator asks for the campaign local clock the AirFloX
+            # spectra are written on.
+            output_timezone=str(request.get("output_timezone") or "utc"),
+        )
+
+    def sif_log_export_progress(self) -> dict[str, object]:
+        return self._sif_log_export.snapshot()
+
+    def sif_log_export_file(self, name: str) -> Path:
+        return self._sif_log_export.file(name)
+
+    def _save_sif_log_exports(self, outputs: list[Path]) -> None:
+        """Register the log with the project so it travels in the .ccflux."""
+        with self._lock:
+            project = self._flight_project
+            if project is None or not outputs:
+                return
+            project.output_locations["sif_log"] = outputs[0]
+            state = self._instruments["sif"]
+            saved = project.detected_instruments.get("sif")
+            for path in outputs:
+                if str(path) not in state.output_files:
+                    state.output_files.append(str(path))
+                if saved is not None and path not in saved.output_locations:
+                    saved.output_locations.append(path)
+        self._checkpoint_project()
 
     def sif_progress(self) -> dict[str, object]:
         """The SIF stage checklist, derived from the reported percentage."""
@@ -5404,7 +5529,7 @@ class DashboardScanBackend:
                 )
             known = {
                 self.processing_queue.get(job_id).instrument_id
-                for job_id in ("micasense_quick", "flir_quick", "gopro_quick")
+                for job_id in ("flir_quick", "gopro_quick", "micasense_quick")
             }
             unknown = named - known
             if unknown:
@@ -5416,10 +5541,12 @@ class DashboardScanBackend:
         time_mode = str(request.get("time_mode", "current"))
         self._select_remote_sensing_interval(time_mode, request)
 
+        # FLIR, GoPro, MicaSense - the camera part of the campaign order. They
+        # share a single-worker group, so this is the sequence they run in.
         camera_tasks = {
-            "micasense_quick": self._micasense_quick_task,
             "flir_quick": self._flir_quick_task,
             "gopro_quick": self._gopro_quick_task,
+            "micasense_quick": self._micasense_quick_task,
         }
         # Remote Sensing used to enable all three camera products
         # unconditionally, so an operator who wanted, say, everything except
@@ -5558,6 +5685,9 @@ class DashboardScanBackend:
             # cannot disturb work in flight; it only adds what is not running.
             # Refusing outright meant a camera run blocked every flight
             # instrument until it finished.
+            # The campaign processing order. Dispatch is decided by the queue's
+            # (priority, order), but keeping this in the same order means the
+            # two never disagree about what "first" means.
             integrated_tasks = {
                 "noseboom": self._noseboom_task,
                 "miro": self._miro_task,
@@ -5567,9 +5697,9 @@ class DashboardScanBackend:
                 "partector": self._partector_task,
                 "ins_gimbal": self._ins_gimbal_task,
                 "sif": self._sif_task,
-                "micasense_quick": self._micasense_quick_task,
                 "flir_quick": self._flir_quick_task,
                 "gopro_quick": self._gopro_quick_task,
+                "micasense_quick": self._micasense_quick_task,
             }
             self._validate_processing_preflight(integrated_tasks)
             limited_coverage = self._limited_coverage_messages(integrated_tasks)
@@ -6642,12 +6772,11 @@ class DashboardScanBackend:
                 if previously_completed else
                 "Ready for processing" if ready and state.detection_status is DetectionStatus.READY else
                 "Available with scan warning; review during health check" if ready else
-
-                "Configure the available FLIR Level 2 routines to create "
-                "temperature plots and the Noseboom-matched map"
-                if job.job_id == "flir_detailed"
-                and _instrument_is_processable(state)
-                and has_selected_time else
+                # There was a branch here for a "flir_detailed" job telling the
+                # operator to configure Level 2 routines. No such job is in the
+                # queue - selecting FLIR converts temperature in the one run -
+                # so the branch could never be reached and only kept the idea of
+                # a second stage alive in the interface.
                 "Scientific adapter is not integrated" if not integrated else
                 "Resolve ambiguous input data" if state.ambiguous else
                 "UTC data do not overlap the selected Noseboom flight interval"
@@ -6742,7 +6871,15 @@ class DashboardScanBackend:
             selected_start = self._time_state.selected_analysis_start
             selected_end = self._time_state.selected_analysis_end
         selection = self._time_state.instruments.get(instrument_id)
-        if selection is not None:
+        # A camera's detected coverage is read from a bounded sample of its
+        # delivery, so narrowing the run to it processes the sample instead of
+        # the flight. MicaSense makes that concrete: its filename counter wraps
+        # at IMG_9999, so the two ends of the name order sat 90 seconds apart
+        # either side of the wrap and 9,999 captures spanning 09:41-16:01 were
+        # narrowed to 14:59:28-15:00:58 - about thirty of them. These adapters
+        # read every delivered file and filter capture by capture, which is
+        # where the decision belongs.
+        if selection is not None and instrument_id not in SAMPLED_COVERAGE_INSTRUMENTS:
             if selection.available_start is not None:
                 selected_start = max(selected_start, selection.available_start) if selected_start else selection.available_start
             if selection.available_end is not None:
@@ -7272,6 +7409,22 @@ class DashboardScanBackend:
             start, end = self._instrument_processing_interval("sif")
         if report is None or project is None:
             raise RuntimeError("Flight scan and project state are required")
+        # Every AirFloX timestamp rests on this. FLOX and FULL write campaign
+        # local time, and when their receiver never fixes - as on Flight_CC0806,
+        # where it reports 0.00000 for every spectrum - nothing in the raw files
+        # says how far that is from UTC. Read undeclared, the clock was taken
+        # for UTC: every spectrum was matched to a Noseboom position two hours
+        # from where it was taken, and the 23% that then fell past the end of
+        # the telemetry were discarded, with one warning line to say so. The
+        # operator is asked as soon as the scan finds SIF, but the question can
+        # be dismissed, so refuse rather than guess.
+        if self._sif_record_clock_offset_seconds() is None:
+            raise RuntimeError(
+                "The AirFloX record-clock timezone has not been declared, and "
+                "the spectrometer's own GPS cannot be relied on to supply it. "
+                "Answer the SIF record-clock question, then start processing "
+                "again."
+            )
         paths = tuple(dict.fromkeys(
             path for candidate in report.candidates if candidate.instrument_id == "sif"
             for path in candidate.all_matching_files
@@ -7293,6 +7446,13 @@ class DashboardScanBackend:
         result = adapter.process_quicklook(loaded, {
             "analysis_start": start, "analysis_end": end,
             "flight_root": project.flight_folder_path,
+            # The Noseboom's terrain model, so the telemetry log's
+            # alt_above_ground_m is height above ground and the SIF footprint
+            # radius is computed from it rather than from an ellipsoid height.
+            "terrain_sampler": terrain_sampler(
+                project.flight_output_root / "exports" / "_terrain_tiles"
+            ),
+            "pitch_from_nadir": PITCH_FROM_NADIR,
             **sif_options,
         })
         outputs = adapter.export_results(result, adapter.output_root, ("csv", "gis"))
@@ -7404,6 +7564,26 @@ class DashboardScanBackend:
                 str(value.path) for value in outputs
             ] + [str(value.path) for value in result.figures]
             state.quicklook = quicklook
+            # Discovery could only estimate coverage from a bounded sample of
+            # the archives; this run opened every one of them. Replacing the
+            # estimate is what stops the card reporting 0.3% availability for a
+            # delivery that covers the flight.
+            measured_start = _optional_dashboard_datetime(
+                result.metadata.get("delivered_utc_start")
+            )
+            measured_end = _optional_dashboard_datetime(
+                result.metadata.get("delivered_utc_end")
+            )
+            if measured_start is not None and measured_end is not None:
+                state.utc_start_time = measured_start
+                state.utc_end_time = measured_end
+                saved = project.detected_instruments.get("micasense")
+                if saved is not None:
+                    saved.utc_start_time = measured_start
+                    saved.utc_end_time = measured_end
+                # MicaSense is a camera, so this never moves the flight-
+                # instrument global; it corrects the camera's own coverage.
+                self._rebuild_time_state()
         return JobOutcome(warning=result.warnings[0] if result.warnings else None)
 
     def _micasense_browser_payload(
@@ -7498,9 +7678,13 @@ class DashboardScanBackend:
         browser_payload = {
             "available": True,
             "temperature_available": False,
+            # A placeholder for the seconds between the metadata being written
+            # and the conversion below finishing - not an instruction. There is
+            # no stage for the operator to find and start: selecting FLIR runs
+            # the conversion, and if it fails the reason is written here.
             "temperature_reason": (
-                "Run confirmed FLIR Level 2 radiometric temperature conversion "
-                "to activate the land-surface-temperature map."
+                "Temperature conversion and Noseboom georeferencing are running "
+                "in this same job."
             ),
             "temperature_interpretation": (
                 "FLIR Planck apparent temperature; atmospheric, emissivity, "
@@ -7579,7 +7763,39 @@ class DashboardScanBackend:
                 "Temperature conversion and georeferencing did not complete: "
                 f"{exc}"
             )
+            # Put the real reason where the workspace reads it. It kept the
+            # placeholder written before the conversion ran, so a conversion
+            # that had failed looked exactly like one that had never been asked
+            # for - which is what sent the operator looking for a stage to
+            # configure that does not exist.
+            self._publish_flir_temperature_failure(quicklook_path, warning)
         return JobOutcome(warning=warning)
+
+    def _publish_flir_temperature_failure(
+        self, quicklook_path: Path, reason: str
+    ) -> None:
+        """Record on the FLIR workspace why the temperature map is empty."""
+        with self._lock:
+            payload = {
+                **dict(self._instruments["flir"].quicklook),
+                "temperature_available": False,
+                "temperature_reason": reason,
+                "temperature_records": [],
+                "map_points": [],
+            }
+            self._instruments["flir"].quicklook = payload
+        try:
+            temporary = quicklook_path.with_suffix(".json.temporary")
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
+                + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(quicklook_path)
+        except OSError:
+            # The acquisition metadata is already on disk and the job still
+            # reports the warning; failing to annotate it must not lose that.
+            pass
 
     # Per-file coverage is only worth measuring when a delivery is split across
     # files and the whole set is small enough to inspect cheaply. A single file
@@ -7785,8 +8001,97 @@ class DashboardScanBackend:
         )
         return tuple(item.path for item in accepted)
 
+    # The frame index describes the export files and the byte window that was
+    # read, not one attempt at processing them.
+    FLIR_INDEX_NAME = "timestamp_index.csv"
+    FLIR_INDEX_COVERAGE_NAME = "timestamp_index.coverage.json"
+
+    @staticmethod
+    def _flir_index_root(project: FlightProject) -> Path:
+        """Where the frame index lives, so a later run can still find it.
+
+        It used to be written inside ``_run_output_root``, which stamps a new
+        folder every attempt - so the next run looked somewhere else, the cache
+        could never hit, and every run re-read the whole export. The saving the
+        cache was written for was never actually collected.
+        """
+        return project.flight_output_root / "processed" / "flir"
+
+    @staticmethod
+    def _flir_index_coverage(
+        windows: Mapping[Path, tuple[int, int]],
+    ) -> dict[str, object]:
+        """What an index about to be written will cover."""
+        sources: dict[str, object] = {}
+        for path, (low, high) in windows.items():
+            try:
+                stat = Path(path).stat()
+            except OSError:
+                continue
+            sources[str(Path(path).resolve(strict=False))] = {
+                "size_bytes": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                "scanned_low": int(low),
+                "scanned_high": int(high),
+            }
+        return {"version": 1, "sources": sources}
+
+    def _write_flir_index_coverage(
+        self, coverage_path: Path, windows: Mapping[Path, tuple[int, int]]
+    ) -> None:
+        """Record the window, after the index it describes is safely written."""
+        try:
+            coverage_path.write_text(
+                json.dumps(self._flir_index_coverage(windows), indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            # Losing the record costs a rescan next time, never correctness.
+            self.logger.log(
+                LogLevel.INFO, "camera-level2",
+                f"The FLIR index coverage record could not be written ({exc}); "
+                "the next run will index the export again.",
+                instrument="flir", processing_step="level2-index",
+            )
+
+    def _flir_index_covers(
+        self, coverage_path: Path, windows: Mapping[Path, tuple[int, int]]
+    ) -> bool:
+        """Whether a saved index was built over at least the bytes now wanted.
+
+        A narrow Time Filter indexes a narrow window, so an index is only
+        reusable for a request that falls inside the window it was built from.
+        Without this a second, wider selection would silently reuse the first
+        one's frames and process a fraction of what was asked for.
+        """
+        try:
+            record = json.loads(coverage_path.read_text(encoding="utf-8"))
+            sources = record["sources"]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            return False
+        for path, (low, high) in windows.items():
+            entry = sources.get(str(Path(path).resolve(strict=False)))
+            if not isinstance(entry, dict):
+                return False
+            try:
+                stat = Path(path).stat()
+            except OSError:
+                return False
+            if (
+                entry.get("size_bytes") != stat.st_size
+                or entry.get("mtime_ns") != stat.st_mtime_ns
+                or int(entry.get("scanned_low", 0)) > int(low)
+                or int(entry.get("scanned_high", -1)) < int(high)
+            ):
+                return False
+        return True
+
     def _cached_flir_timestamp_index(
-        self, index_path: Path, source_paths: list[Path], health_module
+        self,
+        index_path: Path,
+        source_paths: list[Path],
+        health_module,
+        windows: Mapping[Path, tuple[int, int]] | None = None,
     ) -> list | None:
         """Reuse a previous frame index instead of rescanning the export.
 
@@ -7799,12 +8104,27 @@ class DashboardScanBackend:
         selected now: a different FLIR delivery has its own frames, and reusing
         another one's byte offsets would read from the wrong place.
 
+        ``windows`` are the byte ranges this run needs. An index built from a
+        narrow Time Filter holds only that window's frames, so it may be reused
+        only for a request inside it; an index with no coverage record cannot
+        prove what it holds and is refused.
+
         Returns the cached entries, or None if the export must be scanned.
         """
         if not index_path.is_file():
             return None
         loader = getattr(health_module, "load_timestamp_index", None)
         if not callable(loader):
+            return None
+        if windows is not None and not self._flir_index_covers(
+            index_path.with_name(self.FLIR_INDEX_COVERAGE_NAME), windows
+        ):
+            self.logger.log(
+                LogLevel.INFO, "camera-level2",
+                "The saved FLIR timestamp index does not cover the bytes this "
+                "time range needs; the export is being indexed again.",
+                instrument="flir", processing_step="level2-index",
+            )
             return None
         try:
             entries = loader(index_path)
@@ -7878,21 +8198,50 @@ class DashboardScanBackend:
         output_root = self._run_output_root(project, "flir") / "level2"
         output_root.mkdir(parents=True, exist_ok=True)
 
-        index_path = output_root / "timestamp_index.csv"
         source_paths = [Path(value) for value in paths]
+        # Only the bytes that can hold frames inside the selected interval.
+        # FLIR writes frames in acquisition order, so the boundaries can be
+        # bisected; the answer is padded and is always a superset, and
+        # select_indices below still decides per frame what is processed.
+        windows = {
+            path: locate_time_window_bytes(path, selected_start, selected_end)
+            for path in source_paths
+        }
+        index_root = self._flir_index_root(project)
+        index_root.mkdir(parents=True, exist_ok=True)
+        index_path = index_root / self.FLIR_INDEX_NAME
         entries = self._cached_flir_timestamp_index(
-            index_path, source_paths, health_module
+            index_path, source_paths, health_module, windows
         )
         if entries is None:
-            context.report_progress(4, "Indexing frame timestamps")
+            scanned = sum(high - low for low, high in windows.values())
+            total = sum(path.stat().st_size for path in source_paths)
+            context.report_progress(
+                4,
+                "Indexing frame timestamps "
+                f"({scanned / 1e9:.1f} of {total / 1e9:.1f} GB)",
+            )
             entries, _ = health_module.scan_timestamps(
                 source_paths,
                 max(1, limits.worker_count),
                 8,
+                windows,
             )
             if not entries:
                 raise RuntimeError("No valid FLIR frame timestamps were found")
             health_module.write_timestamp_index(index_path, entries)
+            # After the index, so a half-written index is never vouched for.
+            self._write_flir_index_coverage(
+                index_root / self.FLIR_INDEX_COVERAGE_NAME, windows
+            )
+            if scanned < total:
+                self.logger.log(
+                    LogLevel.INFO, "camera-level2",
+                    f"Indexed {scanned / 1e9:.1f} GB of {total / 1e9:.1f} GB: "
+                    "only the byte range the selected interval can occupy was "
+                    f"read, giving {len(entries):,} frame(s).",
+                    instrument="flir", processing_step="level2-index",
+                )
         else:
             context.report_progress(
                 4, f"Reusing the timestamp index for {len(entries):,} frames"
@@ -8079,9 +8428,12 @@ class DashboardScanBackend:
         produced = [
             output_root / name for name in (
                 "temperature_frames.csv", "frame_health.csv",
-                "acquisition_gaps.csv", "summary.json", "timestamp_index.csv",
+                "acquisition_gaps.csv", "summary.json",
             )
         ]
+        # The index is shared across runs rather than written per attempt, so it
+        # is registered from where it actually lives.
+        produced.append(index_path)
         with self._lock:
             state = self._instruments["flir"]
             for value in (*produced, quicklook_path):

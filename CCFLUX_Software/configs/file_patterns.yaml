@@ -33,7 +33,8 @@
       "likely_folder_names": ["MIRO", "miro", "Miro"],
       "filename_prefixes": [],
       "filename_suffixes": [],
-      "file_extensions": [".txt", ".tdms"],
+      "_comment": "Text only. MIRO also writes TDMS beside the export, but its timestamp schema was never confirmed for this campaign, so it is not a source: matching it made every TDMS a MIRO input that carried no time and failed adapter validation.",
+      "file_extensions": [".txt"],
       "required_csv_columns": ["t-stamp"],
       "optional_csv_columns": [
         "VValve 0",
@@ -60,7 +61,10 @@
       "filename_suffixes": [],
       "file_extensions": [".dat"],
       "required_csv_columns": ["DATE", "TIME"],
-      "optional_csv_columns": ["CO2_sync", "CO2_dry_sync", "CH4_sync", "CH4_dry_sync", "H2O_sync"],
+      "optional_csv_columns": [
+        "CO2_sync", "CO2_dry_sync", "CH4_sync", "CH4_dry_sync", "H2O_sync",
+        "CO2", "CO2_dry", "CH4", "CH4_dry", "H2O"
+      ],
       "metadata_keys": [],
       "camera_exif_tags": [],
       "header_text": ["DATE", "TIME"],

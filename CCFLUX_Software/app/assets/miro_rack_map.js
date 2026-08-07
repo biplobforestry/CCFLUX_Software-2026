@@ -503,6 +503,22 @@
         context.stroke(); context.setLineDash([]);
       }
     }
+    // The coordinate grid, inside the map area only. This map already draws its
+    // own north arrow and scale bar around the header and footer, and labels
+    // its corners; the graticule is what it was missing.
+    if (typeof CCFLUXMapFurniture!=='undefined') {
+      const mapBounds=map.getBounds();
+      context.save();
+      context.beginPath(); context.rect(0,headerHeight,width,mapHeight); context.clip();
+      context.translate(0,headerHeight);
+      CCFLUXMapFurniture.graticule(context,{
+        width,height:mapHeight,
+        bounds:{north:mapBounds.getNorth(),south:mapBounds.getSouth(),
+          east:mapBounds.getEast(),west:mapBounds.getWest()},
+        project:(lat,lon)=>map.latLngToContainerPoint([lat,lon])
+      });
+      context.restore();
+    }
     context.restore(); context.globalAlpha=1;
     context.strokeStyle='#21485b'; context.lineWidth=2; context.strokeRect(0,headerHeight,width,mapHeight);
     drawNorthArrow(context,18,headerHeight+18);

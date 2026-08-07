@@ -185,7 +185,7 @@ class MiroRackBridge:
             """<body>
 <div class="ccflux-program-bar">
   <div class="ccflux-program-title"><iframe src="/campaign-logo.html" title="CC-FLUX 2026 campaign logo" scrolling="no"></iframe><div><strong>CC-FLUX Campaign 2026</strong><small>Integrated Post-Flight Scientific Payload Review &middot; MIRO Rack</small></div></div>
-  <div class="ccflux-program-actions"><span id="ccfluxMainInterval">Using the main GUI time filter</span><button type="button" onclick="window.location.href='/'">Main GUI</button><button type="button" onclick="window.location.href='/#time-filter'">Main Time Filter</button><button type="button" id="ccfluxInvestigationFilter">Investigation Time Filter</button><button type="button" class="ccflux-refresh-button" id="ccfluxMiroRefresh">Refresh</button><button type="button" class="ccflux-map-button" id="ccfluxMiroMap">Mapview</button></div>
+  <div class="ccflux-program-actions"><span id="ccfluxMainInterval">Using the main GUI time filter</span><button type="button" onclick="window.location.href='/'">Main GUI</button><button type="button" onclick="window.location.href='/#time-filter'">Main Time Filter</button><button type="button" id="ccfluxInvestigationFilter">Investigation Time Filter</button><button type="button" class="ccflux-refresh-button" id="ccfluxMiroRefresh">Refresh</button><button type="button" class="ccflux-map-button" id="ccfluxTraceGas" title="Attribute each species to cell temperature, altitude and time, and separate a drift from the atmosphere">Trace gas investigation</button><button type="button" class="ccflux-map-button" id="ccfluxMiroMap">Mapview</button></div>
 </div>""",
             1,
         )
@@ -209,6 +209,10 @@ let ccfluxLegacyApplyFilters = null;
 (() => {
   document.getElementById('ccfluxMiroRefresh').onclick = () => bootstrapFromMainProject();
   document.getElementById('ccfluxMiroMap').onclick = startMapSync;
+  // Its own tab: an investigation is read alongside the workspace it questions,
+  // not instead of it.
+  document.getElementById('ccfluxTraceGas').onclick = () =>
+    window.open('/miro_rack/trace_gas', '_blank', 'noopener');
   document.getElementById('ccfluxInvestigationFilter').onclick = openInvestigationTimeFilter;
   ccfluxLegacyApplyFilters = typeof window.applyFilters === 'function'
     ? window.applyFilters.bind(window) : null;
@@ -743,7 +747,11 @@ function closeMapSync() {
                 )) if progress_callback else None
             ),
         )
-        return {**published, "warnings": []}
+        # What the loader had to say about the delivery, not an empty list. The
+        # column flavour it fell back to and any file it skipped both change how
+        # the result should be read, so they belong on the instrument card
+        # rather than only in the loader's own metadata.
+        return {**published, "warnings": list(metadata.get("warnings", ()))}
 
     def _save_map_series_project(self) -> Path | None:
         with self.dashboard_backend._lock:
@@ -1049,6 +1057,84 @@ function closeMapSync() {
             except (AttributeError, FileNotFoundError, RuntimeError, ValueError):
                 payload["flight_track"] = self._track_from_layers(layers)
         return payload
+
+    # -- Trace Gas Investigation -------------------------------------------
+    #
+    # The MIRO cell warmed 7.7 degrees over Flight_CC0806 and CO2 followed it
+    # at 6.2 ppm per degree, which is fourteen times the atmospheric signal and
+    # is why that channel disagreed with the Picarro at R2 = 0.05. Establishing
+    # that took a day of one-off scripting; these two calls make it a page.
+
+    def _loaded_gas_frames(self) -> tuple[Any, Any]:
+        with self.module.LOCK:
+            miro_data = self.module.STORE.get("miro")
+            picarro_data = self.module.STORE.get("picarro")
+        if miro_data is None:
+            raise RuntimeError(
+                "Process MIRO in the MIRO Rack workspace before opening the "
+                "Trace Gas Investigation; it is the instrument whose state the "
+                "investigation regresses against."
+            )
+        return miro_data, picarro_data
+
+    def _investigation_navigation(self):
+        """Noseboom altitude, when the flight project has it. Optional."""
+        try:
+            navigation, _ = self._navigation_from_main_project()
+        except (FileNotFoundError, ValueError, RuntimeError, KeyError):
+            return None
+        return navigation if "altitude" in getattr(navigation, "columns", []) else None
+
+    def trace_gas_investigation(self, request: dict[str, Any]) -> dict[str, Any]:
+        from . import trace_gas_investigation as engine
+
+        miro_data, picarro_data = self._loaded_gas_frames()
+        filters = engine.parse_filters(request)
+        payload = engine.investigate(
+            miro_data, picarro_data, self._investigation_navigation(), filters,
+            miro_module=self.module.miro, picarro_module=self.module.picarro,
+        )
+        self.log_view(
+            "Trace Gas Investigation evaluated "
+            f"{len(payload['species'])} species over {payload['window']['samples']} "
+            f"samples at {filters.resolution_seconds} s"
+        )
+        return payload
+
+    def export_trace_gas_figure(self, request: dict[str, Any]) -> dict[str, Any]:
+        from . import trace_gas_export, trace_gas_investigation as engine
+
+        miro_data, picarro_data = self._loaded_gas_frames()
+        filters = engine.parse_filters(request)
+        payload = engine.investigate(
+            miro_data, picarro_data, self._investigation_navigation(), filters,
+            miro_module=self.module.miro, picarro_module=self.module.picarro,
+        )
+        with self.dashboard_backend._lock:
+            project = self.dashboard_backend._flight_project
+        if project is None:
+            raise RuntimeError(
+                "Open or restore a Flight Project before exporting, so the "
+                "figure is written beside the rest of the flight's products."
+            )
+        root = Path(project.flight_output_root) / "exports" / "trace_gas"
+        flight = getattr(project, "flight_id", None) or "flight"
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        written = trace_gas_export.render(
+            payload, root, f"TraceGas_{flight}_{stamp}",
+            view=str(request.get("view") or "overview"),
+            species=request.get("species"),
+            driver=request.get("driver"),
+            formats=request.get("formats"),
+            dpi=request.get("dpi", 600),
+        )
+        self.log_view(
+            f"Trace Gas Investigation exported {len(written)} figure file(s) to {root}"
+        )
+        return {
+            "files": [path.name for path in written],
+            "directory": str(root),
+        }
 
     def export_map_pdf(self, request: dict[str, Any]) -> tuple[str, bytes]:
         """Convert the browser-composed, current visible map layout to a PDF."""
@@ -1450,13 +1536,32 @@ function closeMapSync() {
             raise ValueError(
                 "Processed Noseboom export must contain timestamp, latitude, and longitude"
             )
-        result = pd.DataFrame(
-            {
-                "timestamp": _naive_utc(frame[time_column]),
-                "lat": pd.to_numeric(frame[lat_column], errors="coerce"),
-                "lon": pd.to_numeric(frame[lon_column], errors="coerce"),
-            }
-        ).dropna()
+        # Altitude is optional: the Mapview never needed it, and a delivery
+        # without one still georeferences. The Trace Gas Investigation asks for
+        # it so a drift can be separated from a vertical gradient, and reports
+        # its absence rather than substituting anything.
+        altitude_column = next(
+            (
+                lookup.get(name)
+                for name in (
+                    "plot_alt", "altitude", "alt", "alt_above_ground_m",
+                    "height", "gnss_alt", "altitude_m",
+                )
+                if lookup.get(name) is not None
+            ),
+            None,
+        )
+        columns = {
+            "timestamp": _naive_utc(frame[time_column]),
+            "lat": pd.to_numeric(frame[lat_column], errors="coerce"),
+            "lon": pd.to_numeric(frame[lon_column], errors="coerce"),
+        }
+        result = pd.DataFrame(columns)
+        if altitude_column is not None:
+            result["altitude"] = pd.to_numeric(
+                frame[altitude_column], errors="coerce"
+            )
+        result = result.dropna(subset=["timestamp", "lat", "lon"])
         result = result[
             result["lat"].between(-90, 90) & result["lon"].between(-180, 180)
         ]

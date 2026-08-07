@@ -10,17 +10,47 @@ from scipy.signal import welch
 TIMESTAMP_COLUMN = "t-stamp"
 VALVE_COLUMN = "VValve 0"
 GAS_COLUMNS = ("CO wet", "N2O wet", "H2O wet", "NO wet", "NO2 wet", "CH4 wet", "SO2 wet", "NH3 wet", "O3 wet", "CO2 wet")
+# The instrument's own state, read alongside the gases and carried through so a
+# drift can be attributed rather than guessed at. On Flight_CC0806 the cell
+# warmed 25.5 -> 33.2 C and CO2 followed it at 6.2 ppm/C, which is 14 times the
+# atmospheric signal; without these columns there is nothing to regress against.
+HOUSEKEEPING_COLUMNS = ("T Cell C", "Outside T", "Laser housing T", "p Cell")
+HOUSEKEEPING_UNITS = {
+    "T Cell C": "degC", "Outside T": "degC",
+    "Laser housing T": "degC", "p Cell": "mbar",
+}
 Progress = Callable[[float, str], None]
+
+
+TEXT_SUFFIX = ".txt"
 
 
 def discover_files(root: str | Path) -> list[Path]:
     folder = Path(root).expanduser().resolve()
     if not folder.is_dir():
         raise FileNotFoundError(f"MIRO folder does not exist: {folder}")
-    files = sorted(path for path in folder.rglob("*") if path.is_file() and path.suffix.lower() == ".txt")
+    files = sorted(path for path in folder.rglob("*") if path.is_file() and path.suffix.lower() == TEXT_SUFFIX)
     if not files:
         raise FileNotFoundError(f"No MIRO .txt files found under {folder}")
     return files
+
+
+def ignored_files(root: str | Path) -> list[Path]:
+    """Everything in the MIRO folder that is not a text delivery.
+
+    MIRO writes TDMS beside the text export. Its timestamp schema was never
+    confirmed for this campaign, so it is not read at all - but the operator is
+    told how many files were passed over rather than left to wonder whether
+    they went in.
+    """
+    folder = Path(root).expanduser().resolve()
+    if not folder.is_dir():
+        return []
+    return sorted(
+        path
+        for path in folder.rglob("*")
+        if path.is_file() and path.suffix.lower() != TEXT_SUFFIX
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -31,37 +61,81 @@ def _sha256(path: Path) -> str:
     return value.hexdigest()
 
 
+def duplicate_files_by_content(paths: list[Path]) -> dict[Path, Path]:
+    """Map each byte-identical copy to the first file that held those bytes.
+
+    Sizes are compared first and only a collision is hashed. Every file used to
+    be hashed unconditionally, which is a second full read of the whole delivery
+    before a single row is parsed; a delivery with no repeated size is now never
+    read twice, and one with duplicates reads only the files that could be.
+    """
+    by_size: dict[int, list[Path]] = {}
+    for path in paths:
+        try:
+            by_size.setdefault(path.stat().st_size, []).append(path)
+        except OSError:
+            continue
+    duplicates: dict[Path, Path] = {}
+    for group in by_size.values():
+        if len(group) < 2:
+            continue
+        first_seen: dict[str, Path] = {}
+        # Shortest name first, so "a.txt" is kept and "a - Copy.txt" is the
+        # duplicate rather than the other way round - alphabetical order puts
+        # the copy first and named the original as the redundant one. The bytes
+        # are identical either way, so this decides only what is reported.
+        for path in sorted(group, key=lambda item: (len(item.name), item.name)):
+            try:
+                fingerprint = _sha256(path)
+            except OSError:
+                continue
+            original = first_seen.setdefault(fingerprint, path)
+            if original != path:
+                duplicates[path] = original
+    return duplicates
+
+
 def load_folder(root: str | Path, progress: Progress | None = None) -> tuple[pd.DataFrame, dict]:
     files = discover_files(root)
+    passed_over = ignored_files(root)
+    # Resolved up front, so a repeated file costs one hash rather than a parse.
+    duplicates = duplicate_files_by_content(files)
     frames, duplicate_files, skipped_files = [], [], []
-    seen_hashes: set[str] = set()
+    unparsable_rows = 0
     for index, path in enumerate(files, start=1):
         if progress:
             progress((index - 1) / len(files), f"MIRO: reading {index}/{len(files)} - {path.name}")
+        if path in duplicates:
+            duplicate_files.append(str(path)); continue
         try:
-            fingerprint = _sha256(path)
-            if fingerprint in seen_hashes:
-                duplicate_files.append(str(path)); continue
-            seen_hashes.add(fingerprint)
             frame = pd.read_csv(path, sep=";", decimal=",")
             frame.columns = [str(column).strip() for column in frame.columns]
         except (OSError, UnicodeDecodeError, pd.errors.ParserError, ValueError) as exc:
             skipped_files.append({"file": str(path), "reason": str(exc)}); continue
         if TIMESTAMP_COLUMN not in frame:
             skipped_files.append({"file": str(path), "reason": f"Missing {TIMESTAMP_COLUMN}"}); continue
-        keep = [column for column in (TIMESTAMP_COLUMN, *GAS_COLUMNS, VALVE_COLUMN) if column in frame]
+        keep = [column for column in (TIMESTAMP_COLUMN, *GAS_COLUMNS, *HOUSEKEEPING_COLUMNS, VALVE_COLUMN) if column in frame]
         frame = frame[keep].copy()
-        frame["timestamp"] = pd.to_datetime(frame.pop(TIMESTAMP_COLUMN), format="%d.%m.%Y %H:%M:%S,%f", errors="coerce")
-        for column in (*GAS_COLUMNS, VALVE_COLUMN):
+        stamps = pd.to_datetime(frame.pop(TIMESTAMP_COLUMN), format="%d.%m.%Y %H:%M:%S,%f", errors="coerce")
+        # A row whose clock cannot be read is dropped rather than guessed at, and
+        # counted so the operator sees how much of the delivery that was.
+        unparsable_rows += int(stamps.isna().sum())
+        frame["timestamp"] = stamps
+        for column in (*GAS_COLUMNS, *HOUSEKEEPING_COLUMNS, VALVE_COLUMN):
             if column in frame:
                 frame[column] = pd.to_numeric(frame[column], errors="coerce")
         frame["source_file"] = path.name
         frames.append(frame.dropna(subset=["timestamp"]))
     if not frames:
         raise RuntimeError("No readable timestamped MIRO records were found.")
-    data = pd.concat(frames, ignore_index=True, sort=False).sort_values("timestamp", kind="stable")
+    data = pd.concat(frames, ignore_index=True, sort=False)
+    # Measured before the sort, which is what makes it reportable: afterwards
+    # there is nothing left to see. Both are single vectorised passes.
+    out_of_order_rows = int((data["timestamp"].diff().dt.total_seconds() < 0).sum())
+    data = data.sort_values("timestamp", kind="stable")
     before = len(data)
     data = data.drop_duplicates("timestamp", keep="first").reset_index(drop=True)
+    duplicate_timestamps = before - len(data)
     if not data.timestamp.is_monotonic_increasing:
         raise RuntimeError("MIRO timestamps could not be sorted chronologically.")
     gases = [column for column in GAS_COLUMNS if column in data and data[column].notna().any()]
@@ -69,7 +143,76 @@ def load_folder(root: str | Path, progress: Progress | None = None) -> tuple[pd.
         raise RuntimeError("MIRO files contain no supported trace-gas columns.")
     if progress:
         progress(1.0, "MIRO: concatenation and timestamp validation complete")
-    return data, {"files_found": len(files), "files_used": len(frames), "duplicate_files": duplicate_files, "skipped_files": skipped_files, "duplicate_timestamps_removed": before-len(data), "sorted": True, "rows": len(data), "start": data.timestamp.min().isoformat(), "end": data.timestamp.max().isoformat(), "gases": gases}
+    warnings = _load_warnings(
+        instrument="MIRO",
+        duplicate_files=duplicate_files,
+        skipped_files=skipped_files,
+        unparsable_rows=unparsable_rows,
+        out_of_order_rows=out_of_order_rows,
+        duplicate_timestamps=duplicate_timestamps,
+        clock_column=TIMESTAMP_COLUMN,
+    )
+    if passed_over:
+        warnings.append(
+            f"{len(passed_over)} non-text file(s) in the MIRO folder were "
+            "ignored; only .txt deliveries are read: "
+            + ", ".join(path.name for path in passed_over[:3])
+            + (" ..." if len(passed_over) > 3 else "")
+        )
+    return data, {"files_found": len(files), "files_used": len(frames), "duplicate_files": duplicate_files, "skipped_files": skipped_files, "duplicate_timestamps_removed": duplicate_timestamps, "unparsable_rows_removed": unparsable_rows, "out_of_order_rows_repaired": out_of_order_rows, "ignored_files": [str(path) for path in passed_over], "sorted": True, "rows": len(data), "start": data.timestamp.min().isoformat(), "end": data.timestamp.max().isoformat(), "gases": gases, "warnings": warnings}
+
+
+def _load_warnings(
+    *,
+    instrument: str,
+    duplicate_files: list,
+    skipped_files: list,
+    unparsable_rows: int,
+    out_of_order_rows: int,
+    duplicate_timestamps: int,
+    clock_column: str,
+) -> list[str]:
+    """Say what had to be repaired. Nothing here stops the load.
+
+    A campaign folder collects second copies and logger restarts, and neither is
+    a reason to refuse a delivery. Both are a reason to be told, because a run
+    that silently drops 16,000 rows and one that had 16,000 duplicates look
+    identical afterwards.
+    """
+    warnings: list[str] = []
+    if duplicate_files:
+        names = ", ".join(Path(value).name for value in duplicate_files[:3])
+        warnings.append(
+            f"{len(duplicate_files)} {instrument} file(s) are byte-identical "
+            f"copies of another file and were read once: {names}"
+            + (" ..." if len(duplicate_files) > 3 else "")
+        )
+    if unparsable_rows:
+        warnings.append(
+            f"{unparsable_rows:,} {instrument} row(s) had no readable "
+            f"{clock_column} and were excluded; a guessed instant would be worse "
+            "than a declared gap."
+        )
+    if out_of_order_rows:
+        warnings.append(
+            f"{out_of_order_rows:,} out-of-order {instrument} row transition(s) "
+            "were put back into chronological order. The delivered files are "
+            "unchanged."
+        )
+    if duplicate_timestamps:
+        warnings.append(
+            f"{duplicate_timestamps:,} duplicated {instrument} timestamp(s) were "
+            "removed, keeping the first record of each instant."
+        )
+    if skipped_files:
+        warnings.append(
+            f"{len(skipped_files)} {instrument} file(s) could not be read: "
+            + "; ".join(
+                f"{Path(item['file']).name}: {item['reason']}"
+                for item in skipped_files[:2]
+            )
+        )
+    return warnings
 
 
 def gas_unit_scale(column: str) -> tuple[str, float]:

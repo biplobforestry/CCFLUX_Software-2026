@@ -246,6 +246,22 @@ def test_bundled_science_differs_from_the_original_only_where_recorded():
         # times a skipped block leaves empty - solar() calls timetuple() on what it
         # is given, so a NaT killed the channel outright.
         "_backfill_missing_times",      # new helper
+        # R corrects the dark-subtracted signal, not the raw arrays:
+        #   data<-list(DCSubtraction(E,dcE),DCSubtraction(L,dcL),DCSubtraction(E2,dcE))
+        #   res <- lapply(data, Non_linearity, coeffnl=NL_coeff)
+        # The correction is a degree-7 polynomial, so NL(E) - NL(dcE) is not
+        # NL(E - dcE), and the saturation flags stay on the untouched counts
+        # where R reads them. apply_optional_nl corrected each array on its own
+        # and handed the corrected darks downstream. Latent - both campaign
+        # calibration files refuse the correction for want of an NL COEF block -
+        # but wrong on any instrument that ships one.
+        "apply_optional_nl",        # replaced by dark_subtracted_signals
+        "dark_subtracted_signals",  # new: subtraction first, then the polynomial
+        # R's Write_shape writes Lat and Lon as attributes as well as geometry.
+        # Dropping them left anything reading the DBF alone - a join, a
+        # spreadsheet - with no position, and ID was written with eight decimals
+        # where R writes an integer key.
+        "write_dbf",
     }
 
     mine = _top_level_definitions(BUNDLED / "airflox_sif_automation.py")

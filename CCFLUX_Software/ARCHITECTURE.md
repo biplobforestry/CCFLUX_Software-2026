@@ -143,8 +143,22 @@ science:
 | Group | Capacity rule | Jobs |
 |---|---|---|
 | `FAST_SCIENCE` | `total − metadata − detailed` | noseboom, miro, picarro, opc_hbx4, opc_hbx5, partector, ins_gimbal, sif |
-| `CAMERA_METADATA` | 1 if `total ≥ 2`, else 0 | micasense_quick, flir_quick, gopro_quick |
+| `CAMERA_METADATA` | 1 if `total ≥ 2`, else 0 | flir_quick, gopro_quick, micasense_quick |
 | `CAMERA_DETAILED` | 1 if `total ≥ 4`, else 0 | micasense_detailed, flir_detailed |
+
+The campaign processing order is declared once, as
+`core/priority_manager.CAMPAIGN_PROCESSING_ORDER`:
+
+```
+Noseboom · MIRO · Picarro · OPC HBX-4 · OPC HBX-5 · Partector Pro ·
+INS Gimbal · SIF · FLIR · GoPro · MicaSense
+```
+
+`DEFAULT_PROCESSING_JOBS` is that order, and dispatch is `min(priority, order)`
+within a group, so an instrument the operator did not select is skipped without
+changing the relative order of the rest. Priorities must never contradict the
+declared order — GoPro was priority 3 while the other cameras were 2, which put
+it last however the definition was written.
 
 Jobs are pure data (`ProcessingJob`) with a `task: Callable[[ProcessingContext], JobOutcome|None]`
 closure injected by the backend at start time — `core/` never imports an adapter.

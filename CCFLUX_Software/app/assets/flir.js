@@ -215,63 +215,168 @@
   // Leaflet paints tiles and vectors into separate layers, so the export
   // redraws the visible extent onto one canvas: tiles, the track, the coloured
   // frames, then the legend. The server sets the physical width to seven inches.
-  function composeMapImage(){
+  //
+  // The base map is redrawn from tiles at a DEEPER zoom, not from the ones on
+  // screen. Scaling the screen tiles up made the canvas bigger without adding
+  // any detail: a 900 px wide map stretched to 1800 px still carries 900 px of
+  // road, so a file that declared 257 DPI showed about 129 DPI of actual map and
+  // looked soft. One zoom level is one doubling of real tile pixels.
+  const EXPORT_WIDTH_INCHES=7, MAX_EXPORT_PIXELS=8000, MAX_EXPORT_TILES=480, TILE_SIZE=256;
+
+  // The deepest zoom that reaches the wanted pixel width without exceeding the
+  // canvas guard or asking the tile server for an unreasonable number of tiles.
+  function tilePlan(targetWidth){
+    const bounds=map.getBounds(),maxZoom=19;
+    let chosen=map.getZoom();
+    for(let zoom=map.getZoom();zoom<=maxZoom;zoom+=1){
+      const nw=map.project(bounds.getNorthWest(),zoom),se=map.project(bounds.getSouthEast(),zoom);
+      const width=Math.abs(se.x-nw.x),height=Math.abs(se.y-nw.y);
+      if(width>MAX_EXPORT_PIXELS||height>MAX_EXPORT_PIXELS)break;
+      const tiles=(Math.floor(se.x/TILE_SIZE)-Math.floor(nw.x/TILE_SIZE)+1)
+                 *(Math.floor(se.y/TILE_SIZE)-Math.floor(nw.y/TILE_SIZE)+1);
+      if(tiles>MAX_EXPORT_TILES)break;
+      chosen=zoom;
+      if(width>=targetWidth)break;
+    }
+    const nw=map.project(bounds.getNorthWest(),chosen),se=map.project(bounds.getSouthEast(),chosen);
+    return {zoom:chosen,origin:nw,
+      width:Math.max(800,Math.round(Math.abs(se.x-nw.x))),
+      height:Math.max(500,Math.round(Math.abs(se.y-nw.y)))};
+  }
+
+  // Returns how many tiles were actually painted, so a map composed with no
+  // network can fall back to the ones already on screen instead of exporting a
+  // blank page.
+  async function drawTiles(context,plan){
+    const span=Math.pow(2,plan.zoom);
+    const first={x:Math.floor(plan.origin.x/TILE_SIZE),y:Math.floor(plan.origin.y/TILE_SIZE)};
+    const last={x:Math.floor((plan.origin.x+plan.width)/TILE_SIZE),
+                y:Math.floor((plan.origin.y+plan.height)/TILE_SIZE)};
+    let painted=0;
+    const jobs=[];
+    for(let x=first.x;x<=last.x;x+=1){
+      for(let y=first.y;y<=last.y;y+=1){
+        if(y<0||y>=span)continue;
+        const wrapped=((x%span)+span)%span;
+        jobs.push(new Promise(done=>{
+          const image=new Image();
+          image.crossOrigin='anonymous';
+          image.onload=()=>{
+            try{
+              context.drawImage(image,x*TILE_SIZE-plan.origin.x,y*TILE_SIZE-plan.origin.y,
+                TILE_SIZE,TILE_SIZE);
+              painted+=1;
+            }catch(error){/* a tile that would taint the canvas is skipped */}
+            done();
+          };
+          image.onerror=()=>done();
+          image.src=`https://tile.openstreetmap.org/${plan.zoom}/${wrapped}/${y}.png`;
+        }));
+      }
+    }
+    await Promise.all(jobs);
+    return painted;
+  }
+
+  // What is already on screen, stretched to the export canvas. Only used when
+  // no deeper tile could be fetched; it is the old behaviour and the old
+  // sharpness, which beats a blank base map.
+  function drawScreenTiles(context,plan){
     const container=$('thermalMap');
-    const width=Math.max(800,container.clientWidth),height=Math.max(500,container.clientHeight);
-    const canvas=document.createElement('canvas');
-    canvas.width=width*2;canvas.height=height*2;
-    const context=canvas.getContext('2d');
-    context.scale(2,2);context.fillStyle='#ffffff';context.fillRect(0,0,width,height);
     const base=container.getBoundingClientRect();
+    const scale=plan.width/Math.max(1,container.clientWidth);
     for(const tile of container.querySelectorAll('img.leaflet-tile-loaded')){
       const rect=tile.getBoundingClientRect();
-      try{context.drawImage(tile,rect.left-base.left,rect.top-base.top,rect.width,rect.height);}
+      try{context.drawImage(tile,(rect.left-base.left)*scale,(rect.top-base.top)*scale,
+        rect.width*scale,rect.height*scale);}
       catch(error){/* a tile that would taint the canvas is skipped */}
     }
+  }
+
+  async function composeMapImage(dpi){
+    const plan=tilePlan(Math.round(EXPORT_WIDTH_INCHES*(Number(dpi)||300)));
+    const canvas=document.createElement('canvas');
+    canvas.width=plan.width;canvas.height=plan.height;
+    const context=canvas.getContext('2d');
+    context.fillStyle='#ffffff';context.fillRect(0,0,plan.width,plan.height);
+    if(!await drawTiles(context,plan))drawScreenTiles(context,plan);
+    // Everything else is drawn in the same pixel space as the tiles, so the
+    // track lands on the road it was flown over at any resolution.
+    const at=point=>{
+      const projected=map.project([point.latitude,point.longitude],plan.zoom);
+      return {x:projected.x-plan.origin.x,y:projected.y-plan.origin.y};
+    };
+    // Vector weights follow the screen so the figure keeps its proportions;
+    // type is sized in points below so it stays legible in print.
+    const scale=plan.width/Math.max(1,$('thermalMap').clientWidth||plan.width);
     const metric=$('mapMetric').value,palette=paletteName();
     const points=mapPoints().filter(point=>finite(point.latitude)&&finite(point.longitude)&&finite(point[metric]));
     if(points.length){
       const values=points.map(point=>Number(point[metric]));
       const low=quantile(values,.02),highCandidate=quantile(values,.98),high=highCandidate>low?highCandidate:low+1;
       const step=Math.max(1,Math.ceil(points.length/4000)),shown=points.filter((_,index)=>index%step===0);
-      context.strokeStyle='#17212b';context.lineWidth=1.6;context.globalAlpha=.6;context.beginPath();
-      shown.forEach((point,index)=>{const at=map.latLngToContainerPoint([point.latitude,point.longitude]);index?context.lineTo(at.x,at.y):context.moveTo(at.x,at.y);});
+      context.strokeStyle='#17212b';context.lineWidth=1.6*scale;context.globalAlpha=.6;context.beginPath();
+      shown.forEach((point,index)=>{const spot=at(point);index?context.lineTo(spot.x,spot.y):context.moveTo(spot.x,spot.y);});
       context.stroke();context.globalAlpha=1;
       shown.forEach(point=>{
-        const at=map.latLngToContainerPoint([point.latitude,point.longitude]);
-        if(at.x<0||at.y<0||at.x>width||at.y>height)return;
+        const spot=at(point);
+        if(spot.x<0||spot.y<0||spot.x>plan.width||spot.y>plan.height)return;
         context.fillStyle=color(Number(point[metric]),low,high,palette);
-        context.beginPath();context.arc(at.x,at.y,4,0,Math.PI*2);context.fill();
+        context.beginPath();context.arc(spot.x,spot.y,4*scale,0,Math.PI*2);context.fill();
       });
-      drawMapExportLegend(context,width,metric,low,high,palette,points.length);
+      drawMapExportLegend(context,plan.width,metric,low,high,palette,points.length);
     }
+    drawMapFurniture(context,plan);
     return canvas.toDataURL('image/png');
+  }
+
+  // Scale, orientation and coordinates, on every exported map. Drawn after the
+  // data so the graticule reads over the tiles rather than under the track.
+  function drawMapFurniture(context,plan){
+    if(typeof CCFLUXMapFurniture==='undefined')return;
+    const bounds=map.getBounds();
+    CCFLUXMapFurniture.draw(context,{
+      width:plan.width,height:plan.height,
+      bounds:{north:bounds.getNorth(),south:bounds.getSouth(),
+        east:bounds.getEast(),west:bounds.getWest()},
+      project:(lat,lon)=>{
+        const projected=map.project([lat,lon],plan.zoom);
+        return {x:projected.x-plan.origin.x,y:projected.y-plan.origin.y};
+      },
+      metresPerPixel:CCFLUXMapFurniture.metresPerPixel(
+        map.getCenter().lat,plan.zoom)
+    });
   }
   // No panel behind the labels, matching the screen; each is stroked white
   // before it is filled dark so it reads over whatever tiles fall behind it.
+  // Laid out in points against the seven-inch figure width, so the legend is the
+  // same physical size whatever resolution was asked for and never falls below
+  // nine point. Sized in canvas pixels it shrank as the export sharpened: at
+  // 2100 px the old 13 px title printed at 4.5 pt.
   function drawMapExportLegend(context,width,metric,low,high,palette,count){
-    const boxWidth=168,boxHeight=252,x=width-boxWidth-18,y=18;
+    const pt=width/(EXPORT_WIDTH_INCHES*72);
+    const boxWidth=124*pt,boxHeight=186*pt,x=width-boxWidth-13*pt,y=13*pt;
     const halo=(text,left,top)=>{
       context.lineJoin='round';context.miterLimit=2;
-      context.strokeStyle='#ffffff';context.lineWidth=3.4;context.strokeText(text,left,top);
+      context.strokeStyle='#ffffff';context.lineWidth=2.6*pt;context.strokeText(text,left,top);
       context.fillStyle='#07182a';context.fillText(text,left,top);
     };
     context.save();
-    context.font='700 13px Arial';
-    halo(metricLabels[metric]||metric,x+12,y+22);
-    const barX=x+14,barY=y+38,barWidth=22,barHeight=boxHeight-74;
+    context.font=`700 ${11*pt}px Arial`;
+    halo(metricLabels[metric]||metric,x+9*pt,y+16*pt);
+    const barX=x+10*pt,barY=y+28*pt,barWidth=16*pt,barHeight=boxHeight-55*pt;
     const gradient=context.createLinearGradient(0,barY+barHeight,0,barY);
     paletteStops(palette).forEach((shade,index,list)=>gradient.addColorStop(index/(list.length-1),`rgb(${shade.join(',')})`));
     context.fillStyle=gradient;context.fillRect(barX,barY,barWidth,barHeight);
-    context.strokeStyle='#07182a';context.lineWidth=1;context.strokeRect(barX,barY,barWidth,barHeight);
+    context.strokeStyle='#07182a';context.lineWidth=.75*pt;context.strokeRect(barX,barY,barWidth,barHeight);
     const format=tickFormatter(low,high);
-    context.font='11px Arial';
+    context.font=`${9*pt}px Arial`;
     for(let step=0;step<LEGEND_TICKS;step+=1){
       const fraction=step/(LEGEND_TICKS-1);
-      halo(format(low+fraction*(high-low)),barX+barWidth+8,barY+barHeight-fraction*barHeight+4);
+      halo(format(low+fraction*(high-low)),barX+barWidth+6*pt,barY+barHeight-fraction*barHeight+3*pt);
     }
-    context.font='10px Arial';
-    halo(`${count.toLocaleString()} frames`,x+12,y+boxHeight-12);
+    context.font=`${9*pt}px Arial`;
+    halo(`${count.toLocaleString()} frames`,x+9*pt,y+boxHeight-9*pt);
     context.restore();
   }
   async function exportMapFigure(button){
@@ -280,8 +385,11 @@
     try{
       if(!map)throw new Error('Open the Temperature map view first');
       const format=$('mapExportFormat').value,dpi=Number($('mapExportDpi').value);
+      button.textContent='Fetching tiles…';
+      const image=await composeMapImage(dpi);
+      button.textContent='Exporting…';
       const body=JSON.stringify({
-        image:composeMapImage(),format,dpi,
+        image,format,dpi,
         flight_name:$('flightName').textContent||'Flight',
         interval:window_?`${windowText(window_.start)} to ${windowText(window_.end)} UTC`:''
       });
@@ -383,7 +491,7 @@
         <div class="grow"><strong>${item.name}</strong><small>${item.description}</small></div>
         <span class="muted">${formatBytes(item.size_bytes)}</span>
         <a class="btn" href="${item.url}" download>Download</a>
-      </div>`).join(''):'<p class="muted">No FLIR product has been written yet. Run the FLIR metadata check, and Level 2 for temperature.</p>';
+      </div>`).join(''):'<p class="muted">No FLIR product has been written yet. Select FLIR in the Main GUI and start processing; the temperature conversion runs with it.</p>';
     }catch(error){
       list.innerHTML=`<p class="muted">Could not list FLIR products: ${error.message}</p>`;
     }

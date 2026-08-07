@@ -5,6 +5,7 @@ the whole track takes one colour and the structure disappears. Each layer can
 be switched to a logarithmic scale, and back, without touching the data.
 """
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -53,8 +54,11 @@ def _evaluate(expression):
     return float(out.stdout.strip())
 
 
+# shutil.which, not a "which" subprocess: that command does not exist on
+# Windows, so the guard raised FileNotFoundError at import and one unavailable
+# macOS tool stopped the whole suite from being collected on this platform.
 @pytest.mark.skipif(
-    subprocess.run(["which", "osascript"], capture_output=True).returncode != 0,
+    shutil.which("osascript") is None,
     reason="JavaScriptCore is not available",
 )
 class TestScalePosition:

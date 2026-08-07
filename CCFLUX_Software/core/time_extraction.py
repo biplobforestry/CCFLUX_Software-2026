@@ -673,11 +673,14 @@ class TimestampExtractor:
                     name for name in archive.namelist()
                     if name.casefold().endswith((".tif", ".tiff"))
                 ]
-                # One capture holds a band per file with the same trigger time;
-                # the first and last bound the archive without unpacking it all.
-                for row_number, name in enumerate(
-                    sorted(members)[:1] + sorted(members)[-1:], start=1
-                ):
+                # One band, because one archive is one capture and its bands are
+                # triggered together: across Flight_CC0806 every archive sampled
+                # carried a single distinct DateTimeOriginal over all six bands.
+                # Reading the last one as well cost 19% more - it is the 10 MB
+                # panchromatic - and reported every capture as a duplicated
+                # timestamp, which is how a clean delivery came to be described
+                # as "30 duplicated timestamp(s) detected".
+                for row_number, name in enumerate(sorted(members)[:1], start=1):
                     with archive.open(name) as member:
                         value = _exif_original_datetime(io.BytesIO(member.read()))
                     if value is None:

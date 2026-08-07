@@ -14,6 +14,8 @@
     .thumbs figcaption{padding:7px 9px;font-size:.76rem;color:var(--muted);word-break:break-all}
     .excluded{color:#f0dcae}
     .plot{width:100%;height:390px}
+    .export-field{font-size:.74rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;align-self:center}
+    .top-actions select{background:#10293d;color:#edf8ff;border:1px solid #3b6480;border-radius:8px;padding:7px 9px;font:inherit;font-size:.82rem}
     .traceability{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:0;padding:0;list-style:none}
     .traceability li{padding:9px 12px;border-radius:8px;background:#0d2536;border:1px solid #2b4d63}
     .traceability span{display:block;font-size:.74rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
@@ -24,7 +26,23 @@
   <header class="topbar">
     <div class="brand-logo-shell"><img class="brand-logo" src="/campaign-main-airship.svg" alt="CC-FLUX 2026 airship logo"></div>
     <div class="brand-copy"><h1>CC-FLUX Campaign 2026</h1><span class="campaign-line">A Joint CHANEL – ClimStress Zeppelin Campaign<br>Across European Cities and Forests</span><span class="review-line">Integrated Post-Flight Scientific Payload Review · MicaSense</span></div>
-    <div class="top-actions"><a class="btn" href="/">Main GUI</a><button class="btn" id="refreshBtn">Refresh</button></div>
+    <div class="top-actions">
+      <a class="btn" href="/">Main GUI</a>
+      <label class="export-field" for="exportFormat">Export</label>
+      <select id="exportFormat" title="PDF gathers every figure into one document; PNG and SVG return the figures as a ZIP">
+        <option value="pdf" selected>PDF · all figures in one file</option>
+        <option value="png">PNG · one file per figure (ZIP)</option>
+        <option value="svg">SVG · one file per figure (ZIP)</option>
+      </select>
+      <label class="export-field" for="exportDpi">DPI</label>
+      <select id="exportDpi" title="Resolution of the exported figures">
+        <option value="150">150</option>
+        <option value="300" selected>300</option>
+        <option value="600">600</option>
+      </select>
+      <button class="btn" id="exportFiguresBtn" title="Every panel at 7 inch wide with 9 pt minimum type">Export figures</button>
+      <button class="btn" id="refreshBtn">Refresh</button>
+    </div>
   </header>
   <div class="status-strip"><span class="status-dot" id="statusDot"></span><span id="statusText">Reading processed MicaSense project data…</span><span class="spacer"></span><strong id="flightName">No project</strong></div>
   <main>
@@ -64,7 +82,7 @@
       </article>
       <article class="chart-card"><div class="card-head"><h2>Light sensor orientation</h2></div>
         <div class="plot" id="orientationPlot"></div>
-        <p class="interpretation">DLS yaw, pitch and roll. The irradiance reading assumes a level sensor, so large pitch or roll excursions are where it is least trustworthy.</p>
+        <p class="interpretation">DLS yaw, pitch and roll in the radians the sensor writes, unconverted, so these match the standalone MicaSense overview CSV value for value. The irradiance reading assumes a level sensor, so large pitch or roll excursions are where it is least trustworthy.</p>
       </article>
       <article class="chart-card"><div class="card-head"><h2>Solar geometry</h2></div>
         <div class="plot" id="solarPlot"></div>

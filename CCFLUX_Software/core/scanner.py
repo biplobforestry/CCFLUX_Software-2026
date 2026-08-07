@@ -36,6 +36,12 @@ DEFAULT_CANDIDATE_FILE_SAMPLES = 20
 # Cameras keep a bounded sample rather than every file; their adapters expand
 # the delivery lazily when they process it.
 BOUNDED_SAMPLE_INSTRUMENTS = frozenset({"micasense", "flir", "gopro"})
+# How many files of a bounded camera delivery are sampled for coverage. Enough
+# that the estimate survives a wrapped filename counter and lands within a few
+# minutes of the true extremes: 128 points across MicaSense's 9,999 captures is
+# one every ~3 minutes, for about seven seconds of EXIF reads. Reading all 9,999
+# archives would be truthful and cost some nine minutes of the Initial Check.
+BOUNDED_COVERAGE_SAMPLES = 128
 
 # Directory names this software writes its own products into. Discovery never
 # descends into them: a flight folder that also holds an output tree would
@@ -168,12 +174,23 @@ class _CandidateAccumulator:
     omitted_error_count: int = 0
 
     def bounded_sample(self) -> tuple[Path, ...]:
-        """The sample, extended at both ends for a bounded camera delivery.
+        """A sample spread across a bounded camera delivery, plus both ends.
 
-        A camera names its captures in acquisition order, so the earliest and
-        latest names are the earliest and latest acquisitions. Taking both ends
-        makes coverage span the delivery; taking whichever arrived first makes
-        it span the start, which is what happened.
+        Taking whichever files arrived first makes coverage span the start of
+        the delivery only; discovery is threaded, so arrival order says nothing
+        about capture order.
+
+        Taking the two ends of the *name* order instead assumes a camera names
+        its captures in acquisition order for the whole delivery. That holds
+        until the counter wraps. MicaSense restarts at IMG_0000 after IMG_9999,
+        so on Flight_CC0806 the first and last names sit 90 seconds apart either
+        side of the wrap, and 9,999 captures spanning 09:41-16:01 were reported
+        as covering 14:59:28-15:00:58 - 0.3% of the flight.
+
+        Spreading the sample over the whole name order survives a wrap, because
+        it cannot land only on the join. It is still an estimate: the true
+        extremes lie between sampled points, which is why nothing narrows a
+        processing run to it.
         """
         sample = list(self.sample_matching_files)
         if self.bounded_names:
@@ -181,8 +198,17 @@ class _CandidateAccumulator:
                 dict.fromkeys(self.bounded_names),
                 key=lambda path: (path.name, str(path)),
             )
-            edge = max(1, DEFAULT_CANDIDATE_FILE_SAMPLES // 2)
-            sample += ordered[:edge] + ordered[-edge:]
+            wanted = min(len(ordered), BOUNDED_COVERAGE_SAMPLES)
+            if wanted <= 1:
+                sample += ordered[:1] + ordered[-1:]
+            else:
+                # Evenly spaced positions rather than a fixed stride: a stride
+                # truncated to the sample size leaves the tail of the delivery
+                # coarser than the rest, and both ends have to be in.
+                last = len(ordered) - 1
+                sample += [
+                    ordered[index * last // (wanted - 1)] for index in range(wanted)
+                ]
         unique = list(dict.fromkeys(sample))
         return tuple(sorted(unique, key=lambda path: (path.name, str(path))))
 

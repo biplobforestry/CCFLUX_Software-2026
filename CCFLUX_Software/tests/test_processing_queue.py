@@ -5,7 +5,10 @@ import pytest
 
 from core.enums import ProcessingStatus
 from core.exceptions import ProcessingError
-from core.priority_manager import create_default_priority_queue
+from core.priority_manager import (
+    CAMPAIGN_PROCESSING_ORDER,
+    create_default_priority_queue,
+)
 from core.processing_manager import (
     ProcessingJob,
     ProcessingPriorityQueue,
@@ -42,6 +45,7 @@ def _wait_for(predicate, timeout: float = 2.0):
 
 
 def test_default_ordering_matches_priority_groups():
+    """The campaign order: Noseboom first, then the cameras FLIR, GoPro, MicaSense."""
     jobs = create_default_priority_queue().ordered()
     assert [job.display_name for job in jobs[:6]] == [
         "Noseboom",
@@ -57,11 +61,64 @@ def test_default_ordering_matches_priority_groups():
     # Noseboom match used to be a separate "detailed" job the operator had to
     # find and start; they now run as part of the FLIR job.
     assert [job.display_name for job in jobs[-3:]] == [
-        "MicaSense metadata quick check",
         "FLIR metadata quick check",
         "GoPro metadata quick check",
+        "MicaSense metadata quick check",
     ]
     assert not any(job.detailed for job in jobs)
+
+
+def test_the_queue_and_the_campaign_order_agree():
+    """One order, declared once; the presentation lists read it from here."""
+    jobs = create_default_priority_queue().ordered()
+    assert [job.instrument_id for job in jobs] == list(CAMPAIGN_PROCESSING_ORDER)
+
+
+def test_priority_never_contradicts_the_declared_order():
+    """A job is dispatched on (priority, order); a stale priority outranks it.
+
+    GoPro was priority 3 while MicaSense and FLIR were 2, so GoPro ran last
+    whatever order the definition gave.
+    """
+    jobs = create_default_priority_queue().ordered()
+    for group in WorkerGroup:
+        in_group = [job for job in jobs if job.worker_group is group]
+        priorities = [job.priority for job in in_group]
+        assert priorities == sorted(priorities), (
+            f"{group.value} priorities disagree with the declared order"
+        )
+
+
+def test_the_order_holds_for_whichever_instruments_are_selected():
+    """Deselecting one must not reshuffle the rest."""
+    queue = create_default_priority_queue()
+    chosen = ("noseboom", "picarro", "sif", "gopro_quick")
+    for job_id in chosen:
+        queue.set_enabled(job_id, True)
+        queue.get(job_id).task = lambda context: None
+
+    dispatched = []
+    for group in (WorkerGroup.FAST_SCIENCE, WorkerGroup.CAMERA_METADATA):
+        while (job := queue.next_for_group(group)) is not None:
+            dispatched.append(job.job_id)
+            job.status = ProcessingStatus.COMPLETE
+
+    assert dispatched == ["noseboom", "picarro", "sif", "gopro_quick"]
+
+
+def test_the_cameras_run_in_the_campaign_sequence():
+    """Their group has one worker, so this is the actual run order."""
+    queue = create_default_priority_queue()
+    for job_id in ("micasense_quick", "gopro_quick", "flir_quick"):
+        queue.set_enabled(job_id, True)
+        queue.get(job_id).task = lambda context: None
+
+    dispatched = []
+    while (job := queue.next_for_group(WorkerGroup.CAMERA_METADATA)) is not None:
+        dispatched.append(job.instrument_id)
+        job.status = ProcessingStatus.COMPLETE
+
+    assert dispatched == ["flir", "gopro", "micasense"]
 
 
 def test_running_job_snapshot_reports_live_elapsed_time():

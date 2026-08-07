@@ -282,7 +282,25 @@ window.CCFLUX.createSizeMap = function createSizeMap(options) {
       });
       drawExportLegend(context, width, range);
     }
+    drawMapFurniture(context, width, height);
     return canvas.toDataURL('image/png');
+  }
+
+  // Scale, orientation and coordinates, on every exported map. The canvas is
+  // scaled 2x, so the drawing units here are the container's CSS pixels and the
+  // furniture is sized against those; the physical width is seven inches either
+  // way, which is what its point sizing is measured against.
+  function drawMapFurniture(context, width, height) {
+    if (typeof CCFLUXMapFurniture === 'undefined') return;
+    const bounds = map.getBounds();
+    CCFLUXMapFurniture.draw(context, {
+      width, height,
+      bounds: {north: bounds.getNorth(), south: bounds.getSouth(),
+        east: bounds.getEast(), west: bounds.getWest()},
+      project: (lat, lon) => map.latLngToContainerPoint([lat, lon]),
+      metresPerPixel: CCFLUXMapFurniture.metresPerPixel(
+        map.getCenter().lat, map.getZoom())
+    });
   }
   // The screen legend carries no panel behind it, so the exported one carries
   // none either. Labels are read against whatever tiles fall behind them, so

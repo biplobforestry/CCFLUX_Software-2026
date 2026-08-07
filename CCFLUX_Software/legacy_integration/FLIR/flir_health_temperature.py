@@ -1,9 +1,26 @@
 #!/usr/bin/env python3
 """Fast FLIR acquisition health, time filtering, and radiometric temperature QC.
 
-The input format is the Zeppelin JSON array containing one document per frame:
-timestamp, calibration, raw_stats, and a 2-D raw count array. The file is
-indexed by byte-range timestamp scans and is never loaded in full.
+One document per frame, each carrying ``timestamp``, ``calibration``,
+``raw_stats`` and a 2-D ``raw`` count array. The file is indexed by byte-range
+timestamp scans and is never loaded in full.
+
+Two container layouts are read, because which one arrives depends on how the
+recording was taken off the camera rather than on the campaign:
+
+    JSON array          [{...},{...},{...}]
+    newline-delimited   {...}\\n{...}\\n{...}     (mongoexport; MongoDB
+                                                  extended JSON, relaxed mode)
+
+Relaxed mode is what makes the second readable here: ``_id`` and ``timestamp``
+are wrapped (``{"$oid": ...}``, ``{"$date": ...}``) but every calibration and
+count value is a plain JSON number, so the field readers below need no
+type-wrapper handling. A canonical-mode export, which would write
+``{"$numberDouble": "23844.27"}``, is not this format and is not supported.
+
+Frame documents are not a fixed size: the raw array is decimal text, so a
+warm-up frame of zeros is ~0.6 MB while a frame of five-digit counts is
+~1.8 MB in the same file. Nothing here may assume a frame length.
 """
 
 from __future__ import annotations
@@ -43,7 +60,27 @@ CALIBRATION_BYTES_RE = re.compile(
 RAW_STATS_BYTES_RE = re.compile(
     rb'"raw_stats"\s*:\s*(\{[^{}]*\})', re.DOTALL
 )
-OBJECT_DELIMITER_BYTES_RE = re.compile(rb"}\s*,\s*{")
+# Where one frame document ends and the next begins. A FLIR export arrives in
+# either of two layouts, and which one is written is a property of how it was
+# taken off the camera rather than of the campaign:
+#
+#   JSON array          [{...},{...},{...}]     documents separated by "},{"
+#   newline-delimited   {...}\n{...}\n{...}     documents separated by "}\n{"
+#
+# The second is what mongoexport writes, and it is what Flight_CC0806's
+# FLIR_backup.json is. Matching only the array separator found no boundary
+# anywhere in that 32 GB file, so every frame past the first megabyte failed to
+# locate its own document and the temperature pass died on frame three. The
+# comma is optional here, which covers both, plus bare concatenation.
+OBJECT_DELIMITER_BYTES_RE = re.compile(rb"}\s*,?\s*{")
+
+# How far back the search for a document boundary may go when there is no
+# earlier frame to floor it - which is the first frame of an index, and matters
+# because a windowed index starts in the middle of the file. No FLIR document is
+# remotely this large (a 640x480 array of decimal counts is under 2 MB), so a
+# search that has gone this far has not found a boundary because there is none;
+# without the bound it would read back to byte zero of a 32 GB export.
+MAX_DOCUMENT_SEARCH_BYTES = 64 * 1024 * 1024
 
 EXPECTED_WIDTH = 640
 EXPECTED_HEIGHT = 480
@@ -118,15 +155,28 @@ def scan_timestamps(
     paths: list[Path],
     workers: int,
     chunk_mb: int,
+    windows: dict[Path, tuple[int, int]] | None = None,
 ) -> tuple[list[tuple[dt.datetime, str, Path, int]], float]:
+    """Index frame timestamps by byte offset.
+
+    ``windows`` optionally restricts each path to the byte range that can hold
+    the frames being asked for, which is how a twenty-minute selection out of a
+    fourteen-hour export stops costing a full pass over 32 GB. Anything not
+    listed is read whole, so omitting it keeps the previous behaviour exactly.
+    The caller is responsible for the range being a superset of what it wants:
+    locate_time_window_bytes pads its answer for precisely this reason.
+    """
     chunk = max(1, chunk_mb) * 1024 * 1024
     tasks = []
     total_bytes = 0
     for path in paths:
         size = path.stat().st_size
-        total_bytes += size
-        for start in range(0, size, chunk):
-            tasks.append((path, start, min(start + chunk, size), 4096))
+        low, high = (windows or {}).get(path, (0, size))
+        low = max(0, min(int(low), size))
+        high = max(low, min(int(high), size))
+        total_bytes += high - low
+        for start in range(low, high, chunk):
+            tasks.append((path, start, min(start + chunk, high), 4096))
     started = time.perf_counter()
     entries: list[tuple[dt.datetime, str, Path, int]] = []
     completed_bytes = 0
@@ -327,30 +377,76 @@ def inspect_all_headers(
     return rows, time.perf_counter() - started
 
 
-def find_object_start(path: Path, timestamp_offset: int) -> int:
-    for backtrack in (64 * 1024, 256 * 1024, 1024 * 1024):
-        start = max(0, timestamp_offset - backtrack)
+def find_object_start(
+    path: Path, timestamp_offset: int, lower_bound: int = 0
+) -> int:
+    """Byte offset at which the frame document holding this timestamp begins.
+
+    ``lower_bound`` is a byte the document is known to start at or after - in
+    practice the previous frame's timestamp offset, which lies inside the
+    previous document. It makes the search terminate on the frame size the
+    export actually has instead of on a fixed guess: the ladder used to stop at
+    1 MiB, and Flight_CC0806 writes 0.6 MB and 1.8 MB frames, so a frame whose
+    timestamp sat further than 1 MiB into its own document could not be located
+    at all even once the separator was recognised.
+    """
+    floor = max(0, min(lower_bound, timestamp_offset))
+    backtrack = 64 * 1024
+    while True:
+        start = max(floor, timestamp_offset - backtrack)
         with path.open("rb") as stream:
             stream.seek(start)
             payload = stream.read(timestamp_offset - start)
         matches = list(OBJECT_DELIMITER_BYTES_RE.finditer(payload))
         if matches:
             return start + matches[-1].end() - 1
-        if start == 0:
-            first = payload.find(b"{")
-            if first >= 0:
-                return first
-    raise ValueError(f"could not locate object start before byte {timestamp_offset}")
+        if start <= floor:
+            # The whole window between the previous frame and this one has been
+            # read with no separator in it. At the head of the file that is
+            # simply the first document; anywhere else the layout is not one
+            # this reader knows, and saying so beats guessing a boundary.
+            if start == 0:
+                first = payload.find(b"{")
+                if first >= 0:
+                    return first
+            raise ValueError(
+                f"could not locate the start of the frame document holding the "
+                f"timestamp at byte {timestamp_offset} of {path.name}: no "
+                f"document separator was found in the {timestamp_offset - start:,} "
+                f"byte(s) before it. The export is neither a JSON array nor "
+                f"newline-delimited JSON."
+            )
+        backtrack *= 4
 
 
 def object_spans(
     entries: list[tuple[dt.datetime, str, Path, int]]
 ) -> list[tuple[int, int]]:
-    starts = [find_object_start(entry[2], entry[3]) for entry in entries]
-    spans = [(start, entries[index][2].stat().st_size) for index, start in enumerate(starts)]
     by_path: dict[Path, list[int]] = {}
     for index, entry in enumerate(entries):
         by_path.setdefault(entry[2], []).append(index)
+    starts = [0] * len(entries)
+    for path, indices in by_path.items():
+        # In byte order, so each document's search is floored at the previous
+        # frame's timestamp. scan_timestamps returns file order already, but
+        # sorting makes that a property of this function rather than an
+        # assumption about its caller.
+        physical_order = sorted(indices, key=lambda index: entries[index][3])
+        previous_timestamp_offset: int | None = None
+        for index in physical_order:
+            offset = entries[index][3]
+            # The first frame of the index has no predecessor to floor it. At
+            # the head of a file that floor is zero and the search is cheap; in
+            # a windowed index it is somewhere in the middle, so it is bounded
+            # by the largest a document could plausibly be instead.
+            floor = (
+                previous_timestamp_offset
+                if previous_timestamp_offset is not None
+                else max(0, offset - MAX_DOCUMENT_SEARCH_BYTES)
+            )
+            starts[index] = find_object_start(path, offset, floor)
+            previous_timestamp_offset = offset
+    spans = [(start, entries[index][2].stat().st_size) for index, start in enumerate(starts)]
     for path, indices in by_path.items():
         physical_order = sorted(indices, key=lambda index: starts[index])
         for position, index in enumerate(physical_order):

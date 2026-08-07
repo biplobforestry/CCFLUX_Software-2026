@@ -163,8 +163,10 @@ class TestRoutes:
         """
         backend = (Path(__file__).resolve().parents[1] / "app" / "scan_backend.py").read_text(encoding="utf-8")
         assert "_apply_sif_timezone" not in backend
-        task = backend[backend.index("def _sif_task("):]
-        assert "**sif_options," in task[:2500]
+        start = backend.index("def _sif_task(")
+        end = backend.find("\n    def ", start + 1)
+        task = backend[start:end if end != -1 else None]
+        assert "**sif_options," in task
 
     def test_the_adapter_applies_it_to_the_reader_it_owns(self):
         adapter = (
@@ -319,6 +321,51 @@ class TestTheDeclarationSurvives:
         assert prompt["chosen"] is None
 
 
+class TestProcessingRefusesAnUndeclaredClock:
+    """The question can be dismissed, so processing must not guess.
+
+    On Flight_CC0806 the AirFloX receiver reports 0.00000 for every spectrum,
+    so nothing in the raw files says what its clock is set to. Read undeclared
+    it was taken for UTC, which matched every spectrum to a Noseboom position
+    two hours away and discarded the 257 of 1107 that then fell past the end of
+    the telemetry; declared as CEST, all 1107 match.
+    """
+
+    backend_source = (
+        Path(__file__).resolve().parents[1] / "app" / "scan_backend.py"
+    ).read_text(encoding="utf-8")
+
+    def _task(self) -> str:
+        start = self.backend_source.index("def _sif_task(")
+        end = self.backend_source.find("\n    def ", start + 1)
+        return self.backend_source[start:end if end != -1 else None]
+
+    def test_the_task_refuses_before_it_reads_any_file(self):
+        body = self._task()
+        guard = body.index("_sif_record_clock_offset_seconds() is None")
+        assert guard < body.index("all_matching_files"), (
+            "the declaration must be checked before the raw files are gathered"
+        )
+
+    def test_the_refusal_says_what_to_do(self):
+        body = self._task()
+        message = body[body.index("_sif_record_clock_offset_seconds() is None"):]
+        assert "record-clock" in message
+        assert "start processing" in message.casefold()
+
+    def test_a_declared_clock_does_not_trip_the_guard(self, tmp_path):
+        backend, _ = _sif_backend(tmp_path)
+        backend.set_sif_timezone("cest")
+        assert backend._sif_record_clock_offset_seconds() == 7200.0
+
+    def test_utc_is_a_declaration_and_not_an_absent_answer(self, tmp_path):
+        """UTC means zero seconds, which must not read as 'unanswered'."""
+        backend, _ = _sif_backend(tmp_path)
+        backend.set_sif_timezone("utc")
+        assert backend._sif_record_clock_offset_seconds() == 0.0
+        assert backend._sif_record_clock_offset_seconds() is not None
+
+
 class TestReapplicationOnRestore:
     backend_source = (
         Path(__file__).resolve().parents[1] / "app" / "scan_backend.py"
@@ -372,8 +419,17 @@ class TestPromptIsNotLatchedBeforeTheAnswer:
         assert "sifTimezoneAsked = false;" in self.script[polling:polling + 400]
 
     def test_the_card_is_refreshed_once_the_answer_is_stored(self):
-        post = self.script.index("'/api/sif/timezone', {")
-        assert "await pollScan();" in self.script[post:post + 600]
+        """Ordering, not proximity: a comment between the two is not a defect.
+
+        This measured a 600-character window, which failed the moment the
+        handler gained the working panel that stops the window looking stuck.
+        """
+        handler = self.script[
+            self.script.index("document.getElementById('sifTimezoneUse').onclick"):
+        ]
+        handler = handler[: handler.index("\n    };")]
+
+        assert handler.index("'/api/sif/timezone', {") < handler.index("pollScan()")
 
 
 class TestAChannelWithNoPositionUsesTheDeclaration:

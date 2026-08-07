@@ -7,7 +7,7 @@ import shutil
 import threading
 import time
 from uuid import uuid4
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -133,8 +133,32 @@ class MiroAdapter(InstrumentBase):
             basis=f"{TIMESTAMP_COLUMN}; UTC by campaign convention",
         )
 
+    @staticmethod
+    def text_only(candidate: InputCandidate) -> tuple[InputCandidate, list[Path]]:
+        """Keep the .txt deliveries and hand back whatever else was offered.
+
+        MIRO writes TDMS beside the text export and its timestamp schema was
+        never confirmed for this campaign, so it is not read. Detection no
+        longer matches it, but a candidate restored from an older project still
+        can - and one binary file in the list failed validation for the whole
+        instrument, because it parses as a text file with no t-stamp column.
+        """
+        kept = [path for path in candidate.paths if path.suffix.casefold() == ".txt"]
+        ignored = [path for path in candidate.paths if path.suffix.casefold() != ".txt"]
+        if not ignored:
+            return candidate, []
+        return replace(candidate, paths=tuple(kept)), ignored
+
     def validate(self, candidate: InputCandidate) -> InstrumentResult:
         warnings, errors = [], []
+        candidate, ignored = self.text_only(candidate)
+        if ignored:
+            warnings.append(
+                f"{len(ignored)} non-text file(s) were ignored; MIRO is read "
+                "from .txt only: "
+                + ", ".join(path.name for path in ignored[:3])
+                + (" ..." if len(ignored) > 3 else "")
+            )
         metadata = dict(self.inspect_metadata(candidate))
         if not candidate.paths:
             errors.append("No MIRO .txt files were selected.")
@@ -175,6 +199,7 @@ class MiroAdapter(InstrumentBase):
         validation = self.validate(candidate)
         if validation.errors:
             raise ValueError("; ".join(validation.errors))
+        candidate, _ = self.text_only(candidate)
         roots = {path.parent.resolve() for path in candidate.paths}
         if len(roots) != 1:
             raise ValueError("A MIRO candidate must use files from one confirmed folder")
@@ -238,6 +263,11 @@ class MiroAdapter(InstrumentBase):
         )
         if timezone_warning:
             warnings.append(timezone_warning)
+        # What the loader had to repair to produce this frame - duplicate files,
+        # unreadable clocks, rows delivered out of order. It reached the result
+        # metadata but never the warnings, so a run that silently dropped rows
+        # and one that had nothing to drop looked identical on the card.
+        warnings.extend(str(value) for value in loaded.load_metadata.get("warnings", ()))
         filtered = self.bridge.miro._slice(loaded.data, start, end)
         intervals = filtered["timestamp"].diff().dt.total_seconds()
         median_interval = intervals[intervals > 0].median()

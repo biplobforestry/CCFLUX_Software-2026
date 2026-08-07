@@ -190,6 +190,14 @@ class SifAdapter(InstrumentBase):
                 max_position_gap_sec=float(
                     options.get("max_position_gap_seconds", 0.2)
                 ),
+                # alt_above_ground_m is filled from the INS ellipsoid height,
+                # and SIF turns it straight into the footprint radius, so it has
+                # to be reduced to real height above ground. The sampler is
+                # supplied by the caller rather than imported here, because the
+                # terrain model belongs to the Noseboom and an adapter does not
+                # reach into another instrument.
+                pitch_from_nadir=bool(options.get("pitch_from_nadir", False)),
+                terrain_sampler=options.get("terrain_sampler"),
             )
             self._emit(22, "Gimbal and Noseboom navigation ready")
         for index, mode in enumerate(selected_modes):

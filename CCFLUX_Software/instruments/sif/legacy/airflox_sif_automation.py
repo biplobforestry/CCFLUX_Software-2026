@@ -487,13 +487,27 @@ def apply_nonlinearity(data,coeff):
     with np.errstate(divide='ignore',invalid='ignore'):
         return data/scale
 
-def apply_optional_nl(raw,cal,apply_nl):
+def dark_subtracted_signals(raw,cal,apply_nl):
+    """(E, E2, L) with the dark current removed, and the nonlinearity if asked.
+
+    R subtracts the dark current first and corrects the difference:
+
+        data<-list(DCSubtraction(E,dcE),DCSubtraction(L,dcL),DCSubtraction(E2,dcE))
+        res <- lapply(data, Non_linearity, coeffnl=NL_coeff)
+
+    The order matters, because the correction is a degree-7 polynomial and
+    NL(E) - NL(dcE) is not NL(E - dcE). Correcting each array on its own, as
+    this used to, would have diverged from the reference GUI on any instrument
+    that ships coefficients. The saturation flags stay on the untouched counts,
+    which is where R reads them (apply(dat$L,2,max)).
+    """
+    de=raw.e-raw.dc_e; de2=raw.e2-raw.dc_e; dl=raw.l-raw.dc_l
     if not apply_nl:
-        return raw
+        return de,de2,dl
     coeff=cal.attrs.get('nl_coeff')
     if coeff is None or len(coeff)!=8:
         raise ValueError('apply_nonlinearity_correction=yes requested, but the calibration file does not contain an 8-value NL COEF block. Use no for non-NL calibration files.')
-    return AirFloXRaw(apply_nonlinearity(raw.e,coeff),apply_nonlinearity(raw.dc_e,coeff),apply_nonlinearity(raw.e2,coeff),apply_nonlinearity(raw.l,coeff),apply_nonlinearity(raw.dc_l,coeff),raw.it_e_ms,raw.it_l_ms,raw.date,raw.time,raw.temp1,raw.humidity,raw.gps_time,raw.gps_date,raw.gps_lat,raw.gps_lon,raw.cpu1,raw.cpu2)
+    return apply_nonlinearity(de,coeff),apply_nonlinearity(de2,coeff),apply_nonlinearity(dl,coeff)
 
 def stats_on_spectra(wl,start,end,sp,fun='mean'):
     # R: which(wl >= wlStart & wl <= wlEnd) - the endpoints are inside the range.
@@ -750,8 +764,9 @@ def apply_time_window(m,r,start_utc=None,end_utc=None):
     return m,r
 
 def process_common(raw_path,cal,index_path,mode,apply_nl=False,spectral_shift_correction=False,retain_zero_gps=False):
-    wl=cal['wl'].to_numpy(float); raw=read_drox_full(raw_path,len(wl),drop_e500_zero=(mode=='FLUO'),drop_zero_gps=not retain_zero_gps); raw=apply_optional_nl(raw,cal,apply_nl)
-    e=get_radiance(raw.e-raw.dc_e,raw.it_e_ms,cal['up_coef'].to_numpy(float)); e2=get_radiance(raw.e2-raw.dc_e,raw.it_e_ms,cal['up_coef'].to_numpy(float)); l=get_radiance(raw.l-raw.dc_l,raw.it_l_ms,cal['dw_coef'].to_numpy(float))
+    wl=cal['wl'].to_numpy(float); raw=read_drox_full(raw_path,len(wl),drop_e500_zero=(mode=='FLUO'),drop_zero_gps=not retain_zero_gps)
+    de,de2,dl=dark_subtracted_signals(raw,cal,apply_nl)
+    e=get_radiance(de,raw.it_e_ms,cal['up_coef'].to_numpy(float)); e2=get_radiance(de2,raw.it_e_ms,cal['up_coef'].to_numpy(float)); l=get_radiance(dl,raw.it_l_ms,cal['dw_coef'].to_numpy(float))
     if mode=='FULL':
         e,e2,l,_shift_nm=apply_full_spectral_shift(wl,e,e2,l,spectral_shift_correction)
     with np.errstate(divide='ignore',invalid='ignore'): ref=l/e
@@ -870,8 +885,15 @@ def gis_columns(m):
 def write_dbf(path,df):
     fields=[]
     for c in df.columns:
-        if c in ('Lat','Lon'): continue
-        is_num=pd.api.types.is_numeric_dtype(df[c]); fields.append((c[:10], 'N' if is_num else 'C', 18 if is_num else 40, 8 if is_num else 0, c, is_num))
+        # Lat and Lon stay in the table as well as in the geometry. R writes
+        # them (Write_shape: names(out) includes "Lat","Lon"), and dropping
+        # them left anything that reads the DBF alone - a join, a spreadsheet -
+        # with no position at all.
+        is_num=pd.api.types.is_numeric_dtype(df[c])
+        # ID is a row counter; R writes it with no decimals and a reader that
+        # expects an integer key should get one.
+        dec=0 if (is_num and c=='ID') else (8 if is_num else 0)
+        fields.append((c[:10], 'N' if is_num else 'C', 18 if is_num else 40, dec, c, is_num))
     n=len(df); hlen=32+32*len(fields)+1; rlen=1+sum(f[2] for f in fields)
     with path.open('wb') as f:
         f.write(struct.pack('<BBBBLHH20x',3,datetime.now().year-1900,datetime.now().month,datetime.now().day,n,hlen,rlen))
