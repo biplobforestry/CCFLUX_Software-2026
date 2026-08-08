@@ -24,6 +24,7 @@ import matplotlib.colors as mcolors  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 
+from core import figure_standard
 from core.detector import InputCandidate
 from core.enums import DetectionStatus, ProcessingStatus
 from core.logging_manager import LogLevel, ProcessingLogManager
@@ -542,7 +543,16 @@ def _filter_recorded_time(data, start: Any, end: Any):
 
 def _single_sensor_plot(module, data, spec, metadata: dict, path: Path) -> None:
     module.plt.style.use("seaborn-v0_8-whitegrid")
-    fig, axes = module.plt.subplots(4, 1, figsize=(13, 15), constrained_layout=True)
+    # seaborn-v0_8-whitegrid carries its own font scale, so the campaign sizes
+    # go on after it or the tick labels land back under the floor.
+    module.plt.rcParams.update(figure_standard.rc_parameters())
+    fig = module.plt.figure(
+        figsize=(figure_standard.PAGE_WIDTH_INCHES, 8.6), constrained_layout=True
+    )
+    # A narrow second column, empty except where the heat map's colour bar goes,
+    # so all four panels are the same width and can be read against each other.
+    grid = fig.add_gridspec(4, 2, width_ratios=(1.0, 0.035))
+    axes = [fig.add_subplot(grid[row, 0]) for row in range(4)]
     for label, column, color in (
         ("PM1", spec.pm1, "#0072B2"),
         ("PM2.5", spec.pm25, "#D55E00"),
@@ -552,30 +562,43 @@ def _single_sensor_plot(module, data, spec, metadata: dict, path: Path) -> None:
             axes[0], data, column, color=color, lw=0.8, label=label
         )
     axes[0].set_yscale("symlog", linthresh=0.01)
-    axes[0].set_title(f"{spec.label}: reported mass concentration")
-    axes[0].set_ylabel("Mass concentration (µg/m³)")
-    axes[0].legend(ncol=3, fontsize=8)
+    axes[0].set_title(f"{spec.label}: mass concentration")
+    axes[0].set_ylabel("PM (µg m$^{-3}$)")
+    module.legend_headroom(axes[0])
+    axes[0].legend(ncol=3, loc="upper left", handlelength=1.0,
+                   columnspacing=0.8, borderpad=0.3, framealpha=0.85)
     module.plot_by_session(
         axes[1], data, "total_number_cm3",
-        color="#0072B2", lw=0.8, label="Total number concentration",
+        color="#0072B2", lw=0.8, label="Total, 24 bins",
     )
     axes[1].set_yscale("symlog", linthresh=0.01)
-    axes[1].set_ylabel("Number concentration (#/cm³)")
-    axes[1].legend(fontsize=8)
+    axes[1].set_title(f"{spec.label}: number concentration")
+    axes[1].set_ylabel("N (cm$^{-3}$)")
+    module.legend_headroom(axes[1])
+    axes[1].legend(loc="upper left", handlelength=1.0, borderpad=0.3,
+                   framealpha=0.85)
     low, high = module.concentration_limits([data])
-    module.bin_heatmap(
-        fig, axes[2], data, f"{spec.label}: bin-resolved concentration",
+    mesh = module.bin_heatmap(
+        fig, axes[2], data, f"{spec.label}: bin-resolved",
         mcolors.LogNorm(vmin=low, vmax=high),
     )
+    if mesh is not None:
+        bar = fig.colorbar(mesh, cax=fig.add_subplot(grid[2, 1]))
+        bar.set_label("N (cm$^{-3}$)")
     module.diagnostics_panel(axes[3], data, spec, metadata)
-    for axis in axes:
-        module.time_axis(axis)
+    # Only the bottom panel names the axis; four repetitions of it would cost a
+    # panel's worth of height to say the same thing four times.
+    for index, axis in enumerate(axes):
+        module.time_axis(axis, label=index == len(axes) - 1)
     start, end = data["recorded_time"].iloc[[0, -1]]
     fig.suptitle(
-        f"{spec.label} Quicklook\n{start.isoformat(sep=' ')} to "
-        f"{end.isoformat(sep=' ')} | gaps preserved | no interpolation"
+        f"{spec.label} quicklook\n"
+        f"{start.isoformat(sep=' ', timespec='seconds')} to "
+        f"{end.isoformat(sep=' ', timespec='seconds')}\n"
+        "Times as recorded, timezone removed without conversion · "
+        "gaps preserved, no interpolation"
     )
-    fig.savefig(path, dpi=180)
+    figure_standard.save(fig, path)
     plt.close(fig)
 
 

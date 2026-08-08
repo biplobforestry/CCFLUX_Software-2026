@@ -88,9 +88,12 @@ class TestTheLimitsAreEnforced:
         with pytest.raises(ValueError, match="DPI must be between"):
             validate_request(("pdf",), 1501)
 
-    def test_nothing_is_set_below_eight_point(self):
+    def test_nothing_is_set_below_the_campaign_floor(self):
+        """It held its own eight-point floor, under the rest of the project."""
+        from core import figure_standard
+
         style = publication_style()
-        assert MINIMUM_FONT_POINTS == 8
+        assert MINIMUM_FONT_POINTS == figure_standard.MINIMUM_FONT_POINTS == 9.0
         sizes = [
             value for key, value in style.items()
             if key.endswith("size") and isinstance(value, (int, float))

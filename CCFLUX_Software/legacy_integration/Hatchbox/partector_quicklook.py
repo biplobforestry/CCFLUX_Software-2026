@@ -32,6 +32,13 @@ from matplotlib.colors import LogNorm
 import numpy as np
 import pandas as pd
 
+try:
+    # The dashboard executes this module in-process, where core is importable.
+    from core import figure_standard
+except ModuleNotFoundError:  # Run straight from a shell in another directory.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from core import figure_standard
+
 
 SIZE_COLUMN_RE = re.compile(r"^n(?P<diameter>\d+(?:\.\d+)?)$", re.IGNORECASE)
 
@@ -414,9 +421,14 @@ def create_summary(
     }
 
 
-def format_time_axis(ax: plt.Axes) -> None:
-    locator = mdates.AutoDateLocator(minticks=3, maxticks=8)
+def format_time_axis(ax: plt.Axes, show_offset: bool = True) -> None:
+    # Four labels at most. A half-width panel is three inches at the page width,
+    # and eight HH:MM labels at nine point run into each other.
+    locator = mdates.AutoDateLocator(minticks=3, maxticks=5)
     formatter = mdates.ConciseDateFormatter(locator)
+    # The date is written under the bottom row only. Under all five panels it
+    # cost a line of height apiece, and it printed through the axis name.
+    formatter.show_offset = show_offset
     ax.xaxis.set_major_locator(locator)
     ax.xaxis.set_major_formatter(formatter)
 
@@ -444,17 +456,14 @@ def plot_quicklook(
     if valid.empty:
         raise ValueError("No valid rows are available for plotting")
 
-    plt.rcParams.update(
-        {
-            "font.size": 9,
-            "axes.titlesize": 11,
-            "axes.labelsize": 9,
-            "legend.fontsize": 8,
-            "figure.dpi": 130,
-            "savefig.dpi": 180,
-        }
+    plt.rcParams.update(figure_standard.rc_parameters())
+    # Authored at the page width. At 13.2 inches the eight-point legends reached
+    # a manuscript column at under five point; here the text is set once and
+    # arrives at that size. The size distribution keeps the full width because
+    # it is the panel a reader spends time in.
+    figure = plt.figure(
+        figsize=(figure_standard.PAGE_WIDTH_INCHES, 8.6), constrained_layout=True
     )
-    figure = plt.figure(figsize=(13.2, 9.0), constrained_layout=True)
     grid = figure.add_gridspec(3, 2, height_ratios=[1.0, 1.15, 1.0])
     ax_number = figure.add_subplot(grid[0, 0])
     ax_ldsa = figure.add_subplot(grid[0, 1])
@@ -463,13 +472,16 @@ def plot_quicklook(
     ax_house = figure.add_subplot(grid[2, 1])
 
     time = valid["_time"]
-    ax_number.plot(time, valid["number_cm3"], color="#165D8A", lw=1.0)
+    # The traces run to tens of thousands of samples. Rasterising them keeps the
+    # PDF small and quick to open; the axes, labels and legends stay text.
+    ax_number.plot(time, valid["number_cm3"], color="#165D8A", lw=1.0, rasterized=True)
     ax_number.set_yscale("log")
-    ax_number.set_ylabel(r"Number (# cm$^{-3}$)")
+    ax_number.set_ylabel(r"N (# cm$^{-3}$)")
     ax_number.set_title("Particle number concentration")
     ax_number.grid(alpha=0.25)
 
-    ax_ldsa.plot(time, valid["ldsa_um2_cm3"], color="#C35A18", lw=1.0, label="LDSA")
+    ax_ldsa.plot(time, valid["ldsa_um2_cm3"], color="#C35A18", lw=1.0, label="LDSA",
+                 rasterized=True)
     ax_ldsa.set_ylabel(r"LDSA ($\mu$m$^2$ cm$^{-3}$)")
     ax_ldsa.set_title("Lung-deposited surface area")
     ax_ldsa.grid(alpha=0.25)
@@ -481,8 +493,21 @@ def plot_quicklook(
         alpha=0.65,
         lw=0.8,
         label="Mean diameter",
+        rasterized=True,
     )
     diameter_axis.set_ylabel("Mean diameter (nm)")
+    diameter_axis.grid(False)
+    # Two quantities on two scales in one panel. Without a key the grey trace
+    # and the orange one are only distinguishable by guessing which axis each
+    # belongs to.
+    _headroom(ax_ldsa, 0.4)
+    _headroom(diameter_axis, 0.4)
+    ax_ldsa.legend(
+        ax_ldsa.get_lines() + diameter_axis.get_lines(),
+        [line.get_label() for line
+         in ax_ldsa.get_lines() + diameter_axis.get_lines()],
+        loc="upper left", handlelength=1.1, borderpad=0.3, framealpha=0.85,
+    )
 
     z = valid[size_columns].to_numpy(float).T
     low, high = finite_positive_limits(z)
@@ -495,13 +520,16 @@ def plot_quicklook(
         shading="flat",
         cmap="viridis",
         norm=LogNorm(vmin=low, vmax=high),
+        rasterized=True,
     )
     ax_size.set_yscale("log")
     ax_size.set_ylim(edges[0], edges[-1])
-    ax_size.set_ylabel("Mobility-equivalent diameter (nm)")
-    ax_size.set_title(r"Partector Pro size distribution, dN/dlog$_{10}$(D)")
+    ax_size.set_ylabel("Mobility diameter (nm)")
+    ax_size.set_title(r"Size distribution, dN/dlog$_{10}$(D)")
+    ax_size.grid(False)
     figure.colorbar(
-        mesh, ax=ax_size, pad=0.01, label=r"dN/dlog$_{10}$(D) (# cm$^{-3}$)"
+        mesh, ax=ax_size, pad=0.012, fraction=0.045, aspect=16,
+        label=r"dN/dlog$_{10}$(D) (# cm$^{-3}$)",
     )
 
     mode_specs = [
@@ -511,19 +539,24 @@ def plot_quicklook(
         ("n_100_300_cm3", "100-300 nm", "#ECA52C"),
     ]
     for column, label, color in mode_specs:
-        ax_modes.plot(time, valid[column], label=label, lw=0.9, color=color)
+        ax_modes.plot(time, valid[column], label=label, lw=0.9, color=color,
+                      rasterized=True)
     ax_modes.set_yscale("symlog", linthresh=1.0)
-    ax_modes.set_ylabel(r"Integrated number (# cm$^{-3}$)")
+    ax_modes.set_ylabel(r"N (# cm$^{-3}$)")
     ax_modes.set_title("Log-bin integrated size bands")
     ax_modes.grid(alpha=0.25)
-    ax_modes.legend(ncol=2)
+    _headroom(ax_modes, 0.4)
+    ax_modes.legend(ncol=2, loc="upper left", handlelength=1.1,
+                    columnspacing=0.9, borderpad=0.3, framealpha=0.85)
 
-    ax_house.plot(time, valid["flow_lpm"], color="#165D8A", lw=0.9, label="Flow (L/min)")
+    ax_house.plot(time, valid["flow_lpm"], color="#165D8A", lw=0.9,
+                  label="Flow (L/min)", rasterized=True)
     ax_house.plot(
-        time, valid["rh_percent"] / 100.0, color="#4B9F59", lw=0.9, label="RH / 100"
+        time, valid["rh_percent"] / 100.0, color="#4B9F59", lw=0.9, label="RH / 100",
+        rasterized=True,
     )
     ax_house.set_ylabel("Flow; relative RH")
-    ax_house.set_title("Housekeeping and pressure profile")
+    ax_house.set_title("Housekeeping and pressure")
     ax_house.grid(alpha=0.25)
     house_right = ax_house.twinx()
     if show_pressure_altitude:
@@ -541,37 +574,73 @@ def plot_quicklook(
             altitude.reindex(valid.index),
             color="#7A4EAB",
             lw=0.9,
-            label="Pressure-relative altitude",
+            label="Altitude",
         )
-        house_right.set_ylabel("Relative pressure altitude (m)")
+        house_right.set_ylabel("Rel. pressure altitude (m)")
     else:
         house_right.plot(
-            time, valid["pressure_hpa"], color="#7A4EAB", lw=0.9, label="Pressure"
+            time, valid["pressure_hpa"], color="#7A4EAB", lw=0.9, label="Pressure",
+            rasterized=True,
         )
         house_right.set_ylabel("Pressure (hPa)")
+    house_right.grid(False)
     handles, labels = ax_house.get_legend_handles_labels()
     handles2, labels2 = house_right.get_legend_handles_labels()
-    ax_house.legend(handles + handles2, labels + labels2, loc="best")
+    _headroom(ax_house, 0.4)
+    _headroom(house_right, 0.4)
+    ax_house.legend(handles + handles2, labels + labels2, loc="upper left",
+                    handlelength=1.1, borderpad=0.3, framealpha=0.85)
 
-    for axis in [ax_number, ax_ldsa, ax_size, ax_modes, ax_house]:
-        format_time_axis(axis)
-        axis.set_xlabel("Recorded time")
-        for label in axis.get_xticklabels():
-            label.set_rotation(15)
-            label.set_ha("right")
+    # The date is written once, under the bottom row. No panel carries an axis
+    # name: a date above HH:MM labels says what the axis is, and five copies of
+    # "Recorded time" would cost a row of panel height to repeat it.
+    for axis in [ax_number, ax_ldsa, ax_size]:
+        format_time_axis(axis, show_offset=False)
+    for axis in (ax_modes, ax_house):
+        format_time_axis(axis, show_offset=True)
 
-    ids = ", ".join(str(i) for i in selected_ids)
-    start = valid["_time"].min().isoformat()
-    end = valid["_time"].max().isoformat()
+    start = valid["_time"].min().isoformat(sep=" ", timespec="seconds")
+    end = valid["_time"].max().isoformat(sep=" ", timespec="seconds")
     figure.suptitle(
-        f"Partector 2 Pro post-flight quicklook - session(s) {ids}\n"
-        f"{start} to {end} | valid n={len(valid)}",
-        fontsize=14,
+        f"Partector 2 Pro post-flight quicklook · {_session_text(selected_ids)}\n"
+        f"{start} to {end} · valid n={len(valid):,}",
         fontweight="bold",
     )
-    figure.savefig(output_dir / "partector_quicklook.png", bbox_inches="tight")
-    figure.savefig(output_dir / "partector_quicklook.pdf", bbox_inches="tight")
+    figure_standard.save(
+        figure,
+        (output_dir / "partector_quicklook.png",
+         output_dir / "partector_quicklook.pdf"),
+    )
     plt.close(figure)
+
+
+def _session_text(selected_ids: list[int]) -> str:
+    """Name the sessions in a phrase that fits seven inches.
+
+    A flight can be split into a dozen sessions, and listing every number ran
+    the title off both edges of the page.
+    """
+    ordered = sorted(int(value) for value in selected_ids)
+    if not ordered:
+        return "no session"
+    if len(ordered) == 1:
+        return f"session {ordered[0]}"
+    if ordered == list(range(ordered[0], ordered[-1] + 1)):
+        return f"{len(ordered)} sessions ({ordered[0]}-{ordered[-1]})"
+    if len(ordered) <= 4:
+        return "sessions " + ", ".join(str(value) for value in ordered)
+    return f"{len(ordered)} sessions"
+
+
+def _headroom(axis, share: float = 0.35) -> None:
+    """Room above the data for a legend that would otherwise sit on it."""
+    low, high = axis.get_ylim()
+    if not (np.isfinite(low) and np.isfinite(high)) or high <= low:
+        return
+    if axis.get_yscale() in {"log", "symlog"} and high > 0:
+        axis.set_ylim(low, high * (10.0 ** (2.0 * share)))
+    else:
+        axis.set_ylim(low, high + share * (high - low))
 
 
 def _time_edges(time: pd.Series) -> np.ndarray:

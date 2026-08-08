@@ -1,9 +1,9 @@
 """Publication-quality INS Gimbal figure export.
 
-One page of the workspace exports as one bounded figure. The width is fixed at
-seven inches so the figure drops into a manuscript column without rescaling,
-and nothing is drawn below eight point, which is the smallest size that still
-reads after that width is honoured.
+One page of the workspace exports as one bounded figure, to the standard every
+figure in the project is held to: seven inches wide so it drops into a
+manuscript column without rescaling, and nothing below nine point, which is the
+smallest that still reads once that width is honoured.
 """
 
 from __future__ import annotations
@@ -12,13 +12,17 @@ from pathlib import Path
 import threading
 from typing import Callable
 
+from core import figure_standard
 from core.logging_manager import LogLevel, ProcessingLogManager
 
 # A figure wider than a manuscript column has to be shrunk by the typesetter,
-# which takes the type below the size it was checked at. Seven inches is the
-# width, eight point the floor, and 1500 the highest resolution offered.
-FIGURE_WIDTH_INCHES = 7.0
-MINIMUM_FONT_POINTS = 8
+# which takes the type below the size it was checked at. The width and the floor
+# come from the campaign standard, so this export and every other one in the
+# project state the same thing at the same size; 1500 is the highest resolution
+# offered. The floor was eight point here, which was below what the rest of the
+# project holds to.
+FIGURE_WIDTH_INCHES = figure_standard.PAGE_WIDTH_INCHES
+MINIMUM_FONT_POINTS = figure_standard.MINIMUM_FONT_POINTS
 MAXIMUM_DPI = 1500
 MINIMUM_DPI = 72
 EXPORT_FORMATS = ("pdf", "png", "svg")
@@ -143,19 +147,12 @@ class InsGimbalExportManager:
 
 
 def publication_style() -> dict[str, object]:
-    """Matplotlib settings that hold the eight point floor."""
+    """The campaign settings, in the serif this export is written in."""
     return {
+        **figure_standard.rc_parameters(MINIMUM_FONT_POINTS),
         "font.family": "Times New Roman",
-        "font.size": MINIMUM_FONT_POINTS,
-        "axes.titlesize": MINIMUM_FONT_POINTS + 1,
-        "axes.labelsize": MINIMUM_FONT_POINTS,
-        "xtick.labelsize": MINIMUM_FONT_POINTS,
-        "ytick.labelsize": MINIMUM_FONT_POINTS,
-        "legend.fontsize": MINIMUM_FONT_POINTS,
-        "figure.titlesize": MINIMUM_FONT_POINTS + 2,
         "figure.facecolor": "white",
         "axes.facecolor": "white",
-        "axes.grid": True,
         "grid.alpha": 0.24,
         "lines.linewidth": 0.7,
     }
@@ -305,6 +302,10 @@ def export_ins_gimbal_figure(
         )
 
         stem = f"{_safe_name(flight_name)}_ins_gimbal_{view}"
+        figure_standard.finalise(
+            figure, width_inches=FIGURE_WIDTH_INCHES,
+            minimum_points=MINIMUM_FONT_POINTS,
+        )
         for index, suffix in enumerate(chosen):
             target = _available_path(destination / f"{stem}.{suffix}")
             figure.savefig(target, dpi=resolution, format=suffix)

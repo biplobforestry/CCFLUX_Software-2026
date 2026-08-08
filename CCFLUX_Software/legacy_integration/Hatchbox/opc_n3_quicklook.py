@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +20,13 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+try:
+    # The dashboard executes this module in-process, where core is importable.
+    from core import figure_standard
+except ModuleNotFoundError:  # Run straight from a shell in another directory.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from core import figure_standard
 
 BIN_COUNT = 24
 MAX_PARTICLE_RATE_S = 10_000.0
@@ -420,6 +428,11 @@ def plot_by_session(
 ) -> None:
     first = True
     label = kwargs.pop("label", None)
+    # A flight is around 27 000 samples per trace. Kept as vector geometry the
+    # PDF reached 19 MB and opened slowly for detail no reader can resolve on
+    # paper; the traces are rasterised at the export DPI while the axes, labels
+    # and legend stay text, so the figure still scales and is still searchable.
+    kwargs.setdefault("rasterized", True)
     for _, group in df.groupby("session_id", sort=True):
         ax.plot(
             group["recorded_time"],
@@ -430,13 +443,35 @@ def plot_by_session(
         first = False
 
 
-def time_axis(ax: plt.Axes) -> None:
-    locator = mdates.AutoDateLocator(minticks=4, maxticks=8)
+def time_axis(ax: plt.Axes, label: bool = True) -> None:
+    # Four ticks at most: a panel is three inches wide at the page width, and
+    # eight HH:MM labels at nine point would overlap into a smear.
+    locator = mdates.AutoDateLocator(minticks=3, maxticks=5)
+    formatter = mdates.ConciseDateFormatter(locator)
+    # The date belongs under the bottom row once. Repeated under all eight
+    # panels it cost a line of height apiece and, on the bottom row, printed
+    # straight through the axis name.
+    formatter.show_offset = label
     ax.xaxis.set_major_locator(locator)
-    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+    ax.xaxis.set_major_formatter(formatter)
     ax.tick_params(axis="x", labelbottom=True)
-    ax.set_xlabel("Recorded time (timezone removed; no conversion)")
     ax.grid(True, alpha=0.25)
+
+
+def legend_headroom(ax: plt.Axes, share: float = 0.35) -> None:
+    """Lift the top of the axes so the legend does not sit on the data.
+
+    A legend placed anywhere inside these panels lands on a trace, because the
+    traces fill them. Room is made above instead of the legend being moved out,
+    which at three inches of panel width would take a third of the plot.
+    """
+    low, high = ax.get_ylim()
+    if not (np.isfinite(low) and np.isfinite(high)) or high <= low:
+        return
+    if ax.get_yscale() == "symlog" and high > 0:
+        ax.set_ylim(low, high * (10.0 ** (2.0 * share)))
+    else:
+        ax.set_ylim(low, high + share * (high - low))
 
 
 def concentration_limits(datasets: list[pd.DataFrame]) -> tuple[float, float]:
@@ -461,7 +496,7 @@ def bin_heatmap(
     df: pd.DataFrame,
     title: str,
     norm: mcolors.LogNorm,
-) -> None:
+):
     columns = [f"bin{i}_number_cm3" for i in range(BIN_COUNT)]
     mesh = None
     for _, group in df.groupby("session_id", sort=True):
@@ -484,11 +519,14 @@ def bin_heatmap(
             cmap="viridis",
             norm=norm,
             shading="flat",
+            rasterized=True,
         )
-    ax.set(title=title, ylabel="OPC-N3 software bin index")
-    ax.set_yticks([0, 4, 8, 12, 16, 20, 23])
-    if mesh is not None:
-        fig.colorbar(mesh, ax=ax, label="Number concentration (#/cm³)")
+    ax.set(title=title, ylabel="Software bin index")
+    ax.set_yticks([0, 8, 16, 23])
+    # The two inlets are drawn on one normalisation so their colours mean the
+    # same thing, so they are given one colour bar rather than two identical
+    # ones taking a quarter of the row's width between them.
+    return mesh
 
 
 def diagnostics_panel(
@@ -501,25 +539,34 @@ def diagnostics_panel(
     sp = f"SP_{spec.suffix}_1"
     plot_by_session(ax, df, sfr, color="#0072B2", lw=0.8, label="SFR (mL/s)")
     plot_by_session(ax, df, sp, color="#D55E00", lw=0.8, label="SP (s)")
-    ax.set_ylabel("SFR (mL/s) / sampling period (s)")
+    ax.set_ylabel("SFR (mL s$^{-1}$), SP (s)")
     ax2 = ax.twinx()
     plot_by_session(
-        ax2, df, spec.temperature, color="#009E73", lw=0.8, label="Temperature (°C)"
+        ax2, df, spec.temperature, color="#009E73", lw=0.8, label="T (°C)"
     )
     plot_by_session(
-        ax2, df, spec.rh, color="#CC79A7", lw=0.8, label="Internal RH (%)"
+        ax2, df, spec.rh, color="#CC79A7", lw=0.8, label="RH (%)"
     )
-    ax2.set_ylabel("Temperature (°C) / internal RH (%)")
+    ax2.set_ylabel("T (°C), RH (%)")
+    ax2.grid(False)
     lines = [
         line
         for line in ax.get_lines() + ax2.get_lines()
         if not line.get_label().startswith("_")
     ]
-    ax.legend(lines, [line.get_label() for line in lines], ncol=2, fontsize=7)
+    legend_headroom(ax, 0.45)
+    legend_headroom(ax2, 0.45)
+    # Two columns of four entries at nine point fill the panel's width; the
+    # short handles are what buy the room the larger text needs.
+    ax.legend(
+        lines, [line.get_label() for line in lines],
+        ncol=2, loc="upper left", handlelength=1.2, columnspacing=1.0,
+        borderpad=0.3, labelspacing=0.3, framealpha=0.85,
+    )
     ax.set_title(
-        f"{spec.label}: diagnostics | zero-bin rows "
-        f"{metadata['zero_bin_row_fraction']:.1%}, QC flags "
-        f"{metadata['qc_flagged_fraction']:.1%}"
+        f"{spec.label}: diagnostics\n"
+        f"zero-bin rows {metadata['zero_bin_row_fraction']:.1%}, "
+        f"QC flags {metadata['qc_flagged_fraction']:.1%}"
     )
 
 
@@ -532,7 +579,28 @@ def make_plot(
     output_pdf: Path,
 ) -> None:
     plt.style.use("seaborn-v0_8-whitegrid")
-    fig, axes = plt.subplots(4, 2, figsize=(17, 16), constrained_layout=True)
+    # The style is applied first and the campaign sizes over it, because
+    # seaborn-v0_8-whitegrid carries its own font scale and would otherwise put
+    # the tick labels back under the floor.
+    plt.rcParams.update(figure_standard.rc_parameters())
+    # Eight panels on a seven-inch page. The figure used to be seventeen inches
+    # across with seven-point labels, which reaches a manuscript column at under
+    # three point. Authored at the page width instead, the text arrives at the
+    # size it was set in and the panels are the things that had to give: two
+    # columns of the two inlets, four rows deep, with the axis labels shortened
+    # to what fits three inches.
+    fig = plt.figure(
+        figsize=(figure_standard.PAGE_WIDTH_INCHES, 8.9), constrained_layout=True
+    )
+    # A third column, narrow and empty except where the heat maps' colour bar
+    # goes. Hanging the bar off the right-hand panel instead shrank that row
+    # alone, and four rows of panels that do not line up is a figure a reader
+    # cannot compare across.
+    grid = fig.add_gridspec(4, 3, width_ratios=(1.0, 1.0, 0.06))
+    axes = np.array(
+        [[fig.add_subplot(grid[row, column]) for column in (0, 1)]
+         for row in range(4)]
+    )
     colors = {"PM1": "#0072B2", "PM2.5": "#D55E00", "PM10": "#009E73"}
     for ax, df, spec in zip(axes[0], [hbx4, hbx5], [HBX4, HBX5]):
         for label, column in [
@@ -544,9 +612,11 @@ def make_plot(
                 ax, df, column, color=colors[label], lw=0.8, label=label
             )
         ax.set_yscale("symlog", linthresh=0.01)
-        ax.set_title(f"{spec.label}: reported mass concentration")
-        ax.set_ylabel("Mass concentration (µg/m³)")
-        ax.legend(ncol=3, fontsize=8)
+        ax.set_title(f"{spec.label}: mass concentration")
+        ax.set_ylabel("PM (µg m$^{-3}$)")
+        legend_headroom(ax)
+        ax.legend(ncol=3, loc="upper left", handlelength=1.0,
+                  columnspacing=0.8, borderpad=0.3, framealpha=0.85)
 
     for ax, df, spec in zip(axes[1], [hbx4, hbx5], [HBX4, HBX5]):
         plot_by_session(
@@ -555,38 +625,45 @@ def make_plot(
             "total_number_cm3",
             color="#0072B2",
             lw=0.8,
-            label="Total number concentration",
+            label="Total, 24 bins",
         )
         ax.set_yscale("symlog", linthresh=0.01)
-        ax.set_title(f"{spec.label}: all 24 bins")
-        ax.set_ylabel("Number concentration (#/cm³)")
-        ax.legend(fontsize=8)
+        ax.set_title(f"{spec.label}: number concentration")
+        ax.set_ylabel("N (cm$^{-3}$)")
+        legend_headroom(ax)
+        ax.legend(loc="upper left", handlelength=1.0, borderpad=0.3,
+                  framealpha=0.85)
 
     vmin, vmax = concentration_limits([hbx4, hbx5])
     norm = mcolors.LogNorm(vmin=vmin, vmax=vmax)
-    bin_heatmap(
-        fig, axes[2, 0], hbx4, f"{HBX4.label}: bin-resolved concentration", norm
-    )
-    bin_heatmap(
-        fig, axes[2, 1], hbx5, f"{HBX5.label}: bin-resolved concentration", norm
-    )
+    meshes = [
+        bin_heatmap(fig, axes[2, 0], hbx4, f"{HBX4.label}: bin-resolved", norm),
+        bin_heatmap(fig, axes[2, 1], hbx5, f"{HBX5.label}: bin-resolved", norm),
+    ]
+    drawn = next((mesh for mesh in meshes if mesh is not None), None)
+    if drawn is not None:
+        bar = fig.colorbar(drawn, cax=fig.add_subplot(grid[2, 2]))
+        bar.set_label("N (cm$^{-3}$)")
 
     diagnostics_panel(axes[3, 0], hbx4, HBX4, meta4)
     diagnostics_panel(axes[3, 1], hbx5, HBX5, meta5)
-    for ax in axes.ravel():
-        time_axis(ax)
+    # Only the bottom row carries the axis name; seven repetitions of it would
+    # cost four rows of panel height to say the same thing eight times.
+    for row_index, row in enumerate(axes):
+        for ax in row:
+            time_axis(ax, label=row_index == len(axes) - 1)
 
     start = min(hbx4["recorded_time"].iloc[0], hbx5["recorded_time"].iloc[0])
     end = max(hbx4["recorded_time"].iloc[-1], hbx5["recorded_time"].iloc[-1])
     elapsed = (end - start).total_seconds() / 3600.0
     fig.suptitle(
-        "OPC-N3 Inlet Comparison Quicklook\n"
-        f"{start.isoformat(sep=' ')} to {end.isoformat(sep=' ')} | "
-        f"{elapsed:.2f} h elapsed | gaps preserved | no interpolation",
-        fontsize=15,
+        "OPC-N3 inlet comparison quicklook\n"
+        f"{start.isoformat(sep=' ', timespec='seconds')} to "
+        f"{end.isoformat(sep=' ', timespec='seconds')} · {elapsed:.2f} h\n"
+        "Times as recorded, timezone removed without conversion · "
+        "gaps preserved, no interpolation"
     )
-    fig.savefig(output_png, dpi=180)
-    fig.savefig(output_pdf)
+    figure_standard.save(fig, (output_png, output_pdf))
     plt.close(fig)
 
 

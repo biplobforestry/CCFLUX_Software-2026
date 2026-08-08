@@ -6,6 +6,7 @@ from pathlib import Path
 import threading
 from typing import Callable
 
+from core import figure_standard
 from core.logging_manager import LogLevel, ProcessingLogManager
 
 
@@ -103,17 +104,14 @@ def export_noseboom_statistics(
     start = str(bounds.get("start") or fallback_start or "Unavailable")
     end = str(bounds.get("end") or fallback_end or "Unavailable")
     outputs: list[Path] = []
+    # The campaign standard, in the serif the Noseboom figures are written in.
+    # Sizes come from the standard rather than being restated here, so raising
+    # the floor once raises it for this figure too.
     style = {
+        **figure_standard.rc_parameters(),
         "font.family": "Times New Roman",
-        "font.size": 9,
-        "axes.titlesize": 9,
-        "axes.labelsize": 9,
-        "xtick.labelsize": 9,
-        "ytick.labelsize": 9,
-        "legend.fontsize": 9,
         "figure.facecolor": "white",
         "axes.facecolor": "white",
-        "axes.grid": True,
         "grid.alpha": 0.24,
     }
 
@@ -138,7 +136,7 @@ def export_noseboom_statistics(
                     centers, curve, color=curve_color, linewidth=1.35,
                     label="Frequency distribution curve",
                 )
-                axis.legend(loc="best", fontsize=8, frameon=False)
+                axis.legend(loc="best", frameon=False)
             else:
                 axis.text(0.5, 0.5, "No valid samples", ha="center", va="center", transform=axis.transAxes)
             axis.set_title(title)
@@ -146,8 +144,9 @@ def export_noseboom_statistics(
             axis.set_ylabel("Count")
             axis.tick_params(direction="out")
         fig.suptitle(flight_name, fontsize=10, y=0.985)
-        fig.text(0.5, 0.008, f"Start Time: {start}    End Time: {end}", ha="center", fontsize=8)
+        fig.text(0.5, 0.008, f"Start Time: {start}    End Time: {end}", ha="center")
         fig.subplots_adjust(left=0.105, right=0.985, top=0.94, bottom=0.105, hspace=0.72, wspace=0.34)
+        figure_standard.finalise(fig)
         for index, output_format in enumerate(valid_formats):
             progress(20 + 15 * index / max(1, len(valid_formats)), f"Writing histogram summary ({output_format.upper()})")
             path = _available_path(destination / f"{_safe_name(flight_name)}_noseboom_histogram_summary.{output_format}")
@@ -229,6 +228,7 @@ def export_noseboom_statistics(
             spectra_axis.legend(loc="best")
         fig.suptitle(flight_name, fontsize=10, y=0.985)
         fig.subplots_adjust(left=0.105, right=0.985, top=0.94, bottom=0.105, hspace=0.52, wspace=0.36)
+        figure_standard.finalise(fig)
         for index, output_format in enumerate(valid_formats):
             progress(70 + 24 * index / max(1, len(valid_formats)), f"Writing scientific overview ({output_format.upper()})")
             path = _available_path(destination / f"{_safe_name(flight_name)}_noseboom_frequency_altitude_spectra.{output_format}")
@@ -341,7 +341,7 @@ def _render_quality_control(
         axis.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
         axis.grid(alpha=0.24)
         if axis.get_legend_handles_labels()[0]:
-            axis.legend(loc="best", frameon=False, fontsize=8)
+            axis.legend(loc="best", frameon=False)
 
     airport = (qc.get("metar") or {}).get("airport") or {}
     figure.suptitle(
@@ -350,6 +350,7 @@ def _render_quality_control(
         fontsize=10, y=0.992,
     )
     figure.subplots_adjust(left=0.105, right=0.985, top=0.935, bottom=0.06)
+    figure_standard.finalise(figure)
     outputs: list[Path] = []
     for index, output_format in enumerate(formats):
         progress(95 + 4 * index / max(1, len(formats)),

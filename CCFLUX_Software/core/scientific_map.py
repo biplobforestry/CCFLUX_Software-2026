@@ -24,21 +24,19 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Sequence
 
-FIGURE_WIDTH_INCHES = 7.0
-MINIMUM_FONT_POINTS = 9.0
+from core import figure_standard
+
+# The map obeys the same two rules as every other figure the project makes, and
+# takes them from the one place they are written down rather than restating them.
+FIGURE_WIDTH_INCHES = figure_standard.PAGE_WIDTH_INCHES
+MINIMUM_FONT_POINTS = figure_standard.MINIMUM_FONT_POINTS
+EXPORT_FORMATS = figure_standard.EXPORT_FORMATS
+MEDIA_TYPES = figure_standard.MEDIA_TYPES
+media_type = figure_standard.media_type
+enforce_minimum_font = figure_standard.enforce_minimum_font
+
 MINIMUM_DPI = 72
 MAXIMUM_DPI = 1500
-EXPORT_FORMATS = ("pdf", "png", "svg")
-MEDIA_TYPES = {
-    "pdf": "application/pdf",
-    "png": "image/png",
-    "svg": "image/svg+xml",
-}
-
-
-def media_type(image_format: str) -> str:
-    """The content type a browser needs to display or download the figure."""
-    return MEDIA_TYPES.get(str(image_format).casefold(), "application/octet-stream")
 
 # The basemap the workspaces already draw, so an exported figure and the page it
 # came from show the same ground.
@@ -234,40 +232,12 @@ def _north_arrow(axis) -> None:
     )
 
 
-def enforce_minimum_font(figure) -> None:
-    """Raise anything the layout engine shrank back to the floor.
-
-    constrained_layout is free to shrink tick labels to make room, so a figure
-    configured at nine point can still leave here below it.
-    """
-    figure.canvas.draw()
-    for artist in figure.findobj(match=lambda item: hasattr(item, "get_fontsize")):
-        try:
-            size = float(artist.get_fontsize())
-        except (TypeError, ValueError):
-            continue
-        if size < MINIMUM_FONT_POINTS:
-            artist.set_fontsize(MINIMUM_FONT_POINTS)
-
-
 def rc_parameters() -> dict[str, Any]:
-    """Every text size at or above the floor, before anything is drawn."""
-    return {
-        "font.size": MINIMUM_FONT_POINTS,
-        "axes.titlesize": MINIMUM_FONT_POINTS + 2.0,
-        "axes.labelsize": MINIMUM_FONT_POINTS + 1.0,
-        "xtick.labelsize": MINIMUM_FONT_POINTS,
-        "ytick.labelsize": MINIMUM_FONT_POINTS,
-        "legend.fontsize": MINIMUM_FONT_POINTS,
-        "figure.titlesize": MINIMUM_FONT_POINTS + 3.0,
-        "axes.linewidth": 0.8,
-        # Deliberately not "tight". Tight crops to the ink, so a portrait map
-        # came out 6.02 inches wide instead of seven and no longer matched the
-        # column it was drawn for. constrained_layout already fits the furniture
-        # inside the figure, so the saved size is the size that was asked for.
-        "savefig.bbox": None,
-        "savefig.pad_inches": 0.0,
-    }
+    """The campaign settings, with the grid the basemap supplies turned off."""
+    parameters = figure_standard.rc_parameters()
+    # A map's ground is the basemap; a graticule over it would be a second grid.
+    parameters["axes.grid"] = False
+    return parameters
 
 
 def render_track_map(

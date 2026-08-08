@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import matplotlib.dates as mdates
@@ -12,6 +13,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy import signal
+
+try:
+    # The dashboard executes this module in-process, where core is importable.
+    from core import figure_standard
+except ModuleNotFoundError:  # Run straight from a shell in another directory.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from core import figure_standard
 
 ACC = ["gimbal_acc_x_counts", "gimbal_acc_y_counts", "gimbal_acc_z_counts"]
 GYRO = ["gimbal_gyro_x_counts", "gimbal_gyro_y_counts", "gimbal_gyro_z_counts"]
@@ -210,7 +218,10 @@ def full_flight_spectrogram(
 
 def no_gap_bridge(df: pd.DataFrame, column: str) -> np.ndarray:
     values = df[column].to_numpy(dtype=float, copy=True)
-    starts = df["session_id"].ne(df["session_id"].shift()).to_numpy()
+    # copy=True because pandas hands back a read-only view of the comparison's
+    # own buffer, and writing the first element into it raises. Without it the
+    # figure could not be drawn at all on Flight_CC0806.
+    starts = df["session_id"].ne(df["session_id"].shift()).to_numpy(copy=True)
     starts[0] = False
     values[starts] = np.nan
     return values
@@ -237,12 +248,17 @@ def dominant(
 
 
 def time_axes(axes: list[plt.Axes]) -> None:
-    for ax in axes:
-        locator = mdates.AutoDateLocator(minticks=4, maxticks=9)
+    # Four labels at most, and the date written under the bottom panel only. A
+    # panel is three inches at the page width, so nine HH:MM labels at nine
+    # point ran together, and the date repeated under all five cost a line of
+    # panel height apiece.
+    for index, ax in enumerate(axes):
+        locator = mdates.AutoDateLocator(minticks=3, maxticks=4)
+        formatter = mdates.ConciseDateFormatter(locator)
+        formatter.show_offset = index >= len(axes) - 2
         ax.xaxis.set_major_locator(locator)
-        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        ax.xaxis.set_major_formatter(formatter)
         ax.tick_params(axis="x", labelbottom=True)
-        ax.set_xlabel("Recorded time (timezone removed; no conversion)")
         ax.grid(True, alpha=0.25)
 
 
@@ -256,7 +272,17 @@ def make_plot(
     pdf: Path,
 ) -> None:
     plt.style.use("seaborn-v0_8-whitegrid")
-    fig, axes = plt.subplots(3, 2, figsize=(16, 12), constrained_layout=True)
+    # The style is applied first and the campaign sizes over it, because
+    # seaborn-v0_8-whitegrid carries its own font scale and would otherwise put
+    # the tick labels back under the floor.
+    plt.rcParams.update(figure_standard.rc_parameters())
+    # Six panels on a seven-inch page. At sixteen inches the eight-point legends
+    # reached a manuscript column at under four point; authored at the page
+    # width the text arrives at the size it was set in.
+    fig, axes = plt.subplots(
+        3, 2, figsize=(figure_standard.PAGE_WIDTH_INCHES, 8.4),
+        constrained_layout=True,
+    )
     time = df["recorded_time"]
     colors = ["#0072B2", "#D55E00", "#009E73"]
 
@@ -265,7 +291,8 @@ def make_plot(
         ax.plot(time, no_gap_bridge(df, f"acc_{axis}_g"), lw=0.7, color=color, label=axis.upper())
     ax.plot(time, no_gap_bridge(df, "acc_norm_g"), lw=0.9, color="black", label="norm")
     ax.set(title="All recorded RAW_IMU acceleration", ylabel="Acceleration (g)")
-    ax.legend(ncol=4, fontsize=8)
+    ax.legend(ncol=4, handlelength=1.0, columnspacing=0.8, borderpad=0.3,
+              framealpha=0.85)
 
     ax = axes[0, 1]
     for axis, color in zip("xyz", colors):
@@ -274,19 +301,20 @@ def make_plot(
     threshold = summary["configuration"]["maneuver_threshold_dps"]
     ax.axhline(threshold, color="#CC79A7", ls="--", lw=1, label=f"motion flag {threshold:g}")
     ax.set(title="All recorded RAW_IMU angular rate", ylabel="Angular rate (deg/s)")
-    ax.legend(ncol=3, fontsize=8)
+    ax.legend(ncol=3, handlelength=1.0, columnspacing=0.8, borderpad=0.3,
+              framealpha=0.85)
 
     ax = axes[1, 0]
     ax.plot(time, no_gap_bridge(df, "acc_deviation_g"), lw=0.75, color="#0072B2", label="|a| − 1 g (unfiltered)")
     ax.plot(time, no_gap_bridge(df, "acc_rms_g"), lw=1.2, color="#D55E00", label=f"{summary['configuration']['rms_seconds']:g} s RMS")
     ax.set(title="Unfiltered acceleration deviation", ylabel="Acceleration (g)")
-    ax.legend(fontsize=8)
+    ax.legend(handlelength=1.0, borderpad=0.3, framealpha=0.85)
 
     ax = axes[1, 1]
     ax.plot(time, no_gap_bridge(df, "gyro_norm_dps"), lw=0.75, color="#009E73", label="gyro magnitude (unfiltered)")
     ax.plot(time, no_gap_bridge(df, "gyro_rms_dps"), lw=1.2, color="#D55E00", label=f"{summary['configuration']['rms_seconds']:g} s RMS")
     ax.set(title="Unfiltered angular motion", ylabel="Angular rate (deg/s)")
-    ax.legend(fontsize=8)
+    ax.legend(handlelength=1.0, borderpad=0.3, framealpha=0.85)
 
     ax = axes[2, 0]
     finite_db = [
@@ -329,8 +357,8 @@ def make_plot(
             lw=1,
             label="effective update Nyquist",
         )
-        ax.legend(fontsize=8)
-    ax.set(title="Acceleration spectrogram (unfiltered input)", ylabel="Frequency (Hz)")
+        ax.legend(handlelength=1.0, borderpad=0.3, framealpha=0.85)
+    ax.set(title="Acceleration spectrogram", ylabel="Frequency (Hz)")
 
     ax = axes[2, 1]
     fa, aa = acc_asd
@@ -338,10 +366,12 @@ def make_plot(
     ma = (fa > 0) & np.isfinite(aa) & (aa > 0)
     mg = (fg > 0) & np.isfinite(ag) & (ag > 0)
     l1 = ax.semilogy(fa[ma], aa[ma], color="#0072B2", label="Acceleration ASD")
-    ax.set(xlabel="Frequency (Hz)", ylabel="Acceleration ASD (g/√Hz)", title="Welch ASD using all acquisition sessions")
+    ax.set(xlabel="Frequency (Hz)", ylabel="Acc. ASD (g/√Hz)",
+           title="Welch ASD, all acquisition sessions")
     ax2 = ax.twinx()
     l2 = ax2.semilogy(fg[mg], ag[mg], color="#D55E00", label="Angular-rate ASD")
-    ax2.set_ylabel("Angular-rate ASD ((deg/s)/√Hz)")
+    ax2.set_ylabel("Gyro ASD ((deg/s)/√Hz)")
+    ax2.grid(False)
     nyquist = summary["sampling"]["effective_update_nyquist_hz"]
     extra = []
     if nyquist is not None:
@@ -350,20 +380,31 @@ def make_plot(
         if nyquist < right:
             ax.axvspan(nyquist, right, color="0.5", alpha=0.10)
     lines = l1 + l2 + extra
-    ax.legend(lines, [line.get_label() for line in lines], fontsize=8)
+    ax.legend(lines, [line.get_label() for line in lines], handlelength=1.0,
+              borderpad=0.3, framealpha=0.85, loc="lower left")
     ax.grid(True, which="both", alpha=0.25)
 
     time_axes([axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1], axes[2, 0]])
+    # Hundreds of thousands of IMU samples per trace. Kept as vector geometry
+    # the PDF was slow to open for detail no reader can resolve; the axes,
+    # labels and legends stay text.
+    for ax in axes.ravel():
+        for artist in ax.get_lines() + ax.collections:
+            artist.set_rasterized(True)
     dataset = summary["dataset"]
+    # Timestamps to the second. Written with the logger's microseconds the line
+    # ran off both edges of a seven-inch page, and no reader needs a quicklook's
+    # window stated to a millionth of a second.
     fig.suptitle(
-        "Inertial Measurement Analyzer\n"
-        f"{dataset['start_recorded_time']} to {dataset['end_recorded_time']} | "
-        f"{dataset['elapsed_hours']:.2f} h elapsed | {dataset['rows_evaluated']} rows | "
-        f"{dataset['sessions']} acquisition sessions",
-        fontsize=14,
+        "Inertial measurement analyser\n"
+        f"{str(dataset['start_recorded_time'])[:19]} to "
+        f"{str(dataset['end_recorded_time'])[:19]} · "
+        f"{dataset['elapsed_hours']:.2f} h · "
+        f"{dataset['rows_evaluated']:,} rows · "
+        f"{dataset['sessions']} sessions\n"
+        "Recorded time, timezone removed without conversion"
     )
-    fig.savefig(png, dpi=180)
-    fig.savefig(pdf)
+    figure_standard.save(fig, (png, pdf))
     plt.close(fig)
 
 

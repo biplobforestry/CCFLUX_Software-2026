@@ -495,7 +495,7 @@ def make_overview_figure(
     sample_rows: list[dict[str, Any]],
     figure_path: Path,
 ) -> None:
-    """Create a compact 8-inch-wide visual health panel."""
+    """Create the visual health panel, at the campaign figure standard."""
     if not entries:
         print("No entries available; overview figure skipped.")
         return
@@ -504,6 +504,15 @@ def make_overview_figure(
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         import matplotlib.dates as mdates
+
+        try:
+            # The dashboard runs this module in-process, where core imports.
+            from core import figure_standard
+        except ModuleNotFoundError:  # Run straight from a shell elsewhere.
+            import sys
+
+            sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+            from core import figure_standard
     except Exception as error:  # noqa: BLE001 - optional plotting dependency.
         print(f"Overview figure skipped because matplotlib is unavailable: {error}")
         return
@@ -514,15 +523,7 @@ def make_overview_figure(
         print("Not enough valid timestamps for overview figure; skipped.")
         return
 
-    plt.rcParams.update({
-        "font.size": 8,
-        "axes.titlesize": 9,
-        "axes.labelsize": 8,
-        "xtick.labelsize": 8,
-        "ytick.labelsize": 8,
-        "legend.fontsize": 8,
-        "figure.titlesize": 10,
-    })
+    plt.rcParams.update(figure_standard.rc_parameters())
 
     times = [dt for dt, _ in parsed]
     intervals = [(times[i] - times[i - 1]).total_seconds() for i in range(1, len(times))]
@@ -530,21 +531,28 @@ def make_overview_figure(
     cumulative = list(range(1, len(times) + 1))
     primary_gap = float(summary.get("gap_threshold_primary_seconds", 2.5) or 2.5)
 
-    fig, axes = plt.subplots(2, 2, figsize=(8, 5.8), constrained_layout=True)
-    fig.suptitle("FLIR Quick Look - Acquisition Health", fontweight="bold")
+    fig, axes = plt.subplots(
+        2, 2, figsize=(figure_standard.PAGE_WIDTH_INCHES, 5.6),
+        constrained_layout=True,
+    )
+    fig.suptitle("FLIR quick look — acquisition health", fontweight="bold")
 
     ax = axes[0, 0]
-    ax.plot(interval_times, intervals, ".", markersize=2.2)
-    ax.axhline(primary_gap, color="red", linestyle="--", linewidth=0.9, label=f"gap threshold {primary_gap:g}s")
+    # Tens of thousands of interval points; kept as vector marks they dominated
+    # the PDF while adding nothing a reader can resolve.
+    ax.plot(interval_times, intervals, ".", markersize=2.2, rasterized=True)
+    ax.axhline(primary_gap, color="red", linestyle="--", linewidth=0.9,
+               label=f"gap threshold {primary_gap:g} s")
     ax.set_title("Frame interval over time")
-    ax.set_ylabel("seconds")
+    ax.set_ylabel("Interval (s)")
     ax.grid(True, alpha=0.3)
-    ax.legend(loc="upper right", framealpha=0.9)
+    ax.legend(loc="upper right", framealpha=0.9, handlelength=1.2,
+              borderpad=0.3)
 
     ax = axes[0, 1]
-    ax.plot(times, cumulative, linewidth=1.0)
+    ax.plot(times, cumulative, linewidth=1.0, rasterized=True)
     ax.set_title("Cumulative frames")
-    ax.set_ylabel("frame count")
+    ax.set_ylabel("Frames")
     ax.grid(True, alpha=0.3)
 
     ax = axes[1, 0]
@@ -552,32 +560,30 @@ def make_overview_figure(
         ax.hist(intervals, bins=min(50, max(10, int(len(intervals) ** 0.5))), color="#4C78A8", alpha=0.85)
         median_interval = summary.get("median_interval_seconds")
         if isinstance(median_interval, (int, float)):
-            ax.axvline(median_interval, color="black", linestyle="--", linewidth=0.9, label=f"median {median_interval:.3g}s")
-            ax.legend(loc="upper left", framealpha=0.9)
+            ax.axvline(median_interval, color="black", linestyle="--",
+                       linewidth=0.9, label=f"median {median_interval:.3g} s")
+            ax.legend(loc="upper left", framealpha=0.9, handlelength=1.2,
+                      borderpad=0.3)
     ax.set_title("Frame interval distribution")
-    ax.set_xlabel("seconds")
-    ax.set_ylabel("count")
+    ax.set_xlabel("Interval (s)")
+    ax.set_ylabel("Frames")
     ax.grid(True, alpha=0.3)
 
-    stats_lines = [
-        f"Frames: {summary.get('frame_count', ''):,}",
-        f"Duration: {summary.get('duration_text', '')}",
-        f"Mean rate: {summary.get('mean_acquisition_rate_hz', 0):.4g} Hz",
-        f"Median dt: {summary.get('median_interval_seconds', 0):.4g} s",
-        f"Gaps>{primary_gap:g}s: {summary.get('gap_count_primary', '')}",
-        f"Max dt: {summary.get('max_interval_seconds', 0):.4g} s",
-    ]
-    stats_text = "\n".join(stats_lines)
-    ax.text(
-        0.98,
-        0.96,
-        stats_text,
-        transform=ax.transAxes,
-        ha="right",
-        va="top",
-        fontsize=8,
-        family="monospace",
-        bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "0.65", "alpha": 0.9},
+    # Under the figure rather than inside a panel: at nine point in a
+    # three-inch panel this block covered the distribution it was drawn beside.
+    # Two lines, because one ran off both edges of a seven-inch page.
+    fig.supxlabel(
+        "  ·  ".join([
+            f"Frames {summary.get('frame_count', ''):,}",
+            f"duration {summary.get('duration_text', '')}",
+            f"mean rate {summary.get('mean_acquisition_rate_hz', 0):.4g} Hz",
+        ])
+        + "\n"
+        + "  ·  ".join([
+            f"median dt {summary.get('median_interval_seconds', 0):.4g} s",
+            f"max dt {summary.get('max_interval_seconds', 0):.4g} s",
+            f"gaps over {primary_gap:g} s: {summary.get('gap_count_primary', '')}",
+        ])
     )
 
     ax = axes[1, 1]
@@ -587,29 +593,32 @@ def make_overview_figure(
         mins = [float(row["raw_stats_min"]) if row.get("raw_stats_min") != "" else float("nan") for row in valid_samples]
         means = [float(row["raw_stats_mean"]) if row.get("raw_stats_mean") != "" else float("nan") for row in valid_samples]
         maxs = [float(row["raw_stats_max"]) if row.get("raw_stats_max") != "" else float("nan") for row in valid_samples]
-        ax.plot(x, mins, "o-", label="raw min", markersize=2.5, linewidth=0.9)
-        ax.plot(x, means, "o-", label="raw mean", markersize=2.5, linewidth=0.9)
-        ax.plot(x, maxs, "o-", label="raw max", markersize=2.5, linewidth=0.9)
+        ax.plot(x, mins, "o-", label="min", markersize=2.5, linewidth=0.9)
+        ax.plot(x, means, "o-", label="mean", markersize=2.5, linewidth=0.9)
+        ax.plot(x, maxs, "o-", label="max", markersize=2.5, linewidth=0.9)
         zero_x = [int(row.get("record_index", 0)) for row in valid_samples if row.get("raw_all_zero_by_stats") is True]
         if zero_x:
-            ax.scatter(zero_x, [0] * len(zero_x), color="red", marker="x", s=35, label="all-zero sample")
+            ax.scatter(zero_x, [0] * len(zero_x), color="red", marker="x", s=35,
+                       label="all zero")
         ax.set_title("Sampled raw data health")
-        ax.set_xlabel("record index")
-        ax.set_ylabel("raw DN")
-        ax.legend(loc="best", framealpha=0.9)
+        ax.set_xlabel("Record index")
+        ax.set_ylabel("Raw DN")
+        ax.legend(loc="best", framealpha=0.9, ncol=2, handlelength=1.2,
+                  columnspacing=0.9, borderpad=0.3)
     else:
-        ax.text(0.5, 0.5, "No sample-frame raw stats\n(use --sample-frames 15)", ha="center", va="center", fontsize=8)
+        ax.text(0.5, 0.5, "No sample-frame raw statistics\n(use --sample-frames 15)",
+                ha="center", va="center")
         ax.set_title("Sampled raw data health")
     ax.grid(True, alpha=0.3)
 
     for ax in axes.flat[:2]:
+        # Four labels across a three-inch panel at nine point.
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=3, maxticks=4))
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-        for label in ax.get_xticklabels():
-            label.set_rotation(25)
-            label.set_horizontalalignment("right")
+        ax.set_xlabel("UTC time")
 
     figure_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(figure_path, dpi=180)
+    figure_standard.save(fig, figure_path)
     plt.close(fig)
     print(f"Overview figure written: {figure_path}")
 def make_report(
