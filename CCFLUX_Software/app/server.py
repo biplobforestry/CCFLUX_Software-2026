@@ -618,8 +618,10 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     {"Content-Disposition": f'attachment; filename="{filename}"'},
                 )
             elif path in {"/api/opc/map/export", "/api/partector/map/export"}:
+                # Drawn from the georeferenced values, not photographed from the
+                # browser: the canvas carried whatever zoom the map was left on.
                 body = self._json_body()
-                filename, pdf = self.server.backend.export_size_distribution_map_pdf(
+                filename, pdf = self.server.backend.export_size_distribution_map_figure(
                     path.split("/")[2], body
                 )
                 self._send_bytes(

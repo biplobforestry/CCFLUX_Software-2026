@@ -343,12 +343,17 @@ window.CCFLUX.createSizeMap = function createSizeMap(options) {
     try {
       const current = sensor();
       const index = selectedChannel();
+      // Which layer, not a picture of it. The server draws the same
+      // georeferenced values the page is drawing, fitted to the track: sending
+      // the canvas exported whatever zoom the map happened to be left on, and
+      // the colour bar with it, painted over the ground it described.
       const response = await fetch(exportUrl, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
-          image: await composeImage(),
-          flight_name: $(ids.flightName) ? $(ids.flightName).textContent : 'Flight',
-          subject: `${current ? current.label : ''} · ${index === null ? 'all sizes summed' : channelName(index)}`
+          sensor: $(ids.sensor) ? $(ids.sensor).value : '',
+          channel: index,
+          log: Boolean($(ids.log) && $(ids.log).checked),
+          flight_name: $(ids.flightName) ? $(ids.flightName).textContent : 'Flight'
         })
       });
       if (!response.ok) throw new Error(await response.text() || `Export failed (${response.status})`);

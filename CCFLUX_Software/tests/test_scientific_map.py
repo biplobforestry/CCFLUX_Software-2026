@@ -236,6 +236,55 @@ class TestRotationIsARotationNotAMirror:
         assert plan["rotated"] is True
 
 
+class TestTheSizeMapIsDrawnNotPhotographed:
+    """size_map.js composed the Leaflet tiles onto a canvas and sent the picture
+    to be wrapped in a PDF, so the export carried whatever zoom the map had been
+    left on and a colour bar painted over the ground it described."""
+
+    SCRIPT = (
+        Path(__file__).resolve().parents[1] / "app" / "assets" / "size_map.js"
+    ).read_text(encoding="utf-8")
+    SERVER = (
+        Path(__file__).resolve().parents[1] / "app" / "server.py"
+    ).read_text(encoding="utf-8")
+    BACKEND = (
+        Path(__file__).resolve().parents[1] / "app" / "scan_backend.py"
+    ).read_text(encoding="utf-8")
+
+    def _export(self) -> str:
+        start = self.SCRIPT.index("async function exportPdf(")
+        return self.SCRIPT[start: self.SCRIPT.index("\n  function resetPosition")]
+
+    def test_the_page_sends_the_layer_not_a_picture(self):
+        block = self._export()
+        assert "composeImage()" not in block
+        assert "sensor:" in block and "channel:" in block
+
+    def test_the_scale_is_sent_so_the_figure_matches_the_page(self):
+        assert "log: Boolean(" in self._export()
+
+    def test_the_route_draws_the_figure(self):
+        block = self.SERVER[self.SERVER.index('"/api/opc/map/export"'):]
+        block = block[: block.index("elif path ==")]
+        assert "export_size_distribution_map_figure(" in block
+        assert "export_size_distribution_map_pdf(" not in block
+
+    def test_the_backend_renders_from_the_georeferenced_values(self):
+        start = self.BACKEND.index("def export_size_distribution_map_figure(")
+        block = self.BACKEND[start: self.BACKEND.index(
+            "def export_size_distribution_map_pdf(", start
+        )]
+        assert "scientific_map.render_track_map(" in block
+        assert "point[\"lat\"]" in block
+
+    def test_a_sensor_that_does_not_exist_is_refused_not_swapped(self):
+        """Exporting a different sensor, correctly labelled, is worse than
+        refusing: the operator has no way to notice."""
+        start = self.BACKEND.index("def export_size_distribution_map_figure(")
+        block = self.BACKEND[start: start + 4000]
+        assert "has no sensor" in block
+
+
 class TestTheProjection:
     def test_mercator_round_trips(self):
         for latitude in (-60.0, -1.0, 0.0, 51.4, 70.0):

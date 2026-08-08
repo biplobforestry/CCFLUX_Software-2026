@@ -3194,6 +3194,118 @@ class DashboardScanBackend:
         )
         return filename, content, media_type
 
+    def export_size_distribution_map_figure(
+        self, page: str, request: Mapping[str, Any]
+    ) -> tuple[str, bytes]:
+        """Draw the map from the georeferenced values, not from the canvas.
+
+        Photographing the browser exported whatever zoom the map had been left
+        on: a flight covering 80 km by 83 km came out inside 315 km of
+        Rhineland, the track a fifth of the frame, with the colour bar painted
+        over the ground it described. Drawn here, the extent is the track and
+        the page is sized to it.
+        """
+        import tempfile
+
+        from core import scientific_map
+
+        normalized = page.casefold()
+        if normalized not in self.SIZE_MAP_PAGES:
+            raise ValueError(f"No size distribution map for: {page}")
+        instrument_name, tag = self.SIZE_MAP_PAGES[normalized]
+        view = self.size_distribution_map_view(normalized)
+        if not view.get("available"):
+            raise ValueError(
+                str(view.get("message") or "")
+                or f"No georeferenced {instrument_name} samples to export."
+            )
+        sensors = dict(view.get("sensors") or {})
+        requested = str(request.get("sensor") or "")
+        if requested and requested not in sensors:
+            # Never quietly export a different one: the operator would get a
+            # figure of the sensor they did not ask for, correctly labelled.
+            raise ValueError(
+                f"{instrument_name} has no sensor {requested!r}. "
+                "Available: " + ", ".join(sorted(sensors)) if sensors
+                else f"{instrument_name} carries no placed sensors."
+            )
+        sensor = sensors.get(requested) or next(iter(sensors.values()), None)
+        if sensor is None:
+            raise ValueError(f"No {instrument_name} sensor carries placed samples.")
+        channel = request.get("channel")
+        channel = None if channel in (None, "", "null") else int(channel)
+        labels = list(sensor.get("channels") or [])
+        subject = (
+            "All sizes summed" if channel is None
+            else (labels[channel] if 0 <= channel < len(labels) else f"Channel {channel}")
+        )
+
+        latitudes: list[float] = []
+        longitudes: list[float] = []
+        values: list[float] = []
+        for point in sensor.get("points") or []:
+            if channel is None:
+                value = point.get("total")
+            else:
+                row = point.get("values") or []
+                value = row[channel] if 0 <= channel < len(row) else None
+            if value is None:
+                continue
+            latitudes.append(float(point["lat"]))
+            longitudes.append(float(point["lon"]))
+            values.append(float(value))
+        if len(values) < 2:
+            raise ValueError(
+                f"{subject} has fewer than two placed samples on this flight, "
+                "so there is no track to draw."
+            )
+
+        with self._lock:
+            project = self._flight_project
+            flight_id = project.flight_id if project else "Flight"
+        flight_name = str(request.get("flight_name") or flight_id or "Flight")
+        cache = None
+        if project is not None:
+            cache = project.flight_output_root / "cache" / "basemap_tiles"
+        safe_flight = "".join(
+            value if value.isalnum() or value in "-_" else "_"
+            for value in (flight_name.strip() or "Flight")
+        ).strip("_") or "Flight"
+        stem = f"{safe_flight}_{tag}_{datetime.now():%Y%m%d_%H%M%S}"
+        with tempfile.TemporaryDirectory() as staging:
+            written = scientific_map.render_track_map(
+                latitudes, longitudes, values, Path(staging), stem,
+                title=f"{flight_name} - {instrument_name} size distribution",
+                subtitle=f"{sensor.get('label') or requested} · {subject}",
+                value_label="Number concentration (# cm$^{-3}$)",
+                formats=("pdf",),
+                dpi=int(request.get("dpi") or 300),
+                cache_directory=cache,
+                log_scale=bool(request.get("log")),
+            )
+            pdf = written[0].read_bytes()
+        filename = f"{stem}.pdf"
+
+        destination: Path | None = None
+        if project is not None:
+            export_root = (
+                project.flight_output_root / "exports" / f"{normalized}_map"
+            )
+            export_root.mkdir(parents=True, exist_ok=True)
+            destination = export_root / filename
+            destination.write_bytes(pdf)
+            with self._lock:
+                project.output_locations[f"{normalized}_map_exports"] = export_root
+            self._checkpoint_project()
+        self.logger.log(
+            LogLevel.SUCCESS,
+            "hatchbox-view",
+            f"{instrument_name} size distribution map exported as a drawn figure",
+            file_path=destination,
+            processing_step="size-distribution-map-export",
+        )
+        return filename, pdf
+
     def export_size_distribution_map_pdf(
         self, page: str, request: Mapping[str, Any]
     ) -> tuple[str, bytes]:
