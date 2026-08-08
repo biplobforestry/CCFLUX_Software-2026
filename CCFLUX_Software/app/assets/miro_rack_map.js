@@ -538,18 +538,35 @@
 
   async function exportCurrentMapPdf() {
     if (!map || !payload) return;
-    openBusy('export','Preparing high-resolution PDF','Composing the visible map, scientific layers, scale, coordinates, north arrow, and time frame.');
+    openBusy('export','Preparing the map figure','Redrawing the selected layer from its georeferenced values with axes, colour bar, scale and north arrow.');
     byId('exportMap').disabled=true;
     window.__miroMapExportStatus='running';
     try {
       await nextFrame();
-      const canvas=await composeExportCanvas();
-      byId('mapBusyMessage').textContent='Writing the high-resolution PDF and saving it with the Flight Project.';
-      const image=canvas.toDataURL('image/png');
-      const timeframe=visibleTimeframe();
+      // The figure is drawn server-side from the numbers. Sending the canvas
+      // produced one raster at whatever size the window happened to be - 17.33
+      // inches on Flight_CC0807 - with no axes, no colour bar and no text at
+      // all, so nothing in it could be read at a column's width.
+      const layer=[...document.querySelectorAll('.selection[data-layer]')]
+        .map(node => ({
+          enabled: node.querySelector('.enabled')?.checked,
+          instrument: node.querySelector('.instrument')?.value,
+          gas: node.querySelector('.gas')?.value,
+          palette: node.querySelector('.palette')?.value,
+          logscale: node.querySelector('.logscale')?.checked,
+        }))
+        .find(item => item.enabled && item.gas);
+      if (!layer) throw new Error('Enable a trace gas layer before exporting');
+      byId('mapBusyMessage').textContent=`Drawing ${layer.instrument} ${layer.gas} at seven inches.`;
       const response=await fetch('/api/miro-rack/map/export',{
         method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({image,flight_name:payload.flight_name || 'Flight',timeframe})
+        body:JSON.stringify({
+          instrument:layer.instrument, gas:layer.gas,
+          colormap:(layer.palette && layer.palette!=='default') ? layer.palette : 'viridis',
+          log_scale:Boolean(layer.logscale),
+          format:'pdf', dpi:300,
+          flight_name:payload.flight_name || 'Flight',
+        })
       });
       if (!response.ok) {
         const failure=await response.json().catch(()=>({error:'PDF export failed'}));

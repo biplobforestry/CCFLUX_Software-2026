@@ -629,12 +629,17 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                     {"Content-Disposition": f'attachment; filename="{filename}"'},
                 )
             elif path == "/api/miro-rack/map/export":
+                # Drawn from the georeferenced numbers, not from the browser
+                # canvas: the canvas export was one raster at whatever size the
+                # window happened to be, with no axes, no colour bar and no text.
                 body = self._json_body()
-                filename, pdf = self.server.miro_rack.export_map_pdf(body)
+                filename, figure, media_type = (
+                    self.server.miro_rack.export_map_figure(body)
+                )
                 self._send_bytes(
                     HTTPStatus.OK,
-                    pdf,
-                    "application/pdf",
+                    figure,
+                    media_type,
                     {"Content-Disposition": f'attachment; filename="{filename}"'},
                 )
             elif path == "/api/miro-rack/trace-gas/data":

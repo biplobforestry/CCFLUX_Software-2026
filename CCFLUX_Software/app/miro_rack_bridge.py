@@ -10,6 +10,7 @@ import json
 import math
 import re
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ from PIL import Image, UnidentifiedImageError
 
 from core.legacy_paths import legacy_integration_path
 from core.logging_manager import LogLevel
+from core.map_pdf_export import safe_file_stem
 
 
 LEGACY_DIRECTORY = legacy_integration_path("MIRO_Rack")
@@ -1135,6 +1137,77 @@ function closeMapSync() {
             "files": [path.name for path in written],
             "directory": str(root),
         }
+
+    def export_map_figure(self, request: dict[str, Any]) -> tuple[str, bytes, str]:
+        """Draw one map layer as a figure, from the numbers rather than the canvas.
+
+        The old export sent the browser's own canvas to be wrapped in a PDF: one
+        raster, no fonts, and whatever size the window happened to be - 17.33
+        inches wide on Flight_CC0807, with nothing in it a reader could scale or
+        search. This redraws the same layer server-side, so the file carries a
+        titled axes in degrees, a colour bar naming the quantity and its unit, a
+        scale bar, a north arrow and the basemap attribution, at the campaign's
+        seven inches and nine point.
+        """
+        from core import scientific_map
+
+        payload = self.map_payload()
+        instrument = str(request.get("instrument") or "MIRO")
+        layers = dict(payload.get("layers", {}).get(instrument, {}))
+        gas = str(request.get("gas") or "")
+        if gas not in layers:
+            gas = next((name for name in layers if layers[name]), "")
+        records = list(layers.get(gas, ()))
+        if not records:
+            raise ValueError(
+                f"{instrument} has no georeferenced {gas or 'layer'} to draw. "
+                "Run Mapview synchronization first."
+            )
+        unit = str(payload.get("units", {}).get(instrument, {}).get(gas, "")).strip()
+        latitudes = [row.get("lat") for row in records]
+        longitudes = [row.get("lon") for row in records]
+        values = [row.get("value") for row in records]
+        stamps = [str(row.get("time") or "") for row in records if row.get("time")]
+        flight = self.dashboard_backend.snapshot().get("flight_id") or "Flight"
+        window = ""
+        if stamps:
+            window = (
+                f"{min(stamps).replace('T', ' ')} to "
+                f"{max(stamps).replace('T', ' ')} UTC"
+            )
+        image_format = str(request.get("format") or "pdf").casefold()
+        with tempfile.TemporaryDirectory() as directory:
+            stem = (
+                f"{safe_file_stem(flight)}_{instrument}_{gas}_map_"
+                f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
+            written = scientific_map.render_track_map(
+                latitudes, longitudes, values, Path(directory), stem,
+                title=f"CC-FLUX · {flight} · {instrument} {gas}",
+                subtitle=window,
+                value_label=f"{gas} ({unit})" if unit else gas,
+                colormap=str(request.get("colormap") or "viridis"),
+                log_scale=bool(request.get("log_scale", False)),
+                formats=(image_format,),
+                dpi=int(request.get("dpi") or 300),
+                cache_directory=self._basemap_cache(),
+            )
+            path = written[0]
+            body = path.read_bytes()
+        self.log_view(
+            f"Mapview exported {instrument} {gas} as a {image_format.upper()} figure "
+            f"from {len(records)} georeferenced sample(s)"
+        )
+        return path.name, body, scientific_map.media_type(image_format)
+
+    def _basemap_cache(self) -> Path:
+        with self.dashboard_backend._lock:
+            project = self.dashboard_backend._flight_project
+        root = (
+            Path(project.flight_output_root) if project is not None
+            else Path(self.root)
+        )
+        return root / "exports" / "_basemap_tiles"
 
     def export_map_pdf(self, request: dict[str, Any]) -> tuple[str, bytes]:
         """Convert the browser-composed, current visible map layout to a PDF."""
