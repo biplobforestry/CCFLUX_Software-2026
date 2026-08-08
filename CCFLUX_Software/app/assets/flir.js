@@ -449,7 +449,15 @@
       finally{clearTimeout(timeout);}
       $('flightName').textContent=response.flight_id||'No project';
       if(!response.ready){const message=response.message||response.processing_step||'FLIR processing has not run yet';$('statusText').textContent=message;$('summaryGrid').innerHTML=summaryCard('FLIR workspace','Not ready',message);return;}
-      payload=response.data;$('statusDot').classList.add('ready');$('statusText').textContent=response.temperature_ready?'FLIR temperature products and Noseboom map loaded':'FLIR acquisition products loaded · temperature and georeferencing are still running';
+      payload=response.data;$('statusDot').classList.add('ready');
+      // Three states, not two. A run that converted every frame and matched
+      // none is finished, and saying it is "still running" sent the reader
+      // looking for a job that had ended hours before.
+      $('statusText').textContent=
+        response.map_ready?'FLIR temperature products and Noseboom map loaded'
+        :response.temperature_ready
+          ?'FLIR temperature products loaded · no frame matched Noseboom navigation, so the map is empty'
+          :'FLIR acquisition products loaded · temperature and georeferencing are still running';
       // Drawing happens after the overlay is down and with a repaint between
       // each stage. Done in one synchronous run, the browser cannot repaint at
       // all, so the page stayed behind "Preparing FLIR workspace" for the whole
@@ -467,6 +475,9 @@
       describeWindow();
       await drawEverything();
       showView(pathView(),false);
+      // Poll only while something is still being produced. Retrying on an empty
+      // map meant a finished run was re-fetched every four seconds for as long
+      // as the page stayed open, and never changed.
       if(!response.temperature_ready){flirRetry=setTimeout(load,4000);}
     }catch(error){
       const busy=error.name==='AbortError';

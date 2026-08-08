@@ -2803,7 +2803,7 @@ class DashboardScanBackend:
                         payload.get("temperature_reason")
                         or "the temperature conversion produced no matched frame."
                     )
-                    if not payload.get("temperature_available")
+                    if not payload.get("map_available", payload.get("temperature_available"))
                     else
                     "FLIR acquisition plots, radiometric temperature plots, "
                     "thermal gallery, and Noseboom-matched map are ready."
@@ -2827,6 +2827,11 @@ class DashboardScanBackend:
                 "ready": bool(payload.get("available")),
                 "temperature_ready": bool(
                     payload.get("temperature_available")
+                ),
+                # Whether the map has anything on it, which is a different
+                # question from whether the temperature product exists.
+                "map_ready": bool(
+                    payload.get("map_available", payload.get("temperature_available"))
                 ),
                 "flight_id": project.flight_id if project else None,
                 "project_file": str(project.project_file) if project else None,
@@ -8192,9 +8197,6 @@ class DashboardScanBackend:
             selected_start, selected_end = self._instrument_processing_interval(
                 "flir"
             )
-            noseboom_points = tuple(
-                self._instruments["noseboom"].quicklook.get("points", ())
-            )
         if report is None or project is None:
             raise RuntimeError("Flight scan and project state are required")
 
@@ -8312,6 +8314,27 @@ class DashboardScanBackend:
                 )
 
         context.report_progress(88, "Matching temperature frames to Noseboom navigation")
+        # Read here, not when the task started. Converting a flight of frames to
+        # temperature takes hours, and Noseboom runs alongside: on Flight_CC0807
+        # this task began at 06:20:42 and took its navigation snapshot then,
+        # Noseboom published its points at 06:24:25, and the matching ran at
+        # 08:21:35 against the empty tuple captured two hours earlier. All 11 561
+        # frames converted and every one came out NO_NAVIGATION, which reads on
+        # the page as "process Noseboom first" for a flight where it already had.
+        with self._lock:
+            noseboom_points = tuple(
+                self._instruments["noseboom"].quicklook.get("points", ())
+            )
+        if not noseboom_points:
+            self.logger.log(
+                LogLevel.WARNING,
+                "flir-georeference",
+                "No processed Noseboom navigation is loaded, so the temperature "
+                "frames cannot be placed. Process Noseboom, then run FLIR "
+                "temperature again.",
+                instrument="flir",
+                processing_step="temperature-conversion,georeferencing",
+            )
         georeferenced = georeference_temperature_records(
             [
                 {
@@ -8404,7 +8427,13 @@ class DashboardScanBackend:
             browser_payload = dict(self._instruments["flir"].quicklook)
         browser_payload.update({
             "available": True,
-            "temperature_available": bool(matched),
+            # Two facts, not one. This used to be bool(matched), so a run that
+            # converted every frame but georeferenced none reported that
+            # temperature was not ready: the workspace said "temperature and
+            # georeferencing are still running" about a finished job and
+            # re-polled every four seconds for as long as it was left open.
+            "temperature_available": bool(converted),
+            "map_available": bool(matched),
             "temperature_reason": (
                 None if matched else
                 "Temperature was calculated, but no frame matched processed "

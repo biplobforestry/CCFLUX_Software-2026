@@ -1,4 +1,4 @@
-"""The frame index is built over the bytes needed, and survives the run.
+﻿"""The frame index is built over the bytes needed, and survives the run.
 
 Two costs were being paid on every FLIR run over Flight_CC0806's 32 GB export:
 
@@ -246,3 +246,95 @@ def test_the_task_windows_the_scan_and_shares_the_index():
     assert body.index("write_timestamp_index") < body.index(
         "_write_flir_index_coverage"
     )
+
+
+class TestNavigationIsReadWhenItIsUsed:
+    """Flight_CC0807: 11 561 frames converted, 0 georeferenced, on a flight
+    whose Noseboom had already run.
+
+    The task took its navigation snapshot at 06:20:42, Noseboom published its
+    points at 06:24:25, and the matching ran at 08:21:35 against the empty
+    tuple captured two hours earlier. Converting a flight of frames to
+    temperature takes hours and Noseboom runs alongside it, so the snapshot has
+    to be taken where it is used.
+    """
+
+    def _task(self) -> str:
+        source = (
+            Path(__file__).resolve().parents[1] / "app" / "scan_backend.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("def _flir_detailed_task(")
+        end = source.find("\n    def ", start + 1)
+        return source[start:end if end != -1 else None]
+
+    def test_the_points_are_read_after_the_frames_are_converted(self):
+        body = self._task()
+        read = body.index('self._instruments["noseboom"].quicklook.get("points"')
+        conversion = body.index("Radiometric temperature")
+        assert read > conversion, (
+            "the navigation snapshot is taken before the hours-long conversion"
+        )
+
+    def test_the_read_is_next_to_the_matching(self):
+        body = self._task()
+        read = body.index('self._instruments["noseboom"].quicklook.get("points"')
+        matching = body.index("georeference_temperature_records(")
+        assert 0 < matching - read < 900, (
+            "the snapshot has drifted away from the call that consumes it"
+        )
+
+    def test_it_is_read_only_once(self):
+        body = self._task()
+        assert body.count('self._instruments["noseboom"].quicklook.get("points"') == 1
+
+    def test_the_read_holds_the_lock(self):
+        body = self._task()
+        read = body.index('self._instruments["noseboom"].quicklook.get("points"')
+        assert "with self._lock:" in body[max(0, read - 200):read]
+
+    def test_absent_navigation_is_reported_rather_than_silent(self):
+        body = self._task()
+        assert "if not noseboom_points:" in body
+        assert "Process Noseboom, then run FLIR" in body
+
+
+
+class TestTemperatureDoneAndMapEmptyAreDifferentFacts:
+    """Flight_CC0807 converted 11 561 frames and georeferenced none.
+
+    temperature_available was bool(matched), so the finished run reported that
+    temperature was not ready: the workspace showed "temperature and
+    georeferencing are still running" and re-fetched every four seconds for as
+    long as it stayed open, while the dashboard showed the job complete.
+    """
+
+    BACKEND = (
+        Path(__file__).resolve().parents[1] / "app" / "scan_backend.py"
+    ).read_text(encoding="utf-8")
+    SCRIPT = (
+        Path(__file__).resolve().parents[1] / "app" / "assets" / "flir.js"
+    ).read_text(encoding="utf-8")
+
+    def test_temperature_availability_follows_the_conversion(self):
+        assert '"temperature_available": bool(converted),' in self.BACKEND
+        assert '"temperature_available": bool(matched),' not in self.BACKEND
+
+    def test_the_map_carries_its_own_flag(self):
+        assert '"map_available": bool(matched),' in self.BACKEND
+
+    def test_the_view_publishes_both(self):
+        assert '"temperature_ready": bool(' in self.BACKEND
+        assert '"map_ready": bool(' in self.BACKEND
+
+    def test_the_page_distinguishes_the_three_states(self):
+        assert "response.map_ready?" in self.SCRIPT
+        assert "so the map is empty" in self.SCRIPT
+
+    def test_a_finished_run_stops_polling(self):
+        """The retry must key on the product, not on the map."""
+        assert "if(!response.temperature_ready){flirRetry=setTimeout(load,4000);}" in self.SCRIPT
+        assert "if(!response.map_ready){flirRetry" not in self.SCRIPT
+
+    def test_the_summary_still_explains_an_empty_map(self):
+        assert 'payload.get("map_available"' in self.BACKEND
+        assert "temperature_reason" in self.BACKEND
