@@ -150,7 +150,7 @@
       chosen.push({
         key,
         colour: PALETTE[(countSeries() + chosen.length) % PALETTE.length],
-        width: 1.4,
+        width: 1.8,
       });
     }
     renderRows();
@@ -238,10 +238,13 @@
     const axis = {
       title: {
         text: `${labelOf(entry.key)}${unitOf(entry.key) ? ` (${unitOf(entry.key)})` : ''}`,
-        standoff: 6, font: {color: entry.colour, size: 11},
+        standoff: 8, font: {color: entry.colour, size: 14},
       },
-      tickfont: {color: entry.colour, size: 11},
-      linecolor: entry.colour, linewidth: 1.4, showline: true,
+      tickfont: {color: entry.colour, size: 14},
+      // Heavy enough to read as an axis rather than as a hairline, and to tell
+      // which of four scales a trace belongs to at a glance.
+      linecolor: entry.colour, linewidth: 2.4, showline: true,
+      ticks: 'outside', ticklen: 6, tickwidth: 2.0, tickcolor: entry.colour,
       zeroline: false, automargin: false,
       // Only the first axis draws a grid; one grid per series would be a mesh.
       showgrid: index === 0,
@@ -349,15 +352,18 @@
       const layout = {
         // Room outside the outermost axis for its own title and ticks, which
         // sit at a fixed paper position and are not automargined.
-        margin: {t: 8, b: 42, l: 62, r: counts.right ? 62 : 18},
-        font: {family: 'Inter,Segoe UI,Arial', size: 12, color: '#0d2b30'},
+        margin: {t: 10, b: 52, l: 74, r: counts.right ? 74 : 20},
+        font: {family: 'Inter,Segoe UI,Arial', size: 14, color: '#0d2b30'},
         paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: '#fff',
         showlegend: true,
-        legend: {orientation: 'h', y: 1.10, x: 0, font: {size: 11}},
+        legend: {orientation: 'h', y: 1.10, x: 0, font: {size: 13}},
         // The plot gives up the strip each stacked axis needs, so the axes sit
         // beside the data rather than on top of it.
         xaxis: {
           gridcolor: 'rgba(13,43,48,.12)',
+          linecolor: '#0d2b30', linewidth: 2.0, showline: true,
+          ticks: 'outside', ticklen: 6, tickwidth: 2.0,
+          tickfont: {size: 14},
           domain: [plan.left.length * AXIS_WIDTH,
                    1 - plan.right.length * AXIS_WIDTH],
         },
@@ -452,7 +458,11 @@
   async function loadRegion() {
     if (!state.region || state.busy) return;
     state.busy = true;
-    show('info', 'Reading the region…');
+    show('info', 'Reading the region and computing the wind rose…');
+    // Said in the panel the answer will appear in, not only in the bar at the
+    // top of the page, which is off screen once the rows are scrolled past.
+    $('windHint').textContent = 'Computing the wind rose over the selection…';
+    $('regionStats').innerHTML = '';
     try {
       state.analysis = await ask('/api/miro-rack/source/region', {
         region_start: state.region.start, region_end: state.region.end,
@@ -530,18 +540,20 @@
       };
     });
     Plotly.react('windRose', traces, {
-      margin: {l: 30, r: 30, t: 20, b: 20},
-      font: {family: 'Inter,Segoe UI,Arial', size: 12, color: '#0d2b30'},
+      margin: {l: 40, r: 40, t: 28, b: 28},
+      font: {family: 'Inter,Segoe UI,Arial', size: 14, color: '#0d2b30'},
       paper_bgcolor: 'rgba(0,0,0,0)',
       barmode: 'stack',
-      legend: {title: {text: 'm s⁻¹'}, font: {size: 11}},
+      legend: {title: {text: 'm s⁻¹'}, font: {size: 13}},
       // North at the top and clockwise: how a rose is read, and the opposite
       // of the plotting default.
       polar: {
         angularaxis: {direction: 'clockwise', rotation: 90,
                       tickmode: 'array', tickvals: [0, 45, 90, 135, 180, 225, 270, 315],
-                      ticktext: ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']},
-        radialaxis: {ticksuffix: '%', angle: 45, tickfont: {size: 10}},
+                      ticktext: ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'],
+                      tickfont: {size: 14}, linewidth: 2.0},
+        radialaxis: {ticksuffix: '%', angle: 45, tickfont: {size: 12},
+                     linewidth: 1.6},
       },
     }, {displaylogo: false, responsive: true});
   }

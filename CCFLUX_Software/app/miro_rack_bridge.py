@@ -1762,6 +1762,28 @@ function closeMapSync() {
             result["altitude"] = pd.to_numeric(
                 frame[altitude_column], errors="coerce"
             )
+        # What the air was doing, which the Mapview never needed and so was
+        # never carried. Without it the Source Investigation could place a
+        # region on the ground and then report that it held no wind record,
+        # while the Noseboom product it was reading had every column.
+        for wanted, names in (
+            ("wind_mps", ("wind_mps", "wind_speed_mps", "wind_speed")),
+            ("wind_dir_deg", ("wind_dir_deg", "wind_direction_deg",
+                              "wind_direction")),
+            ("wind_u_mps", ("wind_u_mps",)),
+            ("wind_v_mps", ("wind_v_mps",)),
+            ("wind_w_mps", ("wind_w_mps",)),
+            ("heading_deg", ("heading_deg", "track_deg", "track")),
+            ("ground_speed_mps", ("ground_speed_mps", "ground_speed")),
+            ("air_temp_degC", ("air_temp_degc", "air_temp_degC", "air_temp")),
+            ("rel_humidity_pct", ("rel_humidity_pct", "rel_humidity")),
+        ):
+            column = next(
+                (lookup.get(name) for name in names
+                 if lookup.get(name) is not None), None
+            )
+            if column is not None:
+                result[wanted] = pd.to_numeric(frame[column], errors="coerce")
         result = result.dropna(subset=["timestamp", "lat", "lon"])
         result = result[
             result["lat"].between(-90, 90) & result["lon"].between(-180, 180)

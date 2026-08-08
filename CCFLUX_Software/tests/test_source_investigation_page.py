@@ -15,6 +15,10 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("pandas")
+pytest.importorskip("scipy")
+
+import numpy as np
+import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "app" / "assets"
@@ -239,6 +243,78 @@ class TestTheHonestyOfTheDisplay:
         assert "/vendor/leaflet/leaflet.js" in PAGE
         assert "/vendor/leaflet/leaflet.css" in PAGE
         assert '"/vendor/leaflet/leaflet.js"' in SERVER
+
+
+class TestTheWindActuallyReachesThePage:
+    """The page placed a region on the map and then said it carried no wind
+    record, while the Noseboom product it was reading held every column. The
+    bridge's navigation was built for the Mapview, which needs a position and
+    nothing else, so the wind was dropped on the way through."""
+
+    def _navigation(self):
+        import numpy as np
+        import pandas as pd
+
+        from app.miro_rack_bridge import MiroRackBridge
+
+        points = pd.DataFrame({
+            "time": pd.date_range("2026-08-07 06:00", periods=120, freq="1s"),
+            "lat": 50.9 + np.linspace(0, 0.02, 120),
+            "lon": 6.6 + np.linspace(0, 0.02, 120),
+            "altitude_m": np.full(120, 400.0),
+            "wind_mps": np.full(120, 5.0),
+            "wind_dir_deg": np.full(120, 225.0),
+            "heading_deg": np.full(120, 90.0),
+            "ground_speed_mps": np.full(120, 12.0),
+        })
+        return MiroRackBridge._prepare_navigation(points)
+
+    @pytest.mark.parametrize("column", (
+        "wind_mps", "wind_dir_deg", "heading_deg", "ground_speed_mps",
+    ))
+    def test_the_column_survives_preparation(self, column):
+        assert column in self._navigation().columns
+
+    def test_a_rose_can_be_drawn_from_what_survives(self):
+        from app import source_investigation as engine
+
+        navigation = self._navigation()
+        miro = pd.DataFrame({
+            "timestamp": pd.date_range("2026-08-07 06:00", periods=120, freq="1s"),
+            "NO2 wet": np.linspace(1.0, 2.0, 120) / 1e9,
+        })
+        frame = engine.combined_frame(miro, navigation)
+        region = engine.parse_region({
+            "region_start": "2026-08-07T06:00:10",
+            "region_end": "2026-08-07T06:01:50",
+        })
+
+        rose = engine.investigate_region(frame, region)["windrose"]
+
+        assert rose is not None, "the region still reports no wind record"
+        assert rose["samples"] > 0
+        strongest = max(rose["petals"], key=lambda petal: petal["count"])
+        assert strongest["label"] == "SW"
+
+    def test_the_position_columns_are_still_required(self):
+        """The Mapview depends on this function; carrying more must not make
+        it accept a frame with no fix in it."""
+        import pandas as pd
+
+        from app.miro_rack_bridge import MiroRackBridge
+
+        with pytest.raises(ValueError, match="latitude"):
+            MiroRackBridge._prepare_navigation(
+                pd.DataFrame({"time": pd.date_range("2026-08-07", periods=3)})
+            )
+
+
+class TestItSaysWhatItIsDoing:
+    def test_the_panel_says_it_is_computing(self):
+        """The bar at the top of the page is off screen once the rows are
+        scrolled past, which is exactly when a region is chosen."""
+        block = SCRIPT[SCRIPT.index("async function loadRegion("):]
+        assert "Computing the wind rose" in block[:600]
 
 
 class TestTheExport:
