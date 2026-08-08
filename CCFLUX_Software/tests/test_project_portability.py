@@ -1,4 +1,4 @@
-"""A project must find its own products after it is moved.
+﻿"""A project must find its own products after it is moved.
 
 A .ccflux carries every product inside it, but records where each one was when
 it was written. Process on Windows, open the project on a Mac or from a USB
@@ -22,8 +22,13 @@ from core.flight_project import (
     relocate_product_path,
 )
 
-WINDOWS = r"C:\Output\Flight_2707\quicklooks\flir_browser.json"
-POSIX = "/home/ops/Output/Flight_2707/quicklooks/flir_browser.json"
+# The point of these paths is that they belong to the machine that wrote the
+# project and not to this one. C:\Output\Flight_2707\... was a real tree on an
+# operator's own disk, so relocate_product_path rightly returned that file
+# untouched and three cases failed on the very platform they describe. The
+# folder name below is the fixture's own, and no campaign writes it.
+WINDOWS = r"C:\CCFLUX_ForeignProjectFixture\Flight_2707\quicklooks\flir_browser.json"
+POSIX = "/home/ops/CCFLUX_ForeignProjectFixture/Flight_2707/quicklooks/flir_browser.json"
 
 
 @pytest.fixture
@@ -48,8 +53,16 @@ def test_a_foreign_path_is_resolved_against_the_extracted_tree(recorded, output_
 
 
 def test_a_windows_path_is_not_treated_as_one_filename(output_root):
-    """The defect this guards: on POSIX the whole Windows path is `.name`."""
-    assert Path(WINDOWS).name == WINDOWS.replace("/", "\\")
+    """The defect this guards: on POSIX the whole Windows path is `.name`.
+
+    Stated with an explicit POSIX parser rather than with Path, because Path is
+    this platform's flavour: on Windows it splits the string correctly and the
+    premise read as false, so the case failed on the very platform whose paths
+    it is about.
+    """
+    from pathlib import PurePosixPath
+
+    assert PurePosixPath(WINDOWS).name == WINDOWS
 
     assert relocate_product_path(WINDOWS, output_root).name == "flir_browser.json"
 
@@ -191,9 +204,7 @@ def test_the_extracted_copy_is_preferred_when_it_is_there(tmp_path, output_root)
     newer = output_root / "quicklooks" / "flir_browser.json"
     newer.write_text(json.dumps({"from": "disk"}), encoding="utf-8")
 
-    resolved = relocate_product_path(
-        r"C:\Output\Flight_2707\quicklooks\flir_browser.json", output_root
-    )
+    resolved = relocate_product_path(WINDOWS, output_root)
 
     assert json.loads(resolved.read_text(encoding="utf-8"))["from"] == "disk"
     assert json.loads(read_bundled_product(project, resolved))["from"] == "archive"
@@ -390,3 +401,4 @@ def test_a_newer_result_is_never_replaced_by_the_restored_one(tmp_path):
     backend._reapply_restored_products()
 
     assert backend._instruments["noseboom"].quicklook == {"from": "this session"}
+

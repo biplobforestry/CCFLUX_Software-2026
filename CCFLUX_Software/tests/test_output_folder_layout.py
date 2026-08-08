@@ -99,8 +99,13 @@ def test_every_produced_file_is_bundled(tmp_path):
             name[len("products/"):] for name in archive.namelist()
             if name.startswith("products/")
         }
+    # as_posix, because a zip entry always separates with "/" while str() of a
+    # Windows path gives "\". Comparing the two raw made every file look left
+    # behind on Windows, so this case reported a bundling failure that was not
+    # one and could not report a real one.
     on_disk = {
-        str(path.relative_to(root)) for path in root.rglob("*") if path.is_file()
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*") if path.is_file()
     }
     assert on_disk <= bundled, f"left behind: {sorted(on_disk - bundled)}"
 
