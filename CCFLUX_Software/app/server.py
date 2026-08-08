@@ -178,6 +178,20 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._send_file(
                 self.server.dashboard_file.with_name("trace_gas.html")
             )
+        elif path == "/miro_rack/source_investigation":
+            self.server.miro_rack.log_view("Source Investigation page opened")
+            self._send_file(
+                self.server.dashboard_file.with_name("source_investigation.html")
+            )
+        elif path == "/miro_rack/source_investigation.js":
+            self._send_javascript_bundle(
+                self.server.dashboard_file.with_name("source_investigation.js")
+            )
+        elif path == "/api/miro-rack/source/channels":
+            self._send_json(
+                HTTPStatus.OK,
+                self.server.miro_rack.source_investigation_channels(),
+            )
         elif path == "/miro_rack/trace_gas.js":
             # Through the bundle helper, not _send_file: that one takes its
             # content type from mimetypes, and a Windows registry that maps .js
@@ -648,6 +662,27 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     HTTPStatus.OK,
                     self.server.miro_rack.trace_gas_investigation(self._json_body()),
+                )
+            elif path == "/api/miro-rack/source/rows":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.miro_rack.source_investigation_rows(
+                        self._json_body()
+                    ),
+                )
+            elif path == "/api/miro-rack/source/region":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.miro_rack.source_investigation_region(
+                        self._json_body()
+                    ),
+                )
+            elif path == "/api/miro-rack/source/export":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.miro_rack.export_source_investigation(
+                        self._json_body()
+                    ),
                 )
             elif path == "/api/miro-rack/trace-gas/export":
                 self._send_json(

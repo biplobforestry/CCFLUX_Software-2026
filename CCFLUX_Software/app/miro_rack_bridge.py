@@ -187,7 +187,7 @@ class MiroRackBridge:
             """<body>
 <div class="ccflux-program-bar">
   <div class="ccflux-program-title"><iframe src="/campaign-logo.html" title="CC-FLUX 2026 campaign logo" scrolling="no"></iframe><div><strong>CC-FLUX Campaign 2026</strong><small>Integrated Post-Flight Scientific Payload Review &middot; MIRO Rack</small></div></div>
-  <div class="ccflux-program-actions"><span id="ccfluxMainInterval">Using the main GUI time filter</span><button type="button" onclick="window.location.href='/'">Main GUI</button><button type="button" onclick="window.location.href='/#time-filter'">Main Time Filter</button><button type="button" id="ccfluxInvestigationFilter">Investigation Time Filter</button><button type="button" class="ccflux-refresh-button" id="ccfluxMiroRefresh">Refresh</button><button type="button" class="ccflux-map-button" id="ccfluxTraceGas" title="Attribute each species to cell temperature, altitude and time, and separate a drift from the atmosphere">Trace gas investigation</button><button type="button" class="ccflux-map-button" id="ccfluxMiroMap">Mapview</button></div>
+  <div class="ccflux-program-actions"><span id="ccfluxMainInterval">Using the main GUI time filter</span><button type="button" onclick="window.location.href='/'">Main GUI</button><button type="button" onclick="window.location.href='/#time-filter'">Main Time Filter</button><button type="button" id="ccfluxInvestigationFilter">Investigation Time Filter</button><button type="button" class="ccflux-refresh-button" id="ccfluxMiroRefresh">Refresh</button><button type="button" class="ccflux-map-button" id="ccfluxTraceGas" title="Attribute each species to cell temperature, altitude and time, and separate a drift from the atmosphere">Trace gas investigation</button><button type="button" class="ccflux-map-button" id="ccfluxSourceInvestigation" title="Read the ten species together over a chosen stretch, then see the ground under it and the direction the air came from">Source investigation</button><button type="button" class="ccflux-map-button" id="ccfluxMiroMap">Mapview</button></div>
 </div>""",
             1,
         )
@@ -215,6 +215,8 @@ let ccfluxLegacyApplyFilters = null;
   // not instead of it.
   document.getElementById('ccfluxTraceGas').onclick = () =>
     window.open('/miro_rack/trace_gas', '_blank', 'noopener');
+  document.getElementById('ccfluxSourceInvestigation').onclick = () =>
+    window.open('/miro_rack/source_investigation', '_blank', 'noopener');
   document.getElementById('ccfluxInvestigationFilter').onclick = openInvestigationTimeFilter;
   ccfluxLegacyApplyFilters = typeof window.applyFilters === 'function'
     ? window.applyFilters.bind(window) : null;
@@ -1153,6 +1155,116 @@ function closeMapSync() {
             "files": [path.name for path in written],
             "directory": str(root),
         }
+
+    # -- Source Investigation ----------------------------------------------
+    #
+    # The question after "is this signal real": the enhancement being real,
+    # what was the Zeppelin over, and where had the air come from. The gases
+    # are read together on stacked rows, a region is chosen by eye, and the
+    # wind over that region says which direction to look in.
+
+    def _source_frame(self):
+        from . import source_investigation as engine
+
+        miro_data, _ = self._loaded_gas_frames()
+        return engine.combined_frame(
+            miro_data, self._investigation_navigation(),
+            miro_module=self.module.miro,
+        ), miro_data
+
+    def source_investigation_channels(self) -> dict[str, Any]:
+        """What this flight can draw, so the page offers nothing it has not got."""
+        from . import source_investigation as engine
+
+        miro_data, _ = self._loaded_gas_frames()
+        navigation = self._investigation_navigation()
+        catalogue = engine.channel_catalogue(miro_data, navigation)
+        frame, _ = self._source_frame()
+        return {
+            "channels": catalogue,
+            "navigation": navigation is not None,
+            "start": frame["timestamp"].min().isoformat(),
+            "end": frame["timestamp"].max().isoformat(),
+            "samples": int(len(frame)),
+            "defaults": {
+                "rows": engine.DEFAULT_ROWS,
+                "smoothing": engine.DEFAULT_SMOOTHING,
+                "smoothing_seconds": engine.DEFAULT_SMOOTHING_SECONDS,
+                "polynomial_order": engine.DEFAULT_POLYNOMIAL_ORDER,
+                "maximum_rows": engine.MAXIMUM_ROWS,
+                "methods": list(engine.SMOOTHING_METHODS),
+            },
+        }
+
+    def source_investigation_rows(self, request: dict[str, Any]) -> dict[str, Any]:
+        from . import source_investigation as engine
+
+        frame, _ = self._source_frame()
+        filters = engine.parse_filters(request)
+        payload = engine.build_rows(frame, filters)
+        self.log_view(
+            f"Source Investigation drew {payload['shown']:,} of "
+            f"{payload['samples']:,} samples, {filters.smoothing} "
+            f"{filters.smoothing_seconds} s"
+        )
+        return payload
+
+    def source_investigation_region(self, request: dict[str, Any]) -> dict[str, Any]:
+        from . import source_investigation as engine
+
+        frame, _ = self._source_frame()
+        region = engine.parse_region(request)
+        payload = engine.investigate_region(frame, region)
+        payload["track"] = engine.region_track(
+            self._investigation_navigation(), region
+        )
+        rose = payload.get("windrose") or {}
+        self.log_view(
+            "Source Investigation examined "
+            f"{payload['region']['seconds']:.0f} s "
+            f"({payload['region']['samples']:,} samples)"
+            + (f", wind rose over {rose.get('samples', 0)} samples" if rose else "")
+        )
+        return payload
+
+    def export_source_investigation(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        from . import source_investigation as engine, source_investigation_export
+
+        frame, _ = self._source_frame()
+        filters = engine.parse_filters(request)
+        rows = engine.build_rows(frame, filters)
+        region = None
+        analysis = None
+        if request.get("region_start") and request.get("region_end"):
+            region = engine.parse_region(request)
+            analysis = engine.investigate_region(frame, region)
+            analysis["track"] = engine.region_track(
+                self._investigation_navigation(), region
+            )
+        with self.dashboard_backend._lock:
+            project = self.dashboard_backend._flight_project
+        if project is None:
+            raise RuntimeError(
+                "Open or restore a Flight Project before exporting, so the "
+                "figure is written beside the rest of the flight's products."
+            )
+        root = Path(project.flight_output_root) / "exports" / "source_investigation"
+        flight = getattr(project, "flight_id", None) or "flight"
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        written = source_investigation_export.render(
+            rows, analysis, request.get("layout") or [], root,
+            f"SourceInvestigation_{flight}_{stamp}",
+            flight_name=str(flight),
+            formats=request.get("formats"),
+            dpi=int(request.get("dpi") or 600),
+            cache_directory=Path(project.flight_output_root) / "cache" / "basemap_tiles",
+        )
+        self.log_view(
+            f"Source Investigation exported {len(written)} file(s) to {root}"
+        )
+        return {"files": [path.name for path in written], "directory": str(root)}
 
     def export_map_figure(self, request: dict[str, Any]) -> tuple[str, bytes, str]:
         """Draw one map layer as a figure, from the numbers rather than the canvas.

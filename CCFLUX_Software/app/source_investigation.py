@@ -482,7 +482,12 @@ def _envelope(
     padded = np.full(buckets * step, np.nan)
     padded[: len(values)] = values
     blocks = padded.reshape(buckets, step)
-    with np.errstate(invalid="ignore"):
+    import warnings
+
+    with warnings.catch_warnings():
+        # A bucket the instrument reported nothing in is an expected gap, not a
+        # fault worth a line of console output per channel per export.
+        warnings.simplefilter("ignore", RuntimeWarning)
         low = np.nanmin(blocks, axis=1)
         high = np.nanmax(blocks, axis=1)
     return {"low": _jsonable(low), "high": _jsonable(high)}
