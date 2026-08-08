@@ -143,8 +143,15 @@ science:
 | Group | Capacity rule | Jobs |
 |---|---|---|
 | `FAST_SCIENCE` | `total − metadata − detailed` | noseboom, miro, picarro, opc_hbx4, opc_hbx5, partector, ins_gimbal, sif |
-| `CAMERA_METADATA` | 1 if `total ≥ 2`, else 0 | flir_quick, gopro_quick, micasense_quick |
-| `CAMERA_DETAILED` | 1 if `total ≥ 4`, else 0 | micasense_detailed, flir_detailed |
+| `CAMERA_METADATA` | `min(3, total ÷ 3)` if `total ≥ 2`, else 0 | flir_quick, gopro_quick, micasense_quick |
+| `CAMERA_DETAILED` | 1 if `total ≥ 4`, else 0 | none queued; the FLIR conversion runs inside `flir_quick` |
+
+`CAMERA_METADATA` held one worker at any allocation, so MicaSense — hours over
+9 999 captures — ran alone while FLIR and GoPro waited behind it on a 16-core
+machine exactly as on a 4-core one. It now grows to the number of jobs that
+exist. Two properties hold whatever the allocation: fast science keeps at least
+one worker, so a camera run can never stall the flight instruments, and the
+cameras never take more than a third of the machine.
 
 The campaign processing order is declared once, as
 `core/priority_manager.CAMPAIGN_PROCESSING_ORDER`:

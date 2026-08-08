@@ -317,11 +317,40 @@ class ProcessingScheduler:
         self.dispatch()
 
 
+# FLIR, GoPro and MicaSense are one job each, and they are the whole of
+# CAMERA_METADATA. Capacity beyond three would reserve a worker for a job that
+# does not exist, so three is the ceiling however large the allocation.
+CAMERA_METADATA_JOB_COUNT = 3
+# The share of the machine the cameras may take. A camera job is long - MicaSense
+# runs for hours over 9 999 captures - and the pools exist so that length cannot
+# delay the flight instruments, which is the whole point of separating them.
+CAMERA_WORKER_SHARE = 3
+
+
 def worker_group_capacities(total_workers: int) -> dict[WorkerGroup, int]:
+    """How many jobs each pool may run at once, for a given CPU allocation.
+
+    CAMERA_METADATA held one worker whatever the allocation, so MicaSense ran
+    alone and FLIR and GoPro waited behind it however many cores the machine
+    had. It now grows with the allocation, up to the number of jobs that exist.
+
+    Two things hold whatever the arithmetic: fast science keeps at least one
+    worker, so a camera run can never stall the flight instruments; and the
+    cameras never take more than a third of the allocation.
+    """
     if total_workers <= 0:
         return {group: 0 for group in WorkerGroup}
-    metadata = 1 if total_workers >= 2 else 0
+    # Unchanged. The group has no queued jobs today - the FLIR conversion runs
+    # inside the FLIR job - so scaling it would reserve workers for nothing,
+    # while dropping it to zero would leave any future job queued in silence.
     detailed = 1 if total_workers >= 4 else 0
+    metadata = 0
+    if total_workers >= 2:
+        metadata = min(
+            CAMERA_METADATA_JOB_COUNT,
+            max(1, total_workers // CAMERA_WORKER_SHARE),
+            max(1, total_workers - detailed - 1),
+        )
     fast = total_workers - metadata - detailed
     return {
         WorkerGroup.FAST_SCIENCE: fast,

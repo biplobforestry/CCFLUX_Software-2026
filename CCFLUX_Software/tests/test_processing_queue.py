@@ -275,3 +275,67 @@ def test_camera_workers_never_consume_all_workers():
             + capacities[WorkerGroup.CAMERA_DETAILED]
         )
         assert camera < workers
+
+
+class TestTheCameraPoolGrowsWithTheAllocation:
+    """CAMERA_METADATA held one worker whatever the machine had.
+
+    Its three jobs - FLIR, GoPro, MicaSense - therefore ran strictly one after
+    another, and MicaSense runs for hours over 9 999 captures, so the other two
+    waited behind it on a 16-core machine exactly as on a 4-core one.
+    """
+
+    def test_a_small_allocation_is_unchanged(self):
+        for workers, expected in ((1, 0), (2, 1), (3, 1), (4, 1), (5, 1)):
+            assert (
+                worker_group_capacities(workers)[WorkerGroup.CAMERA_METADATA]
+                == expected
+            ), workers
+
+    def test_it_grows_once_there_is_room(self):
+        assert worker_group_capacities(6)[WorkerGroup.CAMERA_METADATA] == 2
+        assert worker_group_capacities(10)[WorkerGroup.CAMERA_METADATA] == 3
+
+    def test_it_never_exceeds_the_jobs_that_exist(self):
+        from core.priority_manager import DEFAULT_PROCESSING_JOBS
+        from core.processing_manager import CAMERA_METADATA_JOB_COUNT
+
+        declared = sum(
+            1 for job in DEFAULT_PROCESSING_JOBS
+            if job[3] is WorkerGroup.CAMERA_METADATA
+        )
+        assert CAMERA_METADATA_JOB_COUNT == declared
+        for workers in (12, 16, 32, 64):
+            assert (
+                worker_group_capacities(workers)[WorkerGroup.CAMERA_METADATA]
+                <= declared
+            )
+
+    def test_fast_science_always_keeps_a_worker(self):
+        """A camera run must never be able to stall the flight instruments."""
+        for workers in range(1, 65):
+            assert worker_group_capacities(workers)[WorkerGroup.FAST_SCIENCE] >= 1
+
+    def test_the_cameras_never_take_more_than_a_third(self):
+        from core.processing_manager import CAMERA_WORKER_SHARE
+
+        for workers in range(6, 65):
+            capacities = worker_group_capacities(workers)
+            camera = (
+                capacities[WorkerGroup.CAMERA_METADATA]
+                + capacities[WorkerGroup.CAMERA_DETAILED]
+            )
+            assert camera <= max(2, workers // CAMERA_WORKER_SHARE + 1), workers
+
+    def test_every_worker_is_given_out(self):
+        for workers in range(1, 65):
+            assert sum(worker_group_capacities(workers).values()) == workers
+
+    def test_the_detailed_pool_is_untouched(self):
+        """It has no queued jobs, so scaling it would reserve workers for
+        nothing; zero would leave a future job queued in silence."""
+        for workers, expected in ((1, 0), (3, 0), (4, 1), (32, 1)):
+            assert (
+                worker_group_capacities(workers)[WorkerGroup.CAMERA_DETAILED]
+                == expected
+            ), workers
