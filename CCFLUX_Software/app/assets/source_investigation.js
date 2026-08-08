@@ -206,9 +206,74 @@
       const plot = document.createElement('div');
       plot.className = 'row-plot';
       plot.id = `plot${index}`;
+      plot.style.height = `${rowHeight(plan)}px`;
       block.append(head, plot);
       host.appendChild(block);
     });
+  }
+
+  // Every series gets its own scale, its own ticks and its own colour on them.
+  // Sharing one axis between CO at 20 000 ppb and N2O at 300 flattens the
+  // second into the axis line: the reader sees a straight trace and concludes
+  // nothing happened, when what happened was that the scale belonged to the
+  // other species.
+  const AXIS_WIDTH = 0.052;   // paper fraction one stacked axis occupies
+  const ROW_BASE_HEIGHT = 330;
+  const ROW_HEIGHT_PER_AXIS = 46;
+
+  function rowHeight(plan) {
+    // Adding axes takes width from the plot, and stacking series takes room in
+    // the legend; without growing, a row with six series is a squeezed strip.
+    const axes = plan.left.length + plan.right.length;
+    return ROW_BASE_HEIGHT + ROW_HEIGHT_PER_AXIS * Math.max(0, axes - 2);
+  }
+
+  function axisFor(entry, index, side, order, counts) {
+    const name = index === 0 ? 'yaxis' : `yaxis${index + 1}`;
+    // The first series chosen sits nearest the plot and later ones stack
+    // outwards, so adding a series does not move the ones already read.
+    const outward = (side === 'left' ? counts.left : counts.right) - 1 - order;
+    const axis = {
+      title: {
+        text: `${labelOf(entry.key)}${unitOf(entry.key) ? ` (${unitOf(entry.key)})` : ''}`,
+        standoff: 6, font: {color: entry.colour, size: 11},
+      },
+      tickfont: {color: entry.colour, size: 11},
+      linecolor: entry.colour, linewidth: 1.4, showline: true,
+      zeroline: false, automargin: false,
+      // Only the first axis draws a grid; one grid per series would be a mesh.
+      showgrid: index === 0,
+      gridcolor: 'rgba(13,43,48,.12)',
+      side,
+      anchor: 'free',
+      position: side === 'left'
+        ? Math.max(0, outward * AXIS_WIDTH)
+        : Math.min(1, 1 - outward * AXIS_WIDTH),
+    };
+    if (index > 0) axis.overlaying = 'y';
+    const range = rangeFor(entry);
+    if (range) axis.range = range;
+    return {name, axis, ref: index === 0 ? 'y' : `y${index + 1}`};
+  }
+
+  // The scale follows the drawn line, not the envelope. Autoscaled to include
+  // every raw excursion, one bad sample sets the range and the trace collapses
+  // onto the axis: a flight whose CO sits near 200 ppb was being drawn on a
+  // 0-20 000 axis because of a handful of spikes, and read as a flat line.
+  // The band still draws, and where it runs past the top of the axis it is
+  // clipped there, which is the visible sign that something exceeded the view.
+  function rangeFor(entry) {
+    const values = (state.data.series[entry.key] || [])
+      .filter((value) => value !== null && Number.isFinite(value));
+    if (values.length < 2) return null;
+    let low = Math.min(...values);
+    let high = Math.max(...values);
+    if (!(high > low)) {
+      const pad = Math.abs(high) * 0.05 || 1;
+      return [low - pad, high + pad];
+    }
+    const pad = (high - low) * 0.08;
+    return [low - pad, high + pad];
   }
 
   function traceFor(entry, axis) {
@@ -259,34 +324,42 @@
     state.rows.forEach((plan, index) => {
       const target = `plot${index}`;
       if (!document.getElementById(target)) return;
-      const traces = [];
-      for (const entry of plan.left) {
-        const band = bandFor(entry, 'y'); if (band) traces.push(band);
-      }
-      for (const entry of plan.right) {
-        const band = bandFor(entry, 'y2'); if (band) traces.push(band);
-      }
-      for (const entry of plan.left) {
-        const trace = traceFor(entry, 'y'); if (trace) traces.push(trace);
-      }
-      for (const entry of plan.right) {
-        const trace = traceFor(entry, 'y2'); if (trace) traces.push(trace);
-      }
+      const entries = [
+        ...plan.left.map((entry, order) => ({entry, side: 'left', order})),
+        ...plan.right.map((entry, order) => ({entry, side: 'right', order})),
+      ];
+      const counts = {left: plan.left.length, right: plan.right.length};
       const layout = {
-        margin: {l: 66, r: plan.right.length ? 66 : 18, t: 8, b: 34},
+        // Room outside the outermost axis for its own title and ticks, which
+        // sit at a fixed paper position and are not automargined.
+        margin: {t: 8, b: 42, l: 62, r: counts.right ? 62 : 18},
         font: {family: 'Inter,Segoe UI,Arial', size: 12, color: '#0d2b30'},
         paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: '#fff',
         showlegend: true,
-        legend: {orientation: 'h', y: 1.16, x: 0, font: {size: 11}},
-        xaxis: {gridcolor: 'rgba(13,43,48,.12)', automargin: true},
-        yaxis: {title: {text: axisTitle(plan.left), standoff: 8},
-                gridcolor: 'rgba(13,43,48,.12)', automargin: true},
+        legend: {orientation: 'h', y: 1.10, x: 0, font: {size: 11}},
+        // The plot gives up the strip each stacked axis needs, so the axes sit
+        // beside the data rather than on top of it.
+        xaxis: {
+          gridcolor: 'rgba(13,43,48,.12)',
+          domain: [plan.left.length * AXIS_WIDTH,
+                   1 - plan.right.length * AXIS_WIDTH],
+        },
         dragmode: 'select', selectdirection: 'h', hovermode: 'x',
       };
-      if (plan.right.length) {
-        layout.yaxis2 = {title: {text: axisTitle(plan.right), standoff: 8},
-                         overlaying: 'y', side: 'right', showgrid: false,
-                         automargin: true};
+      const traces = [];
+      entries.forEach(({entry, side, order}, index) => {
+        const {name, axis, ref} = axisFor(entry, index, side, order, counts);
+        layout[name] = axis;
+        const band = bandFor(entry, ref);
+        if (band) traces.push(band);
+      });
+      entries.forEach(({entry, side, order}, index) => {
+        const {ref} = axisFor(entry, index, side, order, counts);
+        const trace = traceFor(entry, ref);
+        if (trace) traces.push(trace);
+      });
+      if (!entries.length) {
+        layout.yaxis = {title: {text: 'Right-click an axis to choose a series'}};
       }
       if (state.region) {
         layout.shapes = [{
@@ -296,9 +369,12 @@
           layer: 'below',
         }];
       }
+      const element = document.getElementById(target);
+      // Re-measured on every draw: adding an axis through the menu has to make
+      // the row taller there and then, not only on the next Update.
+      element.style.height = `${rowHeight(plan)}px`;
       Plotly.react(target, traces, layout,
                    {displaylogo: false, responsive: true}).then(() => {
-        const element = document.getElementById(target);
         if (element.dataset.wired === '1') return;
         element.dataset.wired = '1';
         element.on('plotly_selected', (event) => {
@@ -491,9 +567,11 @@
       renderRows();
       drawRows();
       const smoothing = state.data.smoothing || {};
+      const ambient = state.data.ambient || {};
       $('drawNote').textContent =
         `${state.data.shown.toLocaleString()} of ${state.data.samples.toLocaleString()} ` +
-        `samples drawn (every ${state.data.decimation}). ${smoothing.note || ''}`;
+        `samples drawn (every ${state.data.decimation}). ` +
+        `${ambient.note ? ambient.note + ' ' : ''}${smoothing.note || ''}`;
       clearMessage();
     } catch (error) {
       show('error', error.message);

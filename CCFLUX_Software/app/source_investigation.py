@@ -43,6 +43,17 @@ GAS_CHANNELS = (
 # put the two on one panel.
 HOUSEKEEPING_CHANNELS = ("T Cell C", "Outside T", "Laser housing T", "p Cell")
 
+# The MIRO switches between ambient air and zero air on a solenoid, and what it
+# reports while that valve is over is the calibration, not the atmosphere. Left
+# in, Flight_CC0807 showed CO reaching tens of thousands of ppb - a number no
+# reader would believe and none should be shown. Ambient is valve state 0.
+VALVE_COLUMN = "VValve 0"
+AMBIENT_VALVE_STATE = 0
+# The cell does not clear the instant the valve returns. The validated analysis
+# discards this much of each ambient episode, and so does this page, or the
+# decay from zero air is drawn as a plume.
+SETTLE_SECONDS = 30.0
+
 # What the navigation record contributes. Altitude first because it is the one
 # an operator reaches for; the rest describe the air the sample was taken in.
 NAVIGATION_CHANNELS = (
@@ -363,7 +374,8 @@ def combined_frame(
         name for name in (*GAS_CHANNELS, *HOUSEKEEPING_CHANNELS)
         if name in miro_data.columns
     ]
-    frame = miro_data[["timestamp", *columns]].dropna(subset=["timestamp"]).copy()
+    carried = [*columns, VALVE_COLUMN] if VALVE_COLUMN in miro_data.columns else columns
+    frame = miro_data[["timestamp", *carried]].dropna(subset=["timestamp"]).copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
     frame = frame.dropna(subset=["timestamp"]).sort_values("timestamp")
     # Mole fractions to the units every label on the page states.
@@ -371,6 +383,7 @@ def combined_frame(
         if name in GAS_CHANNELS:
             _, scale = gas_unit_scale(name, miro_module)
             frame[name] = pd.to_numeric(frame[name], errors="coerce") * scale
+    frame = _ambient_only(frame, columns)
     if navigation is not None and len(navigation):
         wanted = [
             name for name in NAVIGATION_CHANNELS if name in navigation.columns
@@ -384,6 +397,54 @@ def combined_frame(
                 tolerance=pd.Timedelta(seconds=1),
             )
     return frame.reset_index(drop=True)
+
+
+def _ambient_only(frame: pd.DataFrame, gases: Sequence[str]) -> pd.DataFrame:
+    """Blank the gases wherever the instrument was not sampling the atmosphere.
+
+    The valve episodes are left as gaps rather than dropped, so the time axis
+    stays continuous and the reader can see that the record was interrupted
+    instead of finding two ambient stretches joined into one apparent trend.
+
+    The samples are counted and reported, because a page that silently removes
+    a third of a flight is worse than one that never removed anything.
+    """
+    if VALVE_COLUMN not in frame.columns:
+        frame.attrs["ambient"] = {"available": False}
+        return frame
+    valve = pd.to_numeric(frame[VALVE_COLUMN], errors="coerce").round()
+    valve = valve.where(valve.isin([0, 1])).ffill().bfill()
+    ambient = valve.eq(AMBIENT_VALVE_STATE)
+    if not ambient.any():
+        # Every sample is calibration: blanking them all would leave an empty
+        # page with no reason given, so the record is left alone and flagged.
+        frame.attrs["ambient"] = {
+            "available": True, "kept": 0, "removed": int(len(frame)),
+            "note": "Every MIRO sample in this flight is a zero-air episode.",
+        }
+        return frame
+    # The cell clears over seconds, not instantly, so the start of each ambient
+    # episode still holds the decay from zero air.
+    episode = valve.ne(valve.shift()).cumsum()
+    since = frame["timestamp"] - frame.groupby(episode)["timestamp"].transform("first")
+    settled = ambient & (since >= pd.Timedelta(seconds=SETTLE_SECONDS))
+    removed = int((~settled).sum())
+    blanked = frame.copy()
+    for name in gases:
+        if name in GAS_CHANNELS:
+            blanked.loc[~settled, name] = np.nan
+    blanked.attrs["ambient"] = {
+        "available": True,
+        "kept": int(settled.sum()),
+        "removed": removed,
+        "settle_seconds": SETTLE_SECONDS,
+        "note": (
+            f"{removed:,} samples are zero-air calibration or the "
+            f"{SETTLE_SECONDS:g} s settling after it, and carry no atmospheric "
+            "value. They are left as gaps rather than joined over."
+        ),
+    }
+    return blanked
 
 
 def wind_direction_from_components(frame: pd.DataFrame) -> pd.Series | None:
@@ -422,7 +483,7 @@ def build_rows(frame: pd.DataFrame, filters: Filters) -> dict[str, Any]:
     raw: dict[str, list[float | None]] = {}
     envelope: dict[str, dict[str, list[float | None]]] = {}
     for name in window.columns:
-        if name == "timestamp":
+        if name in ("timestamp", VALVE_COLUMN):
             continue
         values = pd.to_numeric(window[name], errors="coerce").to_numpy(dtype=float)
         if not np.isfinite(values).any():
@@ -451,6 +512,7 @@ def build_rows(frame: pd.DataFrame, filters: Filters) -> dict[str, Any]:
         "samples": int(len(window)),
         "shown": int(len(shown_index)),
         "decimation": int(step),
+        "ambient": dict(frame.attrs.get("ambient") or {"available": False}),
         "smoothing": {
             "method": filters.smoothing,
             "seconds": filters.smoothing_seconds,

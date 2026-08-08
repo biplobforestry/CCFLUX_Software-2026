@@ -93,9 +93,42 @@ class TestWhatTheOperatorAskedFor:
             assert f'value="{method}"' in PAGE
         assert 'id="smoothSeconds"' in PAGE
 
-    def test_each_row_has_a_left_and_a_right_axis(self):
+    def test_each_series_gets_its_own_scale_and_ticks(self):
+        """Sharing one axis between CO at 20 000 ppb and N2O at 300 flattens
+        the second onto the axis line, and it reads as nothing happening."""
         assert "for (const side of ['left', 'right'])" in SCRIPT
-        assert "yaxis2" in SCRIPT
+        assert "function axisFor(" in SCRIPT
+        block = SCRIPT[SCRIPT.index("function axisFor("):]
+        block = block[: block.index("function rangeFor(")]
+        assert "overlaying = 'y'" in block
+        assert "anchor: 'free'" in block
+        assert "position:" in block
+        # The ticks and the title carry the series' own colour, or there is no
+        # telling which of four scales belongs to which trace.
+        assert "tickfont: {color: entry.colour" in block
+
+    def test_the_axes_stack_outwards_from_the_plot(self):
+        """Adding a series must not move the ones already being read."""
+        block = SCRIPT[SCRIPT.index("function axisFor("):]
+        assert "counts.left : counts.right) - 1 - order" in block[:900]
+
+    def test_the_plot_makes_room_for_the_stacked_axes(self):
+        assert "domain: [plan.left.length * AXIS_WIDTH" in SCRIPT
+
+    def test_a_row_grows_taller_as_axes_are_added(self):
+        """Otherwise a row with six series is a squeezed strip."""
+        assert "function rowHeight(" in SCRIPT
+        assert "ROW_HEIGHT_PER_AXIS" in SCRIPT
+        block = SCRIPT[SCRIPT.index("Plotly.react(target"):]
+        assert "element.style.height" in SCRIPT[:SCRIPT.index("Plotly.react(target")]
+
+    def test_one_bad_sample_does_not_set_the_scale(self):
+        """Autoscaled to every raw excursion, a spike collapses the trace onto
+        the axis and the flight reads as flat."""
+        assert "function rangeFor(" in SCRIPT
+        block = SCRIPT[SCRIPT.index("function rangeFor("):]
+        assert "state.data.series[entry.key]" in block[:400]
+        assert "axis.range = range" in SCRIPT
 
     def test_the_axis_menu_opens_on_right_click(self):
         assert "chip.oncontextmenu" in SCRIPT
@@ -149,6 +182,27 @@ class TestTheHonestyOfTheDisplay:
 
     def test_a_flight_without_navigation_is_told_so_rather_than_left_blank(self):
         assert "No processed Noseboom navigation" in SCRIPT
+
+    def test_zero_air_is_not_drawn_as_atmosphere(self):
+        """The MIRO switches to zero air on a solenoid, and what it reports
+        while that valve is over is the calibration."""
+        from app import source_investigation as engine
+
+        assert engine.VALVE_COLUMN == "VValve 0"
+        assert engine.AMBIENT_VALVE_STATE == 0
+        assert engine.SETTLE_SECONDS > 0
+
+    def test_the_page_reports_how_much_was_removed(self):
+        """A page that silently drops a fifth of a flight is worse than one
+        that never dropped anything."""
+        assert "ambient.note" in SCRIPT
+
+    def test_the_map_library_is_loaded_from_the_path_that_serves_it(self):
+        """'/vendor/leaflet.js' is not served; the page died on 'L is not
+        defined' the moment a region was clicked."""
+        assert "/vendor/leaflet/leaflet.js" in PAGE
+        assert "/vendor/leaflet/leaflet.css" in PAGE
+        assert '"/vendor/leaflet/leaflet.js"' in SERVER
 
 
 class TestTheExport:
