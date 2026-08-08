@@ -18,9 +18,17 @@ UNTRIMMED_INSTRUMENTS = frozenset({"sif", "flir", "gopro", "micasense"})
 # minimum and maximum shown on the dashboard.
 CAMERA_INSTRUMENTS = frozenset({"flir", "gopro", "micasense"})
 
-# Instruments whose timestamps are read from part of the delivery rather than
-# all of it, so their per-file coverage is a sample and not the whole story.
+# Instruments whose per-file coverage does not speak for the whole delivery, so
+# the stretches between what they report are not gaps in the recording.
 SAMPLED_COVERAGE_INSTRUMENTS = frozenset({"flir", "gopro", "micasense"})
+
+# Instruments whose recorded window itself is an estimate. A separate question
+# from the one above: MicaSense's per-capture instants still say nothing about
+# the stretches between them, but its first and last capture are now read from
+# every archive rather than from a sample of 147, so the window it reports is
+# what the camera recorded. FLIR is read from the two edges of a JSON export and
+# GoPro from a bounded sample, so theirs remain estimates.
+ESTIMATED_WINDOW_INSTRUMENTS = frozenset({"flir", "gopro"})
 
 
 def recorded_coverage_segments(
@@ -164,7 +172,7 @@ class DashboardTimeState:
                     )
                     if utc_start is not None and utc_end is not None
                 ),
-                coverage_is_estimated=instrument_id in SAMPLED_COVERAGE_INSTRUMENTS,
+                coverage_is_estimated=instrument_id in ESTIMATED_WINDOW_INSTRUMENTS,
             )
         valid = [
             item

@@ -244,20 +244,20 @@ class TestASampledWindowIsNotReportedAsMissingData:
     file regardless, which is why the run then produced the lot.
     """
 
-    def test_the_sampled_instruments_are_marked(self):
+    def test_the_instruments_with_an_estimated_window_are_marked(self):
         from core.dashboard_time import (
-            SAMPLED_COVERAGE_INSTRUMENTS, InstrumentTimeSelection,
+            ESTIMATED_WINDOW_INSTRUMENTS, InstrumentTimeSelection,
         )
 
-        assert SAMPLED_COVERAGE_INSTRUMENTS == {"flir", "gopro", "micasense"}
-        assert InstrumentTimeSelection("micasense", None, None).coverage_is_estimated is False
+        assert ESTIMATED_WINDOW_INSTRUMENTS == {"flir", "gopro"}
+        assert InstrumentTimeSelection("flir", None, None).coverage_is_estimated is False
 
     def test_the_flag_is_set_where_the_selection_is_built(self):
         source = (
             Path(__file__).resolve().parents[1] / "core" / "dashboard_time.py"
         ).read_text(encoding="utf-8")
         assert (
-            "coverage_is_estimated=instrument_id in SAMPLED_COVERAGE_INSTRUMENTS"
+            "coverage_is_estimated=instrument_id in ESTIMATED_WINDOW_INSTRUMENTS"
             in source
         )
 
@@ -290,3 +290,90 @@ class TestASampledWindowIsNotReportedAsMissingData:
         timeline = timeline[: timeline.index("\n  function ")]
         assert "coverage_is_estimated" in timeline
         assert "\u2248" in timeline
+
+
+class TestTheRecordedWindowIsReadFromEveryCapture:
+    """Flight_CC0807 showed 66.1% with all 9 983 captures present.
+
+    The window came from 128 archives chosen along the name order, and the
+    capture counter wraps at IMG_9999, so the earliest captures were not among
+    them: the sample began at 10:59 where the camera began at 07:54. Three
+    hours of a flight were invisible.
+
+    A MicaSense TIFF keeps its first IFD at the end of the file, so the EXIF
+    costs 378 ms an archive - 63 minutes for the delivery. The archive's own
+    entry stamp costs a seek and no decompression, and differs from the EXIF by
+    the camera clock's offset plus the moment it takes to write. Measured
+    against a few EXIF reads and subtracted, it gives every capture's real time
+    in 17 seconds:
+
+        sampled   10:59:04 .. 15:45:50    66.1% of the interval
+        measured  07:54:02 .. 15:46:48   100.0%
+    """
+
+    def _archive(self, path, stamp, exif=None):
+        import zipfile
+        with zipfile.ZipFile(path, "w") as archive:
+            info = zipfile.ZipInfo("IMG_0000_1.tif", date_time=stamp)
+            archive.writestr(info, b"II*\x00" + b"\x00" * 64)
+        return path
+
+    def test_the_entry_stamp_is_read_without_decompressing(self, tmp_path):
+        from core.time_extraction import TimestampExtractor
+
+        path = self._archive(tmp_path / "IMG_0000.zip", (2026, 8, 7, 9, 54, 2))
+        assert TimestampExtractor._micasense_entry_time(path) == datetime(
+            2026, 8, 7, 9, 54, 2
+        )
+
+    def test_an_unreadable_archive_is_skipped_not_raised(self, tmp_path):
+        from core.time_extraction import TimestampExtractor
+
+        broken = tmp_path / "IMG_0001.zip"
+        broken.write_text("not a zip", encoding="utf-8")
+        assert TimestampExtractor._micasense_entry_time(broken) is None
+
+    def test_without_an_anchor_nothing_is_claimed(self, tmp_path):
+        """A window on the wrong clock is worse than one read from a sample."""
+        from core.time_extraction import TimestampExtractor
+
+        for index in range(40):
+            self._archive(tmp_path / f"IMG_{index:04d}.zip", (2026, 8, 7, 9, 0, 0))
+        extractor = TimestampExtractor()
+        # The stub TIFFs carry no EXIF, so no offset can be measured.
+        assert extractor._read_micasense_times(sorted(tmp_path.glob("*.zip"))) == {}
+
+    def test_the_bulk_read_is_wired_into_extraction(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "core" / "time_extraction.py"
+        ).read_text(encoding="utf-8")
+        assert "self._micasense_times = self._read_micasense_times(source_files)" in source
+        assert 'instrument_id == "micasense"' in source
+
+    def test_the_reads_overlap(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "core" / "time_extraction.py"
+        ).read_text(encoding="utf-8")
+        body = source[source.index("def _read_micasense_times("):]
+        body = body[: body.index("\n    def ")]
+        assert "ThreadPoolExecutor(max_workers=self.MICASENSE_STAMP_READERS)" in body
+
+    def test_validation_is_given_every_archive(self):
+        backend = (
+            Path(__file__).resolve().parents[1] / "app" / "scan_backend.py"
+        ).read_text(encoding="utf-8")
+        start = backend.index("def _validation_source_files(")
+        body = backend[start: backend.index("\n    def ", start + 1)]
+        assert 'instrument_id == "micasense"' in body
+        assert 'root.rglob("*")' in body
+
+    def test_micasense_no_longer_reports_an_estimated_window(self):
+        from core.dashboard_time import (
+            ESTIMATED_WINDOW_INSTRUMENTS, SAMPLED_COVERAGE_INSTRUMENTS,
+        )
+
+        assert "micasense" not in ESTIMATED_WINDOW_INSTRUMENTS
+        assert ESTIMATED_WINDOW_INSTRUMENTS == {"flir", "gopro"}
+        # Its per-capture instants still say nothing about the stretches
+        # between them, so that judgement is unchanged.
+        assert "micasense" in SAMPLED_COVERAGE_INSTRUMENTS

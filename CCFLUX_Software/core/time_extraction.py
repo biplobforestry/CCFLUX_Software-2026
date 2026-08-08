@@ -341,6 +341,21 @@ class TimestampExtractor:
     GOPRO_EXIF_READERS = 4
     GOPRO_PARALLEL_THRESHOLD = 64
 
+    # A MicaSense capture's EXIF costs 378 ms: the archive is 17 MB and the TIFF
+    # keeps its first IFD at the very end, so reaching the timestamp means
+    # decompressing a whole band. Over Flight_CC0806's 9 999 captures that is 63
+    # minutes, which is why the window was read from a sample of 147 and the
+    # dashboard could only estimate it.
+    #
+    # The archive's own entry stamp costs 0.4 ms - the central directory, no
+    # decompression - and is the capture time in the camera's local clock plus
+    # the second or two it takes to write. Measuring that constant against the
+    # EXIF of a few captures turns 4 seconds of reading into every capture's
+    # real time, so the recorded window is shown rather than approximated.
+    MICASENSE_CALIBRATION_SAMPLES = 24
+    MICASENSE_BULK_THRESHOLD = 32
+    MICASENSE_STAMP_READERS = 8
+
     def __init__(
         self,
         *,
@@ -394,6 +409,18 @@ class TimestampExtractor:
                     done_bytes, total_bytes, "Reading camera EXIF headers",
                 )
             self._gopro_exif = self._read_gopro_exif(source_files)
+        self._micasense_times = {}
+        if (
+            instrument_id == "micasense"
+            and len(source_files) >= self.MICASENSE_BULK_THRESHOLD
+        ):
+            if progress is not None:
+                progress(
+                    instrument_id, None, 0, len(source_files),
+                    done_bytes, total_bytes,
+                    "Reading every MicaSense capture time",
+                )
+            self._micasense_times = self._read_micasense_times(source_files)
         for index, source_file in enumerate(source_files, start=1):
             path = Path(source_file)
             accumulator.begin_file(path)
@@ -667,6 +694,20 @@ class TimestampExtractor:
             return
         if suffix != ".zip":
             return
+        # Read in bulk before the loop, when the delivery was large enough to
+        # be worth calibrating. Every capture is then already known and this
+        # costs nothing; a small delivery, or one with no anchor, falls through
+        # to the EXIF read below exactly as before.
+        precomputed = getattr(self, "_micasense_times", {}).get(path)
+        if precomputed is not None:
+            accumulator.timestamp_columns.add("EXIF DateTimeOriginal")
+            accumulator.observe(
+                _RawTimestamp(
+                    precomputed.strftime("%Y:%m:%d %H:%M:%S"), 1, path,
+                    format_hint="%Y:%m:%d %H:%M:%S", assume_utc=True,
+                )
+            )
+            return
         try:
             with zipfile.ZipFile(path) as archive:
                 members = [
@@ -703,6 +744,82 @@ class TimestampExtractor:
             accumulator.warnings.append(
                 f"{path}: MicaSense archive could not be inspected: {exc}"
             )
+
+    @staticmethod
+    def _micasense_members(archive: "zipfile.ZipFile") -> list["zipfile.ZipInfo"]:
+        return sorted(
+            (
+                entry for entry in archive.infolist()
+                if entry.filename.casefold().endswith((".tif", ".tiff"))
+            ),
+            key=lambda entry: entry.filename,
+        )
+
+    @classmethod
+    def _micasense_entry_time(cls, path: Path) -> datetime | None:
+        """The archive's own stamp for its first band. No decompression."""
+        try:
+            with zipfile.ZipFile(path) as archive:
+                members = cls._micasense_members(archive)
+                if not members:
+                    return None
+                return datetime(*members[0].date_time)
+        except (OSError, zipfile.BadZipFile, ValueError):
+            return None
+
+    @classmethod
+    def _micasense_exif_time(cls, path: Path) -> datetime | None:
+        try:
+            with zipfile.ZipFile(path) as archive:
+                members = cls._micasense_members(archive)
+                if not members:
+                    return None
+                with archive.open(members[0]) as member:
+                    value = _exif_original_datetime(io.BytesIO(member.read()))
+        except (OSError, zipfile.BadZipFile, ValueError):
+            return None
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            return datetime.strptime(str(value).strip(), "%Y:%m:%d %H:%M:%S")
+        except ValueError:
+            return None
+
+    def _read_micasense_times(self, paths: Sequence[Path]) -> dict[Path, datetime]:
+        """Every capture's acquisition time, from the cheap stamp plus an anchor.
+
+        The entry stamp runs ahead of the EXIF by the camera clock's offset from
+        UTC and the moment it takes to write the archive - on Flight_CC0806 a
+        steady 7 202 s. It is measured here rather than assumed, from captures
+        spread across the delivery, and the median is subtracted from all of
+        them. Without an anchor nothing is returned and the caller falls back to
+        reading EXIF, because a window on the wrong clock is worse than a window
+        read from part of the flight.
+        """
+        ordered = sorted(paths, key=lambda item: (Path(item).name, str(item)))
+        step = max(1, len(ordered) // self.MICASENSE_CALIBRATION_SAMPLES)
+        anchors: list[float] = []
+        for path in ordered[::step][: self.MICASENSE_CALIBRATION_SAMPLES]:
+            entry = self._micasense_entry_time(Path(path))
+            exif = self._micasense_exif_time(Path(path))
+            if entry is not None and exif is not None:
+                anchors.append((entry - exif).total_seconds())
+        if not anchors:
+            return {}
+        anchors.sort()
+        offset = timedelta(seconds=anchors[len(anchors) // 2])
+        # The cost is the seek to each archive's central directory, not the
+        # bytes, so the reads overlap the way the GoPro EXIF reads do.
+        paths_in_order = [Path(path) for path in ordered]
+        with ThreadPoolExecutor(max_workers=self.MICASENSE_STAMP_READERS) as pool:
+            stamps = pool.map(self._micasense_entry_time, paths_in_order)
+        return {
+            path: stamp - offset
+            for path, stamp in zip(paths_in_order, stamps)
+            if stamp is not None
+        }
 
     def _flir(self, path: Path, accumulator: _Accumulator) -> None:
         """Read confirmed UTC timestamps from the edges of a FLIR JSON stream."""

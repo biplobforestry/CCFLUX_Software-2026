@@ -6530,17 +6530,36 @@ class DashboardScanBackend:
     def _validation_source_files(
         instrument_id: str, candidates: Sequence[InstrumentCandidate]
     ) -> tuple[Path, ...]:
-        """Expand GoPro candidates before time validation.
+        """Expand camera candidates before time validation.
 
         Discovery deliberately retains only a small camera sample. GoPro time
         correction, availability, and the user's Time Filter must instead use
         every media file in the detected GoPro folder.
+
+        MicaSense is expanded for the same reason. Its window used to come from
+        147 of 9 999 archives, and the dashboard could only ever approximate
+        what the camera recorded; the archive's own entry stamp is cheap enough
+        to read from all of them, so the window is now measured.
         """
         retained = [
             path
             for candidate in candidates
             for path in candidate.all_matching_files
         ]
+        if instrument_id == "micasense":
+            expanded: list[Path] = []
+            for candidate in candidates:
+                root = candidate.candidate_path
+                if root.is_dir():
+                    expanded.extend(
+                        path for path in root.rglob("*")
+                        if path.is_file()
+                        and path.suffix.casefold() in {".zip", ".tif", ".tiff"}
+                    )
+                elif root.is_file():
+                    expanded.append(root)
+            expanded.extend(path for path in retained if path.is_file())
+            return tuple(dict.fromkeys(expanded)) or tuple(dict.fromkeys(retained))
         if instrument_id != "gopro":
             return tuple(dict.fromkeys(retained))
         supported = {".jpg", ".jpeg", ".png", ".mp4", ".mov"}
