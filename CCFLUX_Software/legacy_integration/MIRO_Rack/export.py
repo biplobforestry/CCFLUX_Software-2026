@@ -254,7 +254,71 @@ def _downsample_series(series: pd.Series, maximum: int = 50000) -> pd.Series:
     return series.iloc[indices]
 
 
-def picarro_figure(pdata: pd.DataFrame, params: dict, progress: Progress = None) -> plt.Figure:
+# Altitude is context, not the measurement, so it is drawn in a neutral grey
+# under the trace it explains rather than competing with it for attention.
+ALTITUDE_COLOUR = "#6f6f6f"
+# The green and the blue the comparison and gas pages already give the two
+# analyzers, so one instrument is one colour wherever the export draws it.
+PICARRO_COLOUR = "#159447"
+MIRO_COLOUR = "#145ee8"
+
+
+def altitude_overlay(axis, navigation, *, label: bool = True):
+    """Draw the flight's altitude on this panel's right-hand scale.
+
+    A gas record read against time says what changed; read against altitude it
+    says where. The two belong on one panel because the eye cannot hold a
+    profile from another figure while following a trace here.
+
+    The twin shares the host's x-axis, so the altitude record widening the
+    window would drag the gas trace with it - navigation covers taxi and
+    shutdown that the analyzer's selected timeframe deliberately excludes. The
+    host's limits are therefore restored after the overlay is drawn.
+
+    Returns the twin axis, or None when the flight has no navigation. Altitude
+    is optional everywhere: a MIRO folder processed on its own is still a
+    complete record, and the figure is drawn without it rather than refused.
+    """
+    if navigation is None or not len(navigation):
+        return None
+    if "timestamp" not in navigation or "altitude" not in navigation:
+        return None
+    times = pd.to_datetime(navigation["timestamp"], errors="coerce")
+    metres = pd.to_numeric(navigation["altitude"], errors="coerce")
+    keep = times.notna() & metres.notna()
+    if not keep.any():
+        return None
+
+    limits = axis.get_xlim()
+    twin = axis.twinx()
+    twin.plot(
+        times[keep], metres[keep], color=ALTITUDE_COLOUR, linewidth=0.8,
+        alpha=0.85, label="Altitude", zorder=1, rasterized=True,
+    )
+    # The scale is named in the colour of the trace that belongs to it, the
+    # same way the comparison figure tells the two analyzers apart. It costs no
+    # panel width, which a legend on a three-inch panel does.
+    if label:
+        twin.set_ylabel("Altitude (m)", color=ALTITUDE_COLOUR)
+    twin.grid(False)
+    twin.tick_params(
+        direction="out", length=2.5, colors=ALTITUDE_COLOUR,
+        labelright=bool(label),
+    )
+    axis.set_xlim(limits)
+    # The gas trace belongs in front of its context. Raising the host above the
+    # twin hides the host's own background, so it is made transparent.
+    axis.set_zorder(twin.get_zorder() + 1)
+    axis.patch.set_visible(False)
+    return twin
+
+
+def picarro_figure(
+    pdata: pd.DataFrame,
+    params: dict,
+    progress: Progress = None,
+    navigation: pd.DataFrame | None = None,
+) -> plt.Figure:
     _style()
     flight_no = _flight_no(params)
     fig, axes = plt.subplots(
@@ -263,6 +327,7 @@ def picarro_figure(pdata: pd.DataFrame, params: dict, progress: Progress = None)
     )
     units = {"CO2": "ppm", "CH4": "ppm", "H2O": "%"}
     series_starts, series_ends = [], []
+    drawn = False
     for index, (axis, gas) in enumerate(zip(axes, ("CO2", "CH4", "H2O")), start=1):
         _notify(progress, 0.10 + index * 0.19, f"Export: preparing Picarro {gas}")
         series = picarro.comparison_series(
@@ -275,12 +340,19 @@ def picarro_figure(pdata: pd.DataFrame, params: dict, progress: Progress = None)
         display = _downsample_series(series)
         # Fifty thousand points of vector geometry per trace made a PDF slow to
         # open for detail no reader can resolve; the axes and labels stay text.
-        axis.plot(display.index, display.to_numpy(float), color="#159447",
+        axis.plot(display.index, display.to_numpy(float), color=PICARRO_COLOUR,
                   linewidth=0.55, rasterized=True)
         axis.set_title(f"Picarro {gas}", loc="left", fontweight="bold", pad=2)
-        axis.set_ylabel(f"{gas} ({units[gas]})")
-        axis.tick_params(direction="out", length=2.5)
+        axis.set_ylabel(f"{gas} ({units[gas]})", color=PICARRO_COLOUR)
+        axis.tick_params(direction="out", length=2.5, colors=PICARRO_COLOUR)
         axis.grid(True, linewidth=0.35, alpha=0.32)
+        # On every panel rather than once: a reader comparing a gas against the
+        # profile should not have to carry it up or down from another panel.
+        drawn = altitude_overlay(axis, navigation) is not None or drawn
+    # The shared time axis is nobody's quantity, so it keeps the ordinary
+    # colour the two y-scales are told apart against.
+    for axis in axes:
+        axis.tick_params(axis="x", colors="black")
     axes[-1].set_xlabel("Recorded time")
     # Six labels at most across seven inches: two lines of date and time at nine
     # point need about an inch apiece.
@@ -290,7 +362,9 @@ def picarro_figure(pdata: pd.DataFrame, params: dict, progress: Progress = None)
     if flight_no:
         fig.suptitle(flight_no, fontweight="bold", y=0.985)
     _figure_footer(fig, min(series_starts), max(series_ends))
-    fig.subplots_adjust(left=0.115, right=0.985, bottom=0.135,
+    # The right margin is the altitude scale's tick labels and its name. Left at
+    # the full width they were drawn off the edge of the page.
+    fig.subplots_adjust(left=0.115, right=0.875 if drawn else 0.985, bottom=0.135,
                         top=0.925 if flight_no else 0.96, hspace=0.30)
     figure_standard.finalise(fig)
     return fig
@@ -302,6 +376,7 @@ def miro_figure(
     page_number: int | None = None,
     total_pages: int | None = None,
     pdf_page: bool = False,
+    navigation: pd.DataFrame | None = None,
 ) -> plt.Figure:
     """Build one publication page containing the four MIRO quick-look plots."""
     _style()
@@ -318,17 +393,19 @@ def miro_figure(
     times = pd.to_datetime(result["series"]["time"], errors="coerce")
     ambient = np.asarray([np.nan if value is None else value for value in result["series"]["ambient"]], dtype=float)
     residual = np.asarray([np.nan if value is None else value for value in result["series"]["residual"]], dtype=float)
-    ambient_axis.plot(times, ambient, color="#145ee8", linewidth=0.45,
+    ambient_axis.plot(times, ambient, color=MIRO_COLOUR, linewidth=0.45,
                       rasterized=True)
     ambient_axis.set_title("Ambient concentration", loc="left", fontweight="bold")
-    ambient_axis.set_ylabel(f"{gas} ({unit})")
-    residual_axis.plot(times, residual, color="#145ee8", linewidth=0.45,
+    ambient_axis.set_ylabel(f"{gas} ({unit})", color=MIRO_COLOUR)
+    residual_axis.plot(times, residual, color=MIRO_COLOUR, linewidth=0.45,
                        rasterized=True)
     residual_axis.axhline(0.0, color="#666666", linewidth=0.55, linestyle="--")
     residual_axis.set_title(f"Residual after {cutoff} s detrending", loc="left",
                             fontweight="bold")
-    residual_axis.set_ylabel(f"Residual ({unit})")
+    residual_axis.set_ylabel(f"Residual ({unit})", color=MIRO_COLOUR)
+    drawn = False
     for axis in (ambient_axis, residual_axis):
+        axis.tick_params(axis="y", colors=MIRO_COLOUR)
         axis.set_xlabel("Recorded time")
         # Four labels across a three-inch panel: two lines of date and time at
         # nine point run to about half an inch each. Asking for fewer left the
@@ -336,6 +413,10 @@ def miro_figure(
         locator = mdates.AutoDateLocator(minticks=3, maxticks=4)
         axis.xaxis.set_major_locator(locator)
         axis.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d\n%H:%M"))
+        # Both time panels, not one. The residual is where a height-dependent
+        # artefact shows itself, so it is the panel that most needs the profile
+        # beside it.
+        drawn = altitude_overlay(axis, navigation) is not None or drawn
 
     allan = result["allan"]
     tau = np.asarray(allan.get("tau", []), dtype=float)
@@ -375,12 +456,14 @@ def miro_figure(
         _figure_footer(fig, start, end, f"Page {page_number} of {total_pages}")
     elif flight_no:
         fig.suptitle(f"{flight_no} - {gas}", fontweight="bold", y=0.985)
+    # The altitude scale needs its labels on the right of both time panels: the
+    # residual's fall at the page edge, the ambient's between the columns.
     fig.subplots_adjust(
         left=0.125,
-        right=0.98,
+        right=0.885 if drawn else 0.98,
         bottom=0.135 if pdf_page else 0.115,
         top=0.925 if (pdf_page or flight_no) else 0.96,
-        wspace=0.34,
+        wspace=0.60 if drawn else 0.34,
         hspace=0.42,
     )
     figure_standard.finalise(fig)
@@ -401,6 +484,7 @@ def _export_miro_figures(
     stamp: str,
     flight_component: str,
     progress: Progress,
+    navigation: pd.DataFrame | None = None,
 ) -> list[str]:
     gases = list(miro.GAS_COLUMNS)
     missing = [gas for gas in gases if gas not in mdata.columns]
@@ -426,6 +510,7 @@ def _export_miro_figures(
                 page_number=index,
                 total_pages=len(gases),
                 pdf_page=True,
+                navigation=navigation,
             )
             if pdf is not None:
                 pdf.savefig(fig, dpi=dpi, facecolor="white", bbox_inches=None)
@@ -455,7 +540,14 @@ def export_figures(
     pdata: pd.DataFrame | None,
     params: dict,
     progress: Progress = None,
+    navigation: pd.DataFrame | None = None,
 ) -> list[str]:
+    """Write the chosen figures. `navigation` is the Noseboom altitude record.
+
+    It is optional: a flight whose Noseboom has not been processed, or that
+    carries no navigation at all, still exports its gas figures - without the
+    altitude scale rather than not at all.
+    """
     output, selected, dpi = _validate(output_directory, formats, dpi)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     flight_no = _flight_no(params)
@@ -463,16 +555,21 @@ def export_figures(
     if scope == "miro":
         if mdata is None:
             raise RuntimeError("MIRO data are required for MIRO export.")
-        return _export_miro_figures(output, selected, dpi, mdata, params, stamp, flight_component, progress)
+        return _export_miro_figures(
+            output, selected, dpi, mdata, params, stamp, flight_component,
+            progress, navigation=navigation,
+        )
     if scope == "comparison":
         if mdata is None or pdata is None:
             raise RuntimeError("MIRO and Picarro data are required for comparison export.")
+        # The comparison is one analyzer against the other, not against time,
+        # so there is no time axis for a profile to share.
         fig = comparison_figure(mdata, pdata, params, progress)
         stem = f"MIRO_Picarro_comparison_{flight_component}_{stamp}" if flight_component else f"MIRO_Picarro_comparison_{stamp}"
     elif scope == "picarro":
         if pdata is None:
             raise RuntimeError("Picarro data are required for Picarro export.")
-        fig = picarro_figure(pdata, params, progress)
+        fig = picarro_figure(pdata, params, progress, navigation=navigation)
         stem = f"Picarro_timeseries_{flight_component}_{stamp}" if flight_component else f"Picarro_timeseries_{stamp}"
     else:
         raise ValueError("Unknown export section.")

@@ -294,6 +294,11 @@ def comparison_worker(params):
 def export_worker(scope, output_directory, formats, dpi, params):
     with LOCK:
         mdata, pdata = STORE["miro"], STORE["picarro"]
+        # The Noseboom altitude record, put here by the dashboard before it
+        # forwards the export. Absent when this GUI runs on its own, or when
+        # the flight's Noseboom has not been processed; the figures are drawn
+        # without the altitude scale rather than refused.
+        navigation = STORE.get("navigation")
     if scope == "miro" and mdata is None:
         raise RuntimeError("Load MIRO data before exporting MIRO compounds.")
     if scope == "picarro" and pdata is None:
@@ -315,6 +320,7 @@ def export_worker(scope, output_directory, formats, dpi, params):
         pdata=pdata,
         params=params or {},
         progress=export_progress,
+        navigation=navigation,
     )
     with LOCK:
         STORE["last_export"] = paths

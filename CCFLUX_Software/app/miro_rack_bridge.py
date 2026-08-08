@@ -461,6 +461,18 @@ function closeMapSync() {
                 headers,
             )
 
+    def _publish_navigation(self) -> None:
+        """Hand the workspace the flight's altitude record before it exports.
+
+        The gas time series carry altitude on their right-hand scale, and the
+        export runs inside the legacy workspace, which knows nothing of the
+        other instruments. It is resolved here at the moment of export rather
+        than snapshotted when MIRO was processed, because the Noseboom may be
+        processed after the gases and the figure should still show the profile.
+        """
+        with self.module.LOCK:
+            self.module.STORE["navigation"] = self._investigation_navigation()
+
     def forward_post(
         self, relative_path: str, body: dict[str, Any]
     ) -> tuple[int, str, bytes, dict[str, str]]:
@@ -469,6 +481,8 @@ function closeMapSync() {
                 {"exiting": False, "message": "Close this MIRO Rack browser tab."}
             ).encode("utf-8")
             return 200, "application/json; charset=utf-8", payload, {}
+        if relative_path == "/api/export":
+            self._publish_navigation()
         with self.module.app.test_client() as client:
             response = client.post(relative_path, json=body)
             headers = {
