@@ -443,6 +443,8 @@ function closeMapSync() {
     def forward_get(
         self, relative_path: str, query: dict[str, list[str]] | None = None
     ) -> tuple[int, str, bytes, dict[str, str]]:
+        if relative_path == "/api/navigation":
+            self._publish_navigation()
         path = relative_path
         if query:
             pairs = [(key, item) for key, values in query.items() for item in values]

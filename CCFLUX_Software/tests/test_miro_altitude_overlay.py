@@ -207,6 +207,172 @@ class TestTheFiguresCarryIt:
             assert "if drawn else" in source, function.__name__
 
 
+class TestTheWorkspacePageServesIt:
+    """The exported figure was only half the answer: the plot the operator
+    actually looks at is the one on the page."""
+
+    @pytest.fixture()
+    def workspace(self):
+        module = _legacy("MIRO_Rack_GUI")
+        yield module
+        with module.LOCK:
+            module.STORE["navigation"] = None
+
+    def test_it_says_why_rather_than_failing_when_there_is_none(self, workspace):
+        with workspace.LOCK:
+            workspace.STORE["navigation"] = None
+
+        payload = workspace.app.test_client().get("/api/navigation").get_json()
+
+        assert payload["available"] is False
+        assert "Noseboom" in payload["reason"]
+
+    def test_it_serves_the_profile(self, workspace, navigation):
+        with workspace.LOCK:
+            workspace.STORE["navigation"] = navigation
+
+        payload = workspace.app.test_client().get("/api/navigation").get_json()
+
+        assert payload["available"] is True
+        assert len(payload["time"]) == len(payload["altitude"]) == payload["points"]
+        assert min(payload["altitude"]) == pytest.approx(127.0)
+
+    def test_the_stamps_match_the_gas_series(self, workspace, navigation):
+        """One x-axis has to read both, and the gas series writes isoformat."""
+        with workspace.LOCK:
+            workspace.STORE["navigation"] = navigation
+
+        payload = workspace.app.test_client().get("/api/navigation").get_json()
+
+        assert payload["time"][0] == pd.Timestamp(
+            navigation["timestamp"].iloc[0]
+        ).isoformat()
+        assert "T" in payload["time"][0]
+
+    def test_a_flight_is_thinned_to_what_a_screen_can_show(self, workspace):
+        """Forty-one thousand one-second points is megabytes of JSON for detail
+        a 900-pixel panel cannot resolve, on a request made every render."""
+        dense = pd.DataFrame({
+            "timestamp": pd.date_range("2026-08-06 05:00", periods=41_340, freq="1s"),
+            "altitude": np.linspace(120.0, 700.0, 41_340),
+        })
+        with workspace.LOCK:
+            workspace.STORE["navigation"] = dense
+
+        payload = workspace.app.test_client().get("/api/navigation").get_json()
+
+        assert payload["source_points"] == 41_340
+        assert payload["points"] <= workspace.NAVIGATION_PLOT_POINTS * 1.1
+        # Thinned, not truncated: the descent must still be in it.
+        assert payload["altitude"][-1] > 690.0
+
+    def test_a_short_record_is_not_thinned_at_all(self, workspace):
+        short = pd.DataFrame({
+            "timestamp": pd.date_range("2026-08-06 05:00", periods=40, freq="1min"),
+            "altitude": np.linspace(120.0, 400.0, 40),
+        })
+        with workspace.LOCK:
+            workspace.STORE["navigation"] = short
+
+        payload = workspace.app.test_client().get("/api/navigation").get_json()
+
+        assert payload["points"] == 40
+
+    def test_missing_altitudes_are_dropped_not_drawn(self, workspace):
+        gappy = pd.DataFrame({
+            "timestamp": pd.date_range("2026-08-06 05:00", periods=6, freq="1min"),
+            "altitude": [120.0, float("nan"), 130.0, float("nan"), 140.0, 150.0],
+        })
+        with workspace.LOCK:
+            workspace.STORE["navigation"] = gappy
+
+        payload = workspace.app.test_client().get("/api/navigation").get_json()
+
+        assert payload["points"] == 4
+        assert all(value == value for value in payload["altitude"])
+
+
+class TestThePagePlotsIt:
+    PAGE = (
+        ROOT / "legacy_integration" / "MIRO_Rack" / "MIRO_Rack_GUI.py"
+    ).read_text(encoding="utf-8")
+
+    def _script(self) -> str:
+        start = self.PAGE.index("HTML = r'''")
+        return self.PAGE[start:]
+
+    def test_the_page_asks_for_the_profile(self):
+        assert "'/api/navigation'" in self._script()
+
+    def test_the_request_is_rewritten_for_the_dashboard(self):
+        """The bridge maps '/api/ to '/api/miro-rack/, so the quoting matters."""
+        bridge = (ROOT / "app" / "miro_rack_bridge.py").read_text(encoding="utf-8")
+        assert "\"'/api/\", \"'/api/miro-rack/\"" in bridge
+        assert "'/api/navigation'" in self._script()
+
+    def test_all_three_time_series_carry_it(self):
+        """Anchored on the render call: the ids also appear in the list the page
+        purges, which would satisfy a looser search without plotting anything."""
+        script = self._script()
+        for plot in ("miroRaw", "miroResidual", "picarroTime"):
+            marker = f"Plotly.react('{plot}'"
+            assert marker in script, plot
+            block = script[script.index(marker) - 700: script.index(marker)]
+            assert "altitudeOverlay(" in block, plot
+
+    def test_the_histogram_does_not(self):
+        """It counts values, not moments, so it has no time axis to share."""
+        script = self._script()
+        marker = "Plotly.react('picarroHist'"
+        block = script[script.index(marker) - 200:script.index(marker)]
+        assert "altitudeOverlay(" not in block
+
+    def test_the_gas_window_is_pinned(self):
+        """Plotly widens an axis to hold a new trace, and navigation covers taxi
+        and shutdown the analyzer's timeframe excludes."""
+        script = self._script()
+        block = script[script.index("function altitudeOverlay("):]
+        block = block[: block.index("\nasync function") if "\nasync function" in block
+                      else len(block)]
+        assert "layout.xaxis.range=[stamps[0],stamps[stamps.length-1]]" in block
+        assert "filter(value=>value!==null" in block
+
+    def test_the_gas_is_drawn_in_front_of_its_context(self):
+        block = self._script()
+        block = block[block.index("function altitudeOverlay("):]
+        assert "traces.unshift(" in block[:1400]
+        assert "traces.push(" not in block[:1400]
+
+    def test_the_profile_is_on_its_own_scale(self):
+        block = self._script()
+        block = block[block.index("function altitudeOverlay("):]
+        assert "overlaying:'y'" in block[:1400]
+        assert "side:'right'" in block[:1400]
+        assert "yaxis:'y2'" in block[:1400]
+
+    def test_the_second_scale_carries_no_second_grid(self):
+        block = self._script()
+        block = block[block.index("function altitudeOverlay("):]
+        assert "showgrid:false" in block[:1400]
+
+    def test_it_is_refetched_rather_than_cached(self):
+        """The Noseboom can be processed after the gases, and a reader should
+        not have to reload the page for the profile to appear."""
+        block = self._script()
+        block = block[block.index("async function navigationSeries("):]
+        block = block[: block.index("function altitudeOverlay(")]
+        assert "app.navigation" not in block
+
+    def test_a_page_with_no_profile_still_draws_its_plots(self):
+        block = self._script()
+        block = block[block.index("async function navigationSeries("):]
+        block = block[: block.index("function altitudeOverlay(")]
+        assert "catch(error){return null}" in block
+        overlay = self._script()
+        overlay = overlay[overlay.index("function altitudeOverlay("):]
+        assert "if(!nav)return false" in overlay[:400]
+
+
 class TestItReachesTheWorkspace:
     """The export runs inside the legacy workspace, which knows nothing of the
     other instruments, so the dashboard has to hand it the profile."""
@@ -226,6 +392,14 @@ class TestItReachesTheWorkspace:
         block = self.BRIDGE[self.BRIDGE.index("    def forward_post("):]
         block = block[: block.index("\n    def _remember_request_state")]
         assert '"/api/export"' in block
+        assert "self._publish_navigation()" in block
+
+    def test_the_bridge_publishes_it_when_the_page_asks(self):
+        """The page fetches it on every render, and the answer has to be the
+        current one rather than whatever was last exported."""
+        block = self.BRIDGE[self.BRIDGE.index("    def forward_get("):]
+        block = block[: block.index("\n    def forward_post")]
+        assert '"/api/navigation"' in block
         assert "self._publish_navigation()" in block
 
     def test_it_is_resolved_at_export_rather_than_snapshotted(self):

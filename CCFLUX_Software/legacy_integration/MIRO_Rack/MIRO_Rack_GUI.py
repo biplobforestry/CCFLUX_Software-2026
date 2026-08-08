@@ -675,6 +675,45 @@ def results():
     if value is None: return jsonify({"error":"No analysis results available."}),404
     return jsonify(value)
 
+# A browser cannot resolve 41 340 one-second points in a 900-pixel panel, and
+# the JSON for them is megabytes over a request the page makes on every render.
+NAVIGATION_PLOT_POINTS = 3000
+
+
+@app.get("/api/navigation")
+def navigation():
+    """The flight's altitude, for the second scale on the gas time series.
+
+    The dashboard puts the record in the store; started on its own this
+    workspace has none, and the plots are drawn without the scale rather than
+    failing. The reason is returned so the page can say why it is missing
+    instead of leaving a reader wondering.
+    """
+    with LOCK:
+        frame = STORE.get("navigation")
+    if frame is None or not len(frame) or "altitude" not in getattr(frame, "columns", []):
+        return jsonify({
+            "available": False,
+            "reason": "No processed Noseboom altitude is available for this flight.",
+        })
+    usable = frame[["timestamp", "altitude"]].dropna()
+    if usable.empty:
+        return jsonify({
+            "available": False,
+            "reason": "The Noseboom record carries no usable altitude.",
+        })
+    step = max(1, len(usable) // NAVIGATION_PLOT_POINTS)
+    thinned = usable.iloc[::step]
+    return jsonify({
+        "available": True,
+        # The same stamp format the gas series uses, so one x-axis reads both.
+        "time": [pd.Timestamp(value).isoformat() for value in thinned["timestamp"]],
+        "altitude": [float(value) for value in thinned["altitude"]],
+        "points": int(len(thinned)),
+        "source_points": int(len(usable)),
+    })
+
+
 @app.get("/api/export-result")
 def export_result():
     with LOCK:
@@ -726,7 +765,35 @@ dialog{max-height:calc(100dvh - 20px);overflow:hidden}.dialog-body{max-height:ca
 const app={loaded:false,meta:null,filters:{},poll:null,busy:false,resultsCurrent:false,comparisonCurrent:false,mismatchAccepted:false,filterMessage:'',filtersApplied:false,pendingSaveExit:false,pendingSaveOnly:false,pendingRecoverySave:null,pendingExport:null,lastExport:[],operationId:0,miroResult:null};
 const POLL_MS=500;
 const config={responsive:true,scrollZoom:true,displaylogo:false,displayModeBar:true,modeBarButtonsToRemove:['lasso2d','select2d']};
-const colors={miro:'#0e7773',picarro:'#db7415',blue:'#1756d1',green:'#159447',purple:'#8931ef',grid:'rgba(30,85,88,.15)'};
+const colors={miro:'#0e7773',picarro:'#db7415',blue:'#1756d1',green:'#159447',purple:'#8931ef',altitude:'#6f6f6f',grid:'rgba(30,85,88,.15)'};
+// Altitude on the second scale of every gas time series. A gas record read
+// against time says what changed; read against altitude it says where, which
+// is the reading a Zeppelin flight is for. It is context, not the measurement,
+// so it is grey, thin, and drawn behind the trace it explains.
+async function navigationSeries(){
+ // Fetched on every render rather than cached: the Noseboom can be processed
+ // after the gases, and a reader should not have to reload the page for the
+ // profile to appear.
+ try{const response=await fetchWithTimeout('/api/navigation',{},8000);
+  if(!response.ok)return null;
+  const payload=await response.json();
+  return payload&&payload.available&&payload.time&&payload.time.length?payload:null}
+ catch(error){return null}
+}
+function altitudeOverlay(layout,traces,times,nav){
+ if(!nav)return false;
+ // The gas window, not navigation's. Navigation covers taxi and shutdown that
+ // the analyzer's selected timeframe excludes - an hour and three quarters on
+ // Flight_CC0806 - and Plotly would otherwise widen the axis to hold it.
+ const stamps=(times||[]).filter(value=>value!==null&&value!==undefined);
+ if(stamps.length)layout.xaxis.range=[stamps[0],stamps[stamps.length-1]];
+ layout.yaxis2={title:{text:'Altitude (m)',standoff:10},overlaying:'y',side:'right',showgrid:false,zeroline:false,automargin:true,color:colors.altitude};
+ layout.margin=Object.assign({},layout.margin,{r:16});
+ // Unshifted, not pushed: Plotly draws in order, and the gas belongs in front
+ // of its context.
+ traces.unshift({x:nav.time,y:nav.altitude,type:'scatter',mode:'lines',name:'Altitude',yaxis:'y2',connectgaps:false,line:{color:colors.altitude,width:1},hovertemplate:'%{x}<br>%{y:.0f} m<extra></extra>'});
+ return true
+}
 function baseLayout(xTitle,yTitle){return {margin:{l:68,r:24,t:28,b:58},font:{family:'Inter,Segoe UI,Arial',size:Math.max(10,Math.min(14,innerWidth/115)),color:'#082f33'},paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'#fff',hovermode:'closest',xaxis:{title:{text:xTitle,standoff:10},gridcolor:colors.grid,automargin:true},yaxis:{title:{text:yTitle,standoff:10},gridcolor:colors.grid,automargin:true},legend:{orientation:'h',y:1.14,x:0}}}
 function filterInput(value){const m=String(value||'').match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);return m?`${m[2]}-${m[3]}-${m[1]} ${m[4]}:${m[5]}`:''}
 function normaliseFilter(value){const text=String(value||'').trim();if(/^\d{2}-\d{2}-\d{4} \d{2}:\d{2}$/.test(text))return text;const legacy=text.match(/^(\d{2})(\d{2})(\d{4}) (\d{2}:\d{2})$/);return legacy?`${legacy[1]}-${legacy[2]}-${legacy[3]} ${legacy[4]}`:filterInput(text)}
@@ -823,13 +890,20 @@ async function renderMiro(m){
  app.miroResult=m;
  const s=m.series,u=m.unit,cutoff=Number(m.smooth_seconds);
  miroResidualTitle.textContent=`High-pass residual after ${Number.isInteger(cutoff)?cutoff:n(cutoff,2)} s detrending`;
+ const nav=await navigationSeries();
  const ambientLayout=baseLayout('Recorded time',`${m.gas} (${u})`);
  ambientLayout.hovermode='x';
- await Plotly.react('miroRaw',[{x:s.time,y:s.ambient,type:'scatter',mode:'lines',name:'Stable ambient',connectgaps:false,line:{color:colors.blue,width:1},hovertemplate:'%{x}<br>%{y:.6g} '+u+'<extra></extra>'}],ambientLayout,config);
+ const ambientTraces=[{x:s.time,y:s.ambient,type:'scatter',mode:'lines',name:'Stable ambient',connectgaps:false,line:{color:colors.blue,width:1},hovertemplate:'%{x}<br>%{y:.6g} '+u+'<extra></extra>'}];
+ altitudeOverlay(ambientLayout,ambientTraces,s.time,nav);
+ await Plotly.react('miroRaw',ambientTraces,ambientLayout,config);
  const residualLayout=baseLayout('Recorded time',`High-pass residual (${u})`);
  residualLayout.hovermode='x';
  residualLayout.shapes=[{type:'line',xref:'paper',x0:0,x1:1,y0:0,y1:0,line:{color:'#555',width:1,dash:'dash'}}];
- await Plotly.react('miroResidual',[{x:s.time,y:s.residual,type:'scatter',mode:'lines',name:'Mathematically detrended residual',connectgaps:false,line:{color:colors.blue,width:1},hovertemplate:'%{x}<br>%{y:.6g} '+u+'<extra></extra>'}],residualLayout,config);
+ const residualTraces=[{x:s.time,y:s.residual,type:'scatter',mode:'lines',name:'Mathematically detrended residual',connectgaps:false,line:{color:colors.blue,width:1},hovertemplate:'%{x}<br>%{y:.6g} '+u+'<extra></extra>'}];
+ // The residual is where a height-dependent artefact shows itself, so it is
+ // the panel that most needs the profile beside it.
+ altitudeOverlay(residualLayout,residualTraces,s.time,nav);
+ await Plotly.react('miroResidual',residualTraces,residualLayout,config);
  await renderMiroAllanMode();
  const p=m.psd,psdLayout=baseLayout('Frequency (Hz)',`Power spectral density (${u}²/Hz)`);
  psdLayout.xaxis.type='log';psdLayout.xaxis.dtick=1;psdLayout.yaxis.type='log';psdLayout.yaxis.dtick=1;psdLayout.margin={l:82,r:25,t:88,b:68};psdLayout.showlegend=false;
@@ -855,7 +929,10 @@ async function renderMiroAllanMode(){
  await Plotly.react('miroAllan',[{x:a.tau,y:values,type:'scatter',mode:'lines+markers',name:entry.name,line:{color:colors.blue,width:1.5},marker:{size:5,symbol:'circle-open'},customdata:custom,hovertemplate:custom?'τ=%{x:.5g} s<br>σA=%{y:.5g} '+u+'<br>within-segment differences=%{customdata[0]}<extra></extra>':'τ=%{x:.5g} s<br>σA=%{y:.5g} '+u+'<extra></extra>'},{x:a.tau,y:a.white_noise,type:'scatter',mode:'lines',name:'Reference slope ∝ τ<sup>−1/2</sup> (not a fit)',line:{color:'#333',dash:'dash',width:1.4}},{x:a.tau,y:values,type:'scatter',mode:'markers',xaxis:'x2',showlegend:false,hoverinfo:'skip',marker:{opacity:0,size:1}}],layout,config);
 }
 function npIndices(length,count){if(length<=1)return [0];return Array.from({length:Math.min(count,length)},(_,i)=>Math.round(i*(length-1)/(Math.min(count,length)-1)))} function logTickIndices(values,count){if(!values.length)return [];if(values.length===1)return [0];const lo=Math.log(Number(values[0])),hi=Math.log(Number(values[values.length-1])),indices=[];for(let i=0;i<Math.min(count,values.length);i++){const target=Math.exp(lo+i*(hi-lo)/(Math.min(count,values.length)-1));let best=0,distance=Infinity;for(let j=0;j<values.length;j++){const candidate=Math.abs(Math.log(Number(values[j]))-Math.log(target));if(candidate<distance){distance=candidate;best=j}}indices.push(best)}return Array.from(new Set(indices))}
-function periodLabel(seconds){if(!Number.isFinite(seconds))return '';if(seconds>=3600)return `${(seconds/3600).toPrecision(3)} h`;if(seconds>=60)return `${(seconds/60).toPrecision(3)} min`;return `${seconds.toPrecision(3)} s`}async function renderPicarro(p){const l=baseLayout('Time',p.gas+' ('+p.unit+')');await Plotly.react('picarroTime',[{x:p.series.time,y:p.series.value,type:'scatter',mode:'lines',name:p.gas,line:{color:colors.picarro,width:1}}],l,config);await Plotly.react('picarroHist',[{x:p.histogram.center,y:p.histogram.count,type:'bar',name:p.gas,marker:{color:colors.picarro}}],baseLayout(p.gas+' ('+p.unit+')','Count'),config)}
+function periodLabel(seconds){if(!Number.isFinite(seconds))return '';if(seconds>=3600)return `${(seconds/3600).toPrecision(3)} h`;if(seconds>=60)return `${(seconds/60).toPrecision(3)} min`;return `${seconds.toPrecision(3)} s`}async function renderPicarro(p){const l=baseLayout('Time',p.gas+' ('+p.unit+')');const traces=[{x:p.series.time,y:p.series.value,type:'scatter',mode:'lines',name:p.gas,line:{color:colors.picarro,width:1}}];altitudeOverlay(l,traces,p.series.time,await navigationSeries());await Plotly.react('picarroTime',traces,l,config);
+// The histogram counts values, not moments, so it has no time axis for a
+// profile to share.
+await Plotly.react('picarroHist',[{x:p.histogram.center,y:p.histogram.count,type:'bar',name:p.gas,marker:{color:colors.picarro}}],baseLayout(p.gas+' ('+p.unit+')','Count'),config)}
 async function renderComparison(gas,c){
  const warn=document.getElementById('warn'+gas),id='cmp'+gas;
  warn.innerHTML=c.warning?`<div class="warning">${c.warning}</div>`:'';

@@ -15,16 +15,27 @@ used when it is present, so on a developer machine this is a real parse. Where
 neither exists the check skips rather than pretending.
 """
 
+import html
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
-ASSETS = Path(__file__).resolve().parents[1] / "app" / "assets"
+ROOT = Path(__file__).resolve().parents[1]
+ASSETS = ROOT / "app" / "assets"
 SCRIPTS = sorted(ASSETS.glob("*.js"))
+
+# The MIRO Rack workspace keeps its whole interface in a string inside a Python
+# file, so no glob over *.js ever sees it and nothing in the Python toolchain
+# looks at it either. It is the page the gas plots are drawn on.
+EMBEDDED = ROOT / "legacy_integration" / "MIRO_Rack" / "MIRO_Rack_GUI.py"
+INLINE_SCRIPT = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.S)
 
 
 def _node_check(path: Path) -> tuple[bool, str]:
@@ -51,11 +62,66 @@ def _javascriptcore_check(path: Path) -> tuple[bool, str]:
     return answer == "OK", answer
 
 
+def _chromium() -> str | None:
+    """Edge ships with Windows, and Edge is V8.
+
+    Without this the check skipped on every Windows machine in the campaign,
+    which is all of them - so the scripts were only ever parsed if someone
+    happened to have Node installed.
+    """
+    found = shutil.which("msedge") or shutil.which("chrome")
+    if found:
+        return found
+    candidates = [
+        Path(root) / "Microsoft/Edge/Application/msedge.exe"
+        for root in filter(None, (os.environ.get("ProgramFiles"),
+                                  os.environ.get("ProgramFiles(x86)")))
+    ] + [
+        Path(root) / "Google/Chrome/Application/chrome.exe"
+        for root in filter(None, (os.environ.get("ProgramFiles"),
+                                  os.environ.get("ProgramFiles(x86)")))
+    ]
+    return next((str(path) for path in candidates if path.is_file()), None)
+
+
+def _chromium_check(path: Path) -> tuple[bool, str]:
+    """Parse without executing: new Function compiles and stops.
+
+    --dump-dom is how the answer comes back out of a headless browser.
+    """
+    browser = _chromium()
+    with tempfile.TemporaryDirectory() as folder:
+        page = Path(folder) / "check.html"
+        page.write_text(
+            "<!doctype html><body><pre id=out>pending</pre><script type=module>\n"
+            f"const src = await (await fetch({json.dumps(path.as_uri())})).text();\n"
+            "let answer;\n"
+            "try { new Function(src); answer = 'OK'; }\n"
+            "catch (error) { answer = 'FAIL ' + error.name + ': ' + error.message; }\n"
+            "document.getElementById('out').textContent = answer;\n"
+            "</script></body>",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [browser, "--headless=new", "--disable-gpu", "--no-sandbox",
+             "--allow-file-access-from-files", "--virtual-time-budget=6000",
+             "--dump-dom", page.as_uri()],
+            capture_output=True, text=True, check=False, timeout=180,
+        )
+    match = re.search(r'<pre id="out">(.*?)</pre>', result.stdout, re.S)
+    if match is None:
+        pytest.skip("Headless browser returned no answer")
+    answer = html.unescape(match.group(1)).strip()
+    return answer == "OK", answer
+
+
 def _checker():
     if shutil.which("node"):
         return _node_check
     if sys.platform == "darwin" and shutil.which("osascript"):
         return _javascriptcore_check
+    if _chromium():
+        return _chromium_check
     return None
 
 
@@ -74,6 +140,35 @@ def test_there_are_scripts_to_check():
     """A glob that quietly matches nothing would make this suite meaningless."""
     assert len(SCRIPTS) >= 8
     assert any(path.name == "dashboard.js" for path in SCRIPTS)
+
+
+def _workspace_blocks() -> list[str]:
+    source = EMBEDDED.read_text(encoding="utf-8")
+    return [
+        block for block in INLINE_SCRIPT.findall(source) if block.strip()
+    ]
+
+
+def test_the_workspace_page_has_a_script_to_check():
+    blocks = _workspace_blocks()
+    assert blocks, "no inline script found in the MIRO Rack workspace"
+    assert any("renderMiro" in block for block in blocks)
+
+
+def test_the_workspace_script_parses(tmp_path):
+    """Every button on the page dies together on one syntax error, and the gas
+    plots are drawn by this script."""
+    checker = _checker()
+    if checker is None:
+        pytest.skip("No JavaScript engine available to parse with")
+
+    for index, block in enumerate(_workspace_blocks(), start=1):
+        path = tmp_path / f"workspace_{index}.js"
+        path.write_text(block, encoding="utf-8")
+
+        ok, detail = checker(path)
+
+        assert ok, f"MIRO Rack workspace block {index} does not parse: {detail}"
 
 
 # --------------------------------------------------------------------------
