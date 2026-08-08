@@ -114,7 +114,8 @@ def test_corrupt_file_and_unusually_small_file_are_reported(tmp_path: Path):
     assert result.metadata["unusually_small_files"] == ["IMG_0001_1.tif"]
 
 
-def test_large_folder_is_processed_in_bounded_batches(tmp_path: Path):
+def test_large_folder_is_read_with_a_bounded_number_of_readers(tmp_path: Path):
+    """The batch barrier is gone; the files in flight are still bounded."""
     folder = tmp_path / "images"
     for capture in range(1, 41):
         for band in range(1, 7):
@@ -126,7 +127,7 @@ def test_large_folder_is_processed_in_bounded_batches(tmp_path: Path):
     result = adapter.process_quicklook(adapter.load(_candidate(folder)), {})
 
     assert result.file_count == 240
-    assert result.metadata["batch_size"] == 8
+    assert result.metadata["metadata_readers"] == adapter.METADATA_READERS
     assert result.metadata["complete_capture_count"] == 40
     assert progress[-1].progress == 100
 

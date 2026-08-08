@@ -7830,6 +7830,13 @@ class DashboardScanBackend:
     # Per-file coverage is only worth measuring when a delivery is split across
     # files and the whole set is small enough to inspect cheaply. A single file
     # is used as-is, and a very large set is left alone rather than read twice.
+    # Converting one FLIR frame is a seek, a read of its byte span, a
+    # bytes.translate and numpy over 640x480 - all of which release the
+    # interpreter lock, so these overlap rather than queue. The number is not
+    # the CPU allocation: this pool exists for the duration of one job inside
+    # the camera group's single worker, and the work is dominated by the disk.
+    FLIR_TEMPERATURE_READERS = 8
+
     DELIVERY_SELECTION_MAX_FILES = 64
     DELIVERY_SELECTION_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
@@ -8306,23 +8313,43 @@ class DashboardScanBackend:
         context.report_progress(
             26, f"Converting {len(indices):,} frames to temperature"
         )
-        rows: list[dict[str, object]] = []
-        for position, index in enumerate(indices, start=1):
-            context.check_cancelled()
-            rows.append(
-                health_module.process_one_temperature(
-                    (index + 1, health[index], entries[index], spans[index]),
-                    correction,
-                    None,
-                    save_directory,
-                    valid_range,
-                )
+        # One frame at a time took hours over a flight: Flight_CC0807's 11 561
+        # frames ran from 06:20 to 08:21. Each is independent - its own file
+        # handle, its own byte span, no shared state - and the work inside is a
+        # read, a bytes.translate and numpy, all of which release the
+        # interpreter lock, so the reads and the arithmetic genuinely overlap.
+        # Results are placed by index, so the CSV keeps acquisition order.
+        def convert(index: int) -> dict[str, object]:
+            return health_module.process_one_temperature(
+                (index + 1, health[index], entries[index], spans[index]),
+                correction,
+                None,
+                save_directory,
+                valid_range,
             )
-            if position % 10 == 0 or position == len(indices):
-                context.report_progress(
-                    26 + 60 * position / len(indices),
-                    f"Radiometric temperature {position}/{len(indices)}",
-                )
+
+        rows: list[dict[str, object]] = [None] * len(indices)  # type: ignore[list-item]
+        workers = max(1, min(self.FLIR_TEMPERATURE_READERS, len(indices)))
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="ccflux-flir-temperature"
+        ) as pool:
+            pending = {
+                pool.submit(convert, index): position
+                for position, index in enumerate(indices)
+            }
+            try:
+                for done, future in enumerate(as_completed(pending), start=1):
+                    context.check_cancelled()
+                    rows[pending[future]] = future.result()
+                    if done % 25 == 0 or done == len(indices):
+                        context.report_progress(
+                            26 + 60 * done / len(indices),
+                            f"Radiometric temperature {done}/{len(indices)}",
+                        )
+            except BaseException:
+                for future in pending:
+                    future.cancel()
+                raise
 
         context.report_progress(88, "Matching temperature frames to Noseboom navigation")
         # Read here, not when the task started. Converting a flight of frames to

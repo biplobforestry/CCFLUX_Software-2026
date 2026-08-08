@@ -226,3 +226,69 @@ def test_a_small_allocation_does_not_block_the_conversion():
     source = inspect.getsource(DashboardScanBackend)
     assert "requires at least 4 workers" not in source
     assert not hasattr(DashboardScanBackend, "start_detailed_processing")
+
+
+class TestFramesConvertInParallel:
+    """Flight_CC0807 converted 11 561 frames one at a time, 06:20 to 08:21.
+
+    Each frame is independent: process_one_temperature opens its own handle,
+    reads its own byte span and shares nothing. The work inside is a read, a
+    bytes.translate and numpy over 640x480, all of which release the interpreter
+    lock, so the reads and the arithmetic overlap instead of queueing.
+    """
+
+    BACKEND = (
+        Path(__file__).resolve().parents[1] / "app" / "scan_backend.py"
+    ).read_text(encoding="utf-8")
+
+    def _task(self) -> str:
+        start = self.BACKEND.index("def _flir_detailed_task(")
+        end = self.BACKEND.find("\n    def ", start + 1)
+        return self.BACKEND[start:end if end != -1 else None]
+
+    def test_the_conversion_uses_a_pool(self):
+        body = self._task()
+        assert "ThreadPoolExecutor(" in body
+        assert "ccflux-flir-temperature" in body
+
+    def test_the_reader_count_is_declared_and_bounded(self):
+        from app.scan_backend import DashboardScanBackend
+
+        assert 1 <= DashboardScanBackend.FLIR_TEMPERATURE_READERS <= 32
+
+    def test_rows_keep_acquisition_order(self):
+        """as_completed returns frames in whatever order they finish, so each
+        result is placed by its index rather than appended."""
+        body = self._task()
+        assert "rows[pending[future]] = future.result()" in body
+        assert "rows.append(" not in body
+
+    def test_cancellation_is_still_checked_per_frame(self):
+        body = self._task()
+        block = body[body.index("as_completed(pending)"):]
+        assert "context.check_cancelled()" in block[:400]
+
+    def test_a_failure_does_not_leave_the_pool_working(self):
+        body = self._task()
+        assert "future.cancel()" in body
+
+    def test_progress_is_still_reported(self):
+        body = self._task()
+        assert "Radiometric temperature" in body
+
+    def test_the_frame_conversion_opens_its_own_handle(self):
+        """What makes the frames independent in the first place."""
+        source = (
+            Path(__file__).resolve().parents[1] / "legacy_integration" / "FLIR"
+            / "flir_health_temperature.py"
+        ).read_text(encoding="utf-8")
+        block = source[source.index("def raw_array_from_object("):]
+        block = block[: block.index("\ndef ")]
+        assert 'with path.open("rb") as stream:' in block
+
+    def test_placeholder_rows_are_all_replaced(self):
+        """A frame whose future never lands would leave None in the CSV."""
+        body = self._task()
+        assert "rows: list[dict[str, object]] = [None] * len(indices)" in body
+        # Every index is submitted, so every slot is written.
+        assert "for position, index in enumerate(indices)" in body

@@ -40,7 +40,7 @@ from core.models import (
     ProgressUpdate,
     SourceFile,
 )
-from core.resource_manager import CameraBatchPolicy, ResourceLimits, iter_batches
+from core.resource_manager import CameraBatchPolicy, ResourceLimits
 from core.scanner import ScanIndex
 from core.time_manager import TimeRange, TimezoneState
 from instruments.base.interface import InstrumentBase, ProgressCallback
@@ -54,6 +54,19 @@ MINIMUM_CAPTURE_YEAR = 2025
 IMAGE_SUFFIXES = frozenset({".tif", ".tiff"})
 CAPTURE_PATTERN = re.compile(r"(.+?)_(\d+)\.tiff?$", re.IGNORECASE)
 MetadataReader = Callable[[Path], Mapping[str, Any]]
+# Reading a capture's metadata means decompressing one band, because a MicaSense
+# TIFF keeps its first IFD at the end of the file. That is a disk seek and zlib,
+# both of which release the interpreter lock, so the reads overlap and the
+# useful number of readers is well above the core count. It is deliberately not
+# the CPU allocation: this is one job inside the camera group's single worker,
+# and it is waiting on the disk rather than computing.
+#
+# Measured over 600 entries of Flight_CC0806, cold: 65 entries/s read one at a
+# time, 102 with eight readers, and no faster with sixteen or thirty-two - the
+# disk is the ceiling. Warm the same slices reach 1 616 entries/s at eight and
+# 2 014 at sixteen. Sixteen therefore takes the cache-warm gain while costing
+# nothing cold, and holds sixteen archives open rather than a whole delivery.
+MICASENSE_METADATA_READERS = 16
 
 
 @dataclass(slots=True)
@@ -107,6 +120,7 @@ class MicaSenseLevel1Adapter(InstrumentBase):
         self.batch_policy = batch_policy or CameraBatchPolicy(
             maximum_batch_files=32, maximum_thumbnail_count=24
         )
+        self.METADATA_READERS = MICASENSE_METADATA_READERS
         self.metadata_reader = metadata_reader or _pillow_metadata
         self.logger = logger
         self.unusually_small_bytes = unusually_small_bytes
@@ -237,6 +251,21 @@ class MicaSenseLevel1Adapter(InstrumentBase):
         self._emit(2, "MicaSense files validated")
         return LoadedMicaSense(candidate, _all_images(candidate.paths))
 
+    def _read_group(
+        self, files: Sequence[Any], indices: Sequence[int]
+    ) -> list[dict[str, Any]]:
+        """Read one archive's bands on one worker, then give its handle back.
+
+        Closing here rather than at the end of the pass is what keeps the count
+        of open archives equal to the number of workers. A thread-local handle
+        left behind survives until the thread does, and on Windows an archive
+        still held open is an archive the next stage cannot move or delete.
+        """
+        try:
+            return [self._inspect_one(files[index]) for index in indices]
+        finally:
+            release_archive_handle()
+
     def process_quicklook(
         self, loaded: LoadedMicaSense, options: Mapping[str, Any]
     ) -> InstrumentResult:
@@ -245,29 +274,45 @@ class MicaSenseLevel1Adapter(InstrumentBase):
         self._records = []
         corrupt: list[str] = []
         small: list[str] = []
-        batch_size = min(
-            self.batch_policy.maximum_batch_files,
-            max(1, self.resource_limits.memory_bytes // (8 * 1024 * 1024)),
-        )
-        for batch_number, batch in enumerate(iter_batches(files, batch_size), start=1):
-            self._check_cancelled()
-            workers = max(1, min(self.resource_limits.worker_count, len(batch)))
-            with ThreadPoolExecutor(
-                max_workers=workers, thread_name_prefix="ccflux-micasense-meta"
-            ) as executor:
-                records = executor.map(self._inspect_one, batch)
-                for path, record in zip(batch, records):
+        # One pool for the whole delivery, not one per batch of 32. Each batch
+        # was a barrier: the pool was built, its files read, then every worker
+        # waited for the slowest before the next batch began, 1 865 times over
+        # Flight_CC0806's 59 667 images. Removing it measured 27% faster once
+        # the cache was warm and made no difference cold, where the disk sets
+        # the pace either way. In-flight files are bounded by the number of
+        # readers rather than by the batch, so the memory ceiling is unchanged.
+        groups = _reading_groups(files)
+        workers = max(1, min(self.METADATA_READERS, len(groups)))
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="ccflux-micasense-meta"
+        ) as executor:
+            reading = [executor.submit(self._read_group, files, group)
+                       for group in groups]
+            completed = announced = 0
+            try:
+                for group, future in zip(groups, reading):
                     self._check_cancelled()
-                    self._records.append(record)
-                    if record["corrupt"]:
-                        corrupt.append(path.name)
-                    if record["unusually_small"]:
-                        small.append(path.name)
-            completed = min(len(self._records), len(files))
-            self._emit(
-                5 + 70 * completed / max(1, len(files)),
-                f"Metadata batch {batch_number}: {completed}/{len(files)} images",
-            )
+                    for index, record in zip(group, future.result()):
+                        self._records.append(record)
+                        if record["corrupt"]:
+                            corrupt.append(files[index].name)
+                        if record["unusually_small"]:
+                            small.append(files[index].name)
+                    completed += len(group)
+                    if completed - announced >= 200 or completed == len(files):
+                        announced = completed
+                        self._emit(
+                            5 + 70 * completed / max(1, len(files)),
+                            f"Reading capture metadata: "
+                            f"{completed:,}/{len(files):,} images",
+                        )
+            except BaseException:
+                # Leaving the pool otherwise waits for every queued capture, so
+                # a cancelled delivery would keep reading for minutes after the
+                # operator asked it to stop.
+                for future in reading:
+                    future.cancel()
+                raise
 
         self._share_capture_metadata()
         # Every instrument processes only what falls inside the operator's
@@ -459,7 +504,10 @@ class MicaSenseLevel1Adapter(InstrumentBase):
                     if key != "normalised_intervals"
                 },
                 "sharpness_sampled_captures": sharpness_samples,
-                "batch_size": batch_size,
+                # How many images were being read at once. It replaces the old
+                # batch size, which described a barrier that no longer exists;
+                # this is the real ceiling on files in flight, and so on memory.
+                "metadata_readers": min(self.METADATA_READERS, max(1, len(files))),
                 "cpu_limit": self.resource_limits.worker_count,
                 "ram_limit_bytes": self.resource_limits.memory_bytes,
                 "excluded_operations": [
@@ -830,6 +878,35 @@ def _all_images(paths: Sequence[Path]) -> tuple[Any, ...]:
         except (OSError, zipfile.BadZipFile):
             images.append(ArchiveImage(archive, "__CORRUPT_ARCHIVE__.tif", 0))
     return tuple(images)
+
+
+def _reading_groups(files: Sequence[Any]) -> list[list[int]]:
+    """The units of parallel work: one archive's bands stay on one worker.
+
+    _open_archive holds one handle per thread and closes it the moment that
+    thread is handed a member of a different archive. Submitting the delivery
+    file by file scatters a capture's six bands over six workers, so every band
+    pays its own central-directory read — the cost the handle cache exists to
+    avoid. Grouping keeps one open per capture and still runs the captures
+    alongside each other.
+
+    On this machine the two schedules measured the same, within a few per cent
+    either way, because the disk is the ceiling. The invariant is what matters:
+    the delivery that made the cache worth building was read over USB at 1.2 s
+    per band, and per-file scheduling would quietly undo it there.
+
+    Loose images own no handle to reuse, so each is its own unit.
+    """
+    groups: list[list[int]] = []
+    grouping: Path | None = None
+    for index, item in enumerate(files):
+        archive = getattr(item, "archive", None)
+        if archive is not None and archive == grouping:
+            groups[-1].append(index)
+            continue
+        groups.append([index])
+        grouping = archive
+    return groups
 
 
 def _filename_parts(path: Any) -> tuple[str | None, int | None]:

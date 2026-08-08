@@ -179,6 +179,129 @@ def test_the_time_range_pass_reads_one_band_per_capture(adapter, tmp_path):
     assert not [name for name in decoded if name.endswith("_6.tif")]
 
 
+class TestCapturesAreReadAlongsideEachOther:
+    """Flight_CC0806's 59 978 images were read one batch of 32 at a time.
+
+    Each batch was a barrier: the pool was built, its files read, and every
+    worker then waited for the slowest before the next batch could start, 1 865
+    times over. One pool for the whole delivery measured 27% faster warm and no
+    slower cold, where the disk sets the pace regardless.
+
+    The unit of work is the archive, not the file. _open_archive keeps one
+    handle per thread and drops it as soon as that thread is handed a member of
+    a different archive, so scattering a capture's six bands over six workers
+    would make every band pay its own central-directory read.
+    """
+
+    SOURCE = (
+        Path(__file__).resolve().parents[1]
+        / "instruments" / "micasense" / "adapter.py"
+    ).read_text(encoding="utf-8")
+
+    def _pass(self) -> str:
+        start = self.SOURCE.index("    def process_quicklook(")
+        end = self.SOURCE.index("self._share_capture_metadata()", start)
+        return self.SOURCE[start:end]
+
+    def test_the_batch_barrier_is_gone(self):
+        body = self._pass()
+        assert "iter_batches" not in body
+        assert "iter_batches" not in self.SOURCE, "the import outlived its use"
+
+    def test_one_pool_covers_the_delivery(self):
+        body = self._pass()
+        assert body.count("ThreadPoolExecutor(") == 1
+        assert "ccflux-micasense-meta" in body
+
+    def test_the_reader_count_is_declared_and_bounded(self):
+        from instruments.micasense.adapter import MICASENSE_METADATA_READERS
+
+        assert 1 <= MICASENSE_METADATA_READERS <= 32
+
+    def test_a_captures_bands_are_one_unit_of_work(self, tmp_path):
+        from instruments.micasense.adapter import _reading_groups
+
+        first = _capture_archive(tmp_path / "IMG_0000.zip", "IMG_0000", bands=6)
+        second = _capture_archive(tmp_path / "IMG_0001.zip", "IMG_0001", bands=6)
+        images = _all_images((first, second))
+
+        groups = _reading_groups(images)
+
+        assert [len(group) for group in groups] == [6, 6]
+        for group in groups:
+            archives = {images[index].archive for index in group}
+            assert len(archives) == 1
+
+    def test_loose_images_parallelise_one_by_one(self, tmp_path):
+        """A plain file has no handle to reuse, so nothing is gained by pairing
+        it with its neighbour and a worker would sit idle behind it."""
+        from instruments.micasense.adapter import _reading_groups
+
+        loose = [tmp_path / f"IMG_{index:04d}_1.tif" for index in range(4)]
+
+        assert _reading_groups(loose) == [[0], [1], [2], [3]]
+
+    def test_no_archive_is_left_open_by_a_worker(self, adapter, tmp_path):
+        """The handle lives in thread-local storage, so a worker that keeps one
+        keeps it until the thread dies - and on Windows an archive still open is
+        an archive the next stage cannot move or delete."""
+        archive = _capture_archive(tmp_path / "IMG_0000.zip", "IMG_0000", bands=3)
+        images = _all_images((archive,))
+        release_archive_handle()
+
+        closed: list[bool] = []
+        original = adapter._inspect_one
+
+        def watching(item):
+            record = original(item)
+            closed.append(True)
+            return record
+
+        adapter._inspect_one = watching
+        adapter._read_group(images, list(range(len(images))))
+
+        from instruments.micasense.adapter import _ARCHIVE_HANDLES
+
+        assert len(closed) == 3
+        assert getattr(_ARCHIVE_HANDLES, "handle", None) is None
+
+    def test_a_group_gives_its_handle_back_even_when_a_band_fails(
+        self, adapter, tmp_path
+    ):
+        archive = _capture_archive(tmp_path / "IMG_0000.zip", "IMG_0000", bands=2)
+        images = _all_images((archive,))
+        release_archive_handle()
+        adapter._inspect_one = lambda item: (_ for _ in ()).throw(RuntimeError("x"))
+
+        with pytest.raises(RuntimeError):
+            adapter._read_group(images, [0, 1])
+
+        from instruments.micasense.adapter import _ARCHIVE_HANDLES
+
+        assert getattr(_ARCHIVE_HANDLES, "handle", None) is None
+
+    def test_records_stay_in_delivery_order(self, adapter, tmp_path):
+        """Bands finish in whatever order the disk returns them, and the capture
+        counts join on position."""
+        for index in range(4):
+            _capture_archive(tmp_path / f"IMG_{index:04d}.zip", f"IMG_{index:04d}")
+        release_archive_handle()
+        candidate = InputCandidate(
+            "micasense", tuple(sorted(tmp_path.glob("*.zip"))), 1.0, "fixture"
+        )
+
+        adapter.process_quicklook(adapter.load(candidate), {})
+
+        read = [record["capture_id"] for record in adapter._records]
+        assert read == sorted(read), read
+
+    def test_cancelling_does_not_wait_for_the_queue(self):
+        """Leaving the pool otherwise blocks on every queued capture."""
+        body = self._pass()
+        assert "future.cancel()" in body
+        assert "self._check_cancelled()" in body
+
+
 def test_a_loose_tiff_is_still_read(adapter, tmp_path):
     """The skip keys on ArchiveImage.read_metadata; a plain file has no flag."""
     import io as _io
