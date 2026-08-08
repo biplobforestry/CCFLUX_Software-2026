@@ -232,3 +232,61 @@ def test_the_run_publishes_measured_coverage_back_to_the_card():
     assert 'result.metadata.get("delivered_utc_start")' in body
     assert "state.utc_start_time = measured_start" in body
     assert "_rebuild_time_state()" in body
+
+
+class TestASampledWindowIsNotReportedAsMissingData:
+    """MicaSense read 66.1% on Flight_CC0807 with all 9 999 captures present.
+
+    A camera's window comes from a bounded sample of its deliveries - 147 of
+    9 999 - so the figure is the extent of what was read, not of what was
+    recorded. Shown bare, and in amber as "Partial coverage", it said a third
+    of the flight was missing. Processing re-globs the folder and reads every
+    file regardless, which is why the run then produced the lot.
+    """
+
+    def test_the_sampled_instruments_are_marked(self):
+        from core.dashboard_time import (
+            SAMPLED_COVERAGE_INSTRUMENTS, InstrumentTimeSelection,
+        )
+
+        assert SAMPLED_COVERAGE_INSTRUMENTS == {"flir", "gopro", "micasense"}
+        assert InstrumentTimeSelection("micasense", None, None).coverage_is_estimated is False
+
+    def test_the_flag_is_set_where_the_selection_is_built(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "core" / "dashboard_time.py"
+        ).read_text(encoding="utf-8")
+        assert (
+            "coverage_is_estimated=instrument_id in SAMPLED_COVERAGE_INSTRUMENTS"
+            in source
+        )
+
+    def test_it_reaches_the_browser(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "core" / "dashboard_time.py"
+        ).read_text(encoding="utf-8")
+        assert '"coverage_is_estimated": value.coverage_is_estimated,' in source
+
+    def test_a_measured_instrument_keeps_the_amber_warning(self):
+        script = (
+            Path(__file__).resolve().parents[1] / "app" / "assets" / "dashboard.js"
+        ).read_text(encoding="utf-8")
+        assert "Partial coverage: " in script
+        assert "var(--amber)" in script
+
+    def test_a_sampled_instrument_says_it_was_sampled(self):
+        script = (
+            Path(__file__).resolve().parents[1] / "app" / "assets" / "dashboard.js"
+        ).read_text(encoding="utf-8")
+        assert "Window estimated from a sample of the deliveries" in script
+        assert "Every file is read when this instrument is processed." in script
+        assert "(sampled)" in script
+
+    def test_the_timeline_marks_the_figure_as_approximate(self):
+        script = (
+            Path(__file__).resolve().parents[1] / "app" / "assets" / "dashboard.js"
+        ).read_text(encoding="utf-8")
+        timeline = script[script.index("function renderAvailabilityTimeline"):]
+        timeline = timeline[: timeline.index("\n  function ")]
+        assert "coverage_is_estimated" in timeline
+        assert "\u2248" in timeline

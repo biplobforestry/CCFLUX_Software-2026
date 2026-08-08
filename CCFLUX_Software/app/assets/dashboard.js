@@ -1450,7 +1450,11 @@
         ? (coverage.outside_selected_range
             ? 'outside the Time Filter'
             : Number.isFinite(Number(coverage.availability_percentage))
-              ? `${Number(coverage.availability_percentage).toFixed(1)}% of the interval`
+              // "≈ sampled" for a camera: the figure is the extent of the
+              // deliveries whose timestamps were read, not of the recording.
+              ? `${coverage.coverage_is_estimated ? '≈' : ''}`
+                + `${Number(coverage.availability_percentage).toFixed(1)}% of the interval`
+                + `${coverage.coverage_is_estimated ? ' (sampled)' : ''}`
               : 'coverage unknown')
         : 'not detected';
       document.getElementById(textId).textContent =
@@ -2813,7 +2817,22 @@
       if (range.outside_selected_range || !Number.isFinite(availability) || availability <= 0) {
         const note = document.createElement('span'); note.className = 'outside-range-note'; note.textContent = 'No data in the selected global time range'; note.style.color = 'var(--red)'; metadata.appendChild(document.createElement('br')); metadata.appendChild(note);
       } else if (availability < 100) {
-        const note = document.createElement('span'); note.className = 'outside-range-note'; note.textContent = `Partial coverage: ${availability.toFixed(1)}% — available overlap will be processed`; note.style.color = 'var(--amber)'; metadata.appendChild(document.createElement('br')); metadata.appendChild(note);
+        // A camera's window is read from a bounded sample of its deliveries, so
+        // a shortfall here is the extent of what was sampled and not of what was
+        // recorded. Calling that "partial coverage" in amber said a third of a
+        // MicaSense flight was missing when every capture was present, and
+        // processing re-reads the folder in full regardless.
+        const note = document.createElement('span');
+        note.className = 'outside-range-note';
+        if (range.coverage_is_estimated) {
+          note.textContent = `Window estimated from a sample of the deliveries (≈${availability.toFixed(1)}% of the interval). Every file is read when this instrument is processed.`;
+          note.style.color = 'var(--muted)';
+        } else {
+          note.textContent = `Partial coverage: ${availability.toFixed(1)}% — available overlap will be processed`;
+          note.style.color = 'var(--amber)';
+        }
+        metadata.appendChild(document.createElement('br'));
+        metadata.appendChild(note);
       }
     });
     renderAvailabilityTimeline(timeState);
@@ -2885,7 +2904,16 @@
       const card = document.querySelector(`[data-instrument-id="${instrumentId}"]`);
       const name = card?.dataset.name || instrumentId;
       const percentage = range.availability_percentage == null ? 0 : range.availability_percentage;
-      return `<div class="timeline-row"><span>${escapeHtml(name)}</span><div class="track"><div class="fill ${range.outside_selected_range ? 'warn' : ''}" style="width:${Math.max(0, Math.min(100, percentage))}%"></div></div><span>${range.outside_selected_range ? 'OUT' : `${percentage}%`}</span></div>`;
+      // "≈" and a title, because a camera's figure comes from a sample of its
+      // deliveries. Printed bare it claimed a third of a MicaSense flight was
+      // absent when all 9 999 captures were on the disk and were processed.
+      const estimated = Boolean(range.coverage_is_estimated);
+      const reading = range.outside_selected_range
+        ? 'OUT' : `${estimated ? '≈' : ''}${percentage}%`;
+      const explanation = estimated
+        ? ' title="Estimated from a bounded sample of this camera&apos;s deliveries. Every file is read when the instrument is processed."'
+        : '';
+      return `<div class="timeline-row"${explanation}><span>${escapeHtml(name)}</span><div class="track"><div class="fill ${range.outside_selected_range ? 'warn' : ''}${estimated ? ' estimated' : ''}" style="width:${Math.max(0, Math.min(100, percentage))}%"></div></div><span>${reading}</span></div>`;
     }).join('');
     const header = timeline.closest('.panel').querySelector('.panel-header .system-count');
     header.textContent = timeState.selected_analysis_start && timeState.selected_analysis_end

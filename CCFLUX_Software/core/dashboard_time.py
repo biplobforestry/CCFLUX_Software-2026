@@ -51,6 +51,14 @@ class InstrumentTimeSelection:
     override_end: datetime | None = None
     outside_selected_range: bool = False
     availability_percentage: float | None = None
+    # Whether that percentage was measured or estimated. A camera's window comes
+    # from a bounded sample of its deliveries - 147 of MicaSense's 9 999 - so it
+    # is the extent of what was read, not of what was recorded. Shown as a bare
+    # figure it reads as "a third of your flight is missing", which on
+    # Flight_CC0807 was not true: processing re-reads every file and found the
+    # captures the sample had not been given. The distinction travels with the
+    # number so the page can say which it is.
+    coverage_is_estimated: bool = False
     # The intervals the source files actually cover. Empty means the coverage
     # was never measured per file, and the envelope below is all there is.
     coverage_segments: tuple[tuple[datetime, datetime], ...] = ()
@@ -156,6 +164,7 @@ class DashboardTimeState:
                     )
                     if utc_start is not None and utc_end is not None
                 ),
+                coverage_is_estimated=instrument_id in SAMPLED_COVERAGE_INSTRUMENTS,
             )
         valid = [
             item
@@ -319,6 +328,7 @@ class DashboardTimeState:
                     "effective_end": _iso(value.effective_end),
                     "outside_selected_range": value.outside_selected_range,
                     "availability_percentage": value.availability_percentage,
+                    "coverage_is_estimated": value.coverage_is_estimated,
                     "timezone_warnings": list(value.timezone_warnings),
                     "coverage_segments": [
                         [_iso(first), _iso(last)]
