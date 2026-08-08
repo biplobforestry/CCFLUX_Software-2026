@@ -174,8 +174,10 @@
       rows.push({
         left: gas ? [{key: gas.key, colour: PALETTE[index % PALETTE.length], width: 1.4}] : [],
         // Altitude opposite the gas on every new row: the first question asked
-        // of an enhancement is what height it was met at.
-        right: altitude ? [{key: 'altitude', colour: '#6f6f6f', width: 1.0}] : [],
+        // of an enhancement is what height it was met at. Drawn at the same
+        // weight as the gas - a one-pixel light grey line is easy to take for
+        // grid work and be missed entirely.
+        right: altitude ? [{key: 'altitude', colour: '#5b6f73', width: 1.4}] : [],
       });
     }
     return rows;
@@ -266,14 +268,27 @@
     const values = (state.data.series[entry.key] || [])
       .filter((value) => value !== null && Number.isFinite(value));
     if (values.length < 2) return null;
-    let low = Math.min(...values);
-    let high = Math.max(...values);
+    const sorted = values.slice().sort((a, b) => a - b);
+    const at = (fraction) =>
+      sorted[Math.min(sorted.length - 1,
+                      Math.max(0, Math.round((sorted.length - 1) * fraction)))];
+    // The body of the trace, not its two worst samples. CO sitting near
+    // 120 ppb with a pair of spikes at 7 000 was drawn on a 0-7 000 axis and
+    // read as a flat line along the bottom. A spike beyond this runs off the
+    // top of the panel, which is visible, and the region readout still gives
+    // its true value because that comes from the raw record.
+    let low = at(0.005);
+    let high = at(0.995);
+    if (!(high > low)) { low = sorted[0]; high = sorted[sorted.length - 1]; }
     if (!(high > low)) {
       const pad = Math.abs(high) * 0.05 || 1;
       return [low - pad, high + pad];
     }
     const pad = (high - low) * 0.08;
-    return [low - pad, high + pad];
+    // A concentration does not go below zero, and an axis that starts at -457
+    // says it might.
+    const floor = sorted[0] >= 0 ? Math.max(0, low - pad) : low - pad;
+    return [floor, high + pad];
   }
 
   function traceFor(entry, axis) {

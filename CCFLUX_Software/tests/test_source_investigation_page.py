@@ -122,13 +122,28 @@ class TestWhatTheOperatorAskedFor:
         block = SCRIPT[SCRIPT.index("Plotly.react(target"):]
         assert "element.style.height" in SCRIPT[:SCRIPT.index("Plotly.react(target")]
 
-    def test_one_bad_sample_does_not_set_the_scale(self):
-        """Autoscaled to every raw excursion, a spike collapses the trace onto
-        the axis and the flight reads as flat."""
+    def test_a_pair_of_spikes_does_not_set_the_scale(self):
+        """Measured on Flight_CC0806: CO sits near 120 ppb with two spikes at
+        7 000, and a full-range axis drew it as a flat line along the bottom.
+        On the body of the trace it reads 78-392 ppb with its plumes visible."""
         assert "function rangeFor(" in SCRIPT
         block = SCRIPT[SCRIPT.index("function rangeFor("):]
-        assert "state.data.series[entry.key]" in block[:400]
+        block = block[: block.index("function axisTitle(")]
+        assert "at(0.005)" in block and "at(0.995)" in block
         assert "axis.range = range" in SCRIPT
+
+    def test_a_concentration_axis_does_not_start_below_zero(self):
+        """Padding the range pushed CO's axis to -457, which says a negative
+        concentration is possible."""
+        block = SCRIPT[SCRIPT.index("function rangeFor("):]
+        assert "sorted[0] >= 0 ? Math.max(0," in block
+
+    def test_altitude_is_drawn_at_a_weight_that_can_be_seen(self):
+        """A one-pixel light grey line is easy to take for grid work."""
+        block = SCRIPT[SCRIPT.index("function defaultRows("):]
+        block = block[: block.index("function renderRows(")]
+        assert "key: 'altitude'" in block
+        assert "width: 1.4" in block
 
     def test_the_axis_menu_opens_on_right_click(self):
         assert "chip.oncontextmenu" in SCRIPT
