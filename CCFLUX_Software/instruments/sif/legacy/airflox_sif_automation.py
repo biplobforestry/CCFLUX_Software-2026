@@ -52,6 +52,66 @@ def header_value_positions(d):
         raise KeyError(a)
     return {'it_e':pos('IT_WR[us]='),'it_l':pos('IT_VEG[us]='),'temp1':pos('mainboard_temp[C]=','outside_temp[C]='),'humidity':pos('mainboard_humidity=','relative_humidity='),'gps_time':pos('GPS_TIME_UTC='),'gps_date':pos('GPS_date='),'gps_lat':pos('GPS_lat='),'gps_lon':pos('GPS_lon='),'cpu1':pos('gps_CPU='),'cpu2':pos('veg_CPU=')}
 
+def repair_raw_blocks(r,source=None):
+    """Bring block metadata to a state the calculation can rely on.
+
+    A block whose spectra are complete can still carry unusable metadata: the
+    AirFloX writes each block as it goes, so an interrupted write leaves the
+    tail fields blank or half-formed. Flight_CC0807 has three such blocks in
+    1 310, and left alone each one broke a different calculation downstream - a
+    missing integration offset ended the run outright, and a coordinate that
+    parsed as latitude 2495 was copied over all 1 307 rows that held no
+    position, putting the exported solar zenith angle at 156 degrees.
+
+    Doing it here, once, is what keeps that from being three separate defences
+    that each have to think about corrupt input. Past this point every metadata
+    field is either usable or unambiguously absent.
+
+    Nothing is dropped: the spectra of these blocks are good, and a block is
+    worth more than the field it is missing. What cannot be trusted is cleared,
+    so a later step reads "absent" instead of a plausible wrong number.
+    """
+    count=len(r.date); notes=[]
+
+    # Coordinates. Off the globe is not a position, and neither is a value that
+    # will not parse; both must read as absent rather than as somewhere.
+    lat=parse_gps_coord(r.gps_lat,'N','S'); lon=parse_gps_coord(r.gps_lon,'E','W')
+    unusable=(np.abs(lat)>90)|(np.abs(lon)>180)
+    written=np.array([bool(str(v).strip()) for v in r.gps_lat],dtype=bool)
+    unusable|=written&(~np.isfinite(lat)|~np.isfinite(lon))
+    if unusable.any():
+        r.gps_lat=['' if bad else v for v,bad in zip(r.gps_lat,unusable)]
+        r.gps_lon=['' if bad else v for v,bad in zip(r.gps_lon,unusable)]
+        notes.append(f'{int(unusable.sum())} coordinate pair(s) were not a position on '
+                     'the globe and are read as no fix')
+
+    # The two CPU stamps give the sub-second gap between the GPS read and the
+    # spectrum. One without the other says nothing, so neither is kept.
+    cpu1=np.asarray(r.cpu1,dtype=float); cpu2=np.asarray(r.cpu2,dtype=float)
+    half=np.isfinite(cpu1)^np.isfinite(cpu2)
+    if half.any():
+        cpu1[half]=np.nan; cpu2[half]=np.nan
+        r.cpu1=cpu1; r.cpu2=cpu2
+        notes.append(f'{int(half.sum())} block(s) carried one CPU stamp without the other')
+
+    # Integration time divides the counts. Zero or negative is not a shutter,
+    # and silently produced an infinity where a NaN says "not measured".
+    for field,label in (('it_e_ms','incoming'),('it_l_ms','reflected')):
+        values=np.asarray(getattr(r,field),dtype=float)
+        impossible=np.isfinite(values)&(values<=0)
+        if impossible.any():
+            values[impossible]=np.nan
+            setattr(r,field,values)
+            notes.append(f'{int(impossible.sum())} block(s) reported a {label} integration '
+                         'time of zero or less')
+
+    if notes:
+        where=f' in {Path(source).name}' if source else ''
+        print(f'warning=Repaired the metadata of incomplete AirFloX block(s){where}, out of '
+              f'{count}: '+'; '.join(notes)+'. The spectra themselves are unchanged and '
+              'those blocks are kept.')
+    return r
+
 def filter_raw(r,k):
     return AirFloXRaw(r.e[:,k],r.dc_e[:,k],r.e2[:,k],r.l[:,k],r.dc_l[:,k],r.it_e_ms[k],r.it_l_ms[k],[v for v,x in zip(r.date,k) if x],[v for v,x in zip(r.time,k) if x],r.temp1[k],r.humidity[k],[v for v,x in zip(r.gps_time,k) if x],[v for v,x in zip(r.gps_date,k) if x],[v for v,x in zip(r.gps_lat,k) if x],[v for v,x in zip(r.gps_lon,k) if x],r.cpu1[k],r.cpu2[k])
 
@@ -78,6 +138,7 @@ def read_drox_full(p,n,drop_e500_zero=False,drop_zero_gps=True):
     # the Noseboom/gimbal telemetry log, because the spectrometer's own GPS is
     # then unused. Flight_2707 has no AirFloX fix at all, so this filter would
     # discard every measurement. On flights that do carry a fix it is a no-op.
+    r=repair_raw_blocks(r,p)
     keep=np.ones(len(r.date),dtype=bool)
     if drop_zero_gps:
         keep&=~(pd.to_numeric(pd.Series(r.gps_lat),errors='coerce').to_numpy(float)==0)
@@ -159,16 +220,12 @@ def fill_bad_gps(lat,lon,*,r_getcoordinates=True):
     # fix, the Noseboom recomputation never ran, and the exported solar zenith
     # angle reached 156 degrees at midday. gps_position_mask already rejects
     # these; this is the same judgement applied where the value is used.
+    # read_drox_full has already cleared any coordinate that was not a position,
+    # so this is R's getcoordinates() and nothing more. The guard stays as an
+    # invariant rather than a repair: a value off the globe reaching here would
+    # be copied over every row that has no fix, which is how Flight_CC0807's
+    # latitude 2495 became the whole file's position.
     off_globe=(np.abs(lat)>90)|(np.abs(lon)>180)
-    rejected=int(np.count_nonzero(off_globe))
-    if rejected:
-        print(f'warning=The AirFloX receiver reported {rejected} coordinate(s) outside '
-              'the globe; they are treated as no fix rather than as a position.')
-    # Cleared, not merely flagged. Marking them bad only decides which rows get
-    # overwritten, and when every row is bad there is nothing to overwrite them
-    # with - so 2495 stayed in the array and still answered "this file has a
-    # position", which is the judgement that decides whether the Noseboom
-    # recomputation runs at all.
     lat[off_globe]=np.nan; lon[off_globe]=np.nan
     bad=(~np.isfinite(lat))|(~np.isfinite(lon))|(lat==0)|(lon==0)
     good=~bad

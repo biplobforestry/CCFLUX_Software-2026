@@ -278,6 +278,8 @@ def test_bundled_science_differs_from_the_original_only_where_recorded():
         #   the Noseboom recomputation that would have corrected the angle never
         #   ran.
         "cpu_time_offsets",   # new: R's (CPU2-CPU1)/1000, NaN-tolerant
+        "repair_raw_blocks",  # new: one repair pass over the block metadata
+        "read_drox_full",     # already listed above; runs that pass
         "process_common",     # already listed above; uses the two guards
         "fill_bad_gps",       # already listed above; rejects an off-globe pair
     }

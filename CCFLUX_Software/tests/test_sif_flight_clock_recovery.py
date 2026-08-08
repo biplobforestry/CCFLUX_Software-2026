@@ -263,13 +263,107 @@ class TestACoordinateOffTheGlobeIsNotAPosition:
         )
         assert np.isnan(filled_lon[1])
 
-    def test_the_operator_is_told(self, airflox, capsys):
+    def test_fill_bad_gps_stays_silent_now_the_reader_reports_it(
+        self, airflox, capsys
+    ):
+        """The repair moved to read_drox_full; this is only the invariant."""
         airflox.fill_bad_gps(np.array([0.0, 2495.0]), np.array([0.0, 2522.0]))
-        assert "outside the globe" in capsys.readouterr().out
+        assert capsys.readouterr().out == ""
 
-    def test_a_clean_file_says_nothing(self, airflox, capsys):
-        airflox.fill_bad_gps(np.array([50.6232]), np.array([6.9870]))
-        assert "outside the globe" not in capsys.readouterr().out
+    def test_a_clean_file_is_left_exactly_alone(self, airflox, capsys):
+        lat, lon = np.array([50.6232]), np.array([6.9870])
+        filled_lat, filled_lon = airflox.fill_bad_gps(lat.copy(), lon.copy())
+        assert filled_lat[0] == pytest.approx(50.6232)
+        assert filled_lon[0] == pytest.approx(6.9870)
+        assert capsys.readouterr().out == ""
+
+
+class TestTheBlocksAreRepairedBeforeAnythingCalculates:
+    """One pass over the metadata in the reader, rather than a guard in each
+    consumer. Past read_drox_full every field is usable or absent."""
+
+    def _raw(self, airflox, **overrides):
+        count = overrides.pop("count", 3)
+        spectra = np.ones((4, count))
+        fields = dict(
+            e=spectra, dc_e=spectra, e2=spectra, l=spectra, dc_l=spectra,
+            it_e_ms=np.full(count, 100.0), it_l_ms=np.full(count, 100.0),
+            date=["260807"] * count, time=["084407"] * count,
+            temp1=np.zeros(count), humidity=np.zeros(count),
+            gps_time=["013049."] * count, gps_date=["050180"] * count,
+            gps_lat=["50.62320 N"] * count, gps_lon=["6.98700 E"] * count,
+            cpu1=np.zeros(count), cpu2=np.full(count, 100.0),
+        )
+        fields.update(overrides)
+        return airflox.AirFloXRaw(**fields)
+
+    def test_a_clean_file_is_untouched_and_silent(self, airflox, capsys):
+        raw = self._raw(airflox)
+        repaired = airflox.repair_raw_blocks(raw)
+        assert repaired.gps_lat == ["50.62320 N"] * 3
+        assert capsys.readouterr().out == ""
+
+    def test_a_coordinate_off_the_globe_is_read_as_no_fix(self, airflox):
+        raw = self._raw(
+            airflox,
+            gps_lat=["50.62320 N", "2495.00000 N", "50.62320 N"],
+            gps_lon=["6.98700 E", "2522.00000 E", "6.98700 E"],
+        )
+        repaired = airflox.repair_raw_blocks(raw)
+        assert repaired.gps_lat[1] == ""
+        assert repaired.gps_lon[1] == ""
+        assert repaired.gps_lat[0] == "50.62320 N"
+
+    def test_one_cpu_stamp_without_the_other_is_dropped(self, airflox):
+        raw = self._raw(
+            airflox,
+            cpu1=np.array([0.0, np.nan, 0.0]),
+            cpu2=np.array([100.0, 200.0, 100.0]),
+        )
+        repaired = airflox.repair_raw_blocks(raw)
+        assert np.isnan(repaired.cpu1[1]) and np.isnan(repaired.cpu2[1])
+        assert repaired.cpu2[0] == 100.0
+
+    def test_both_absent_is_left_absent(self, airflox):
+        """Not a repair - the offset is genuinely unknown, and cpu_time_offsets
+        reports it."""
+        raw = self._raw(
+            airflox,
+            cpu1=np.array([0.0, np.nan, 0.0]),
+            cpu2=np.array([100.0, np.nan, 100.0]),
+        )
+        repaired = airflox.repair_raw_blocks(raw)
+        assert np.isnan(repaired.cpu1[1])
+
+    def test_an_impossible_integration_time_becomes_absent(self, airflox):
+        raw = self._raw(airflox, it_e_ms=np.array([100.0, 0.0, -5.0]))
+        repaired = airflox.repair_raw_blocks(raw)
+        assert repaired.it_e_ms[0] == 100.0
+        assert np.isnan(repaired.it_e_ms[1]) and np.isnan(repaired.it_e_ms[2])
+
+    def test_the_spectra_are_never_touched(self, airflox):
+        raw = self._raw(airflox, gps_lat=["2495.0 N"] * 3, it_e_ms=np.zeros(3))
+        before = raw.e.copy()
+        repaired = airflox.repair_raw_blocks(raw)
+        assert np.array_equal(repaired.e, before)
+
+    def test_no_block_is_dropped(self, airflox):
+        raw = self._raw(airflox, gps_lat=["2495.0 N"] * 3)
+        assert len(airflox.repair_raw_blocks(raw).date) == 3
+
+    def test_the_operator_is_told_what_was_repaired(self, airflox, capsys):
+        raw = self._raw(airflox, gps_lat=["50.62320 N", "2495.0 N", "50.62320 N"])
+        airflox.repair_raw_blocks(raw, "F094639.CSV")
+        spoken = capsys.readouterr().out
+        assert "F094639.CSV" in spoken
+        assert "not a position on the globe" in spoken
+        assert "spectra themselves are unchanged" in spoken
+
+    def test_the_reader_runs_it(self):
+        source = (BUNDLED / "airflox_sif_automation.py").read_text(encoding="utf-8")
+        body = source[source.index("def read_drox_full("):]
+        body = body[: body.index("\ndef ")]
+        assert "repair_raw_blocks(r,p)" in body
 
 
 class TestWhetherTheFileCarriesAPositionAtAll:
