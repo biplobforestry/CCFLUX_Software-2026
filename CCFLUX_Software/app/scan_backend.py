@@ -3214,12 +3214,17 @@ class DashboardScanBackend:
             raise ValueError(f"No size distribution map for: {page}")
         instrument_name, tag = self.SIZE_MAP_PAGES[normalized]
         view = self.size_distribution_map_view(normalized)
-        if not view.get("available"):
+        # The georeferenced payload is nested under "data"; the outer dictionary
+        # carries only ready/flight_id/message. Reading the outer one made every
+        # export refuse with "no georeferenced samples" while the page beside it
+        # was drawing thousands of them.
+        payload = dict(view.get("data") or {})
+        if not payload.get("available"):
             raise ValueError(
-                str(view.get("message") or "")
+                str(view.get("message") or payload.get("message") or "")
                 or f"No georeferenced {instrument_name} samples to export."
             )
-        sensors = dict(view.get("sensors") or {})
+        sensors = dict(payload.get("sensors") or {})
         requested = str(request.get("sensor") or "")
         if requested and requested not in sensors:
             # Never quietly export a different one: the operator would get a
