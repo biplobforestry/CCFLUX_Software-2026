@@ -201,14 +201,35 @@ def haversine_m(lat1, lon1, lat2, lon2):
 STRAIGHT_DEFAULTS={'minimum_ground_speed_mps':8.0,'minimum_segment_duration_s':60,'heading_window_s':30,'maximum_heading_std_deg':10.0,'maximum_heading_rate_dps':3.0,'maximum_roll_angle_deg':10.0,'maximum_altitude_range_m':100.0,'maximum_vertical_speed_mps':2.2}
 
 NAVIGATION_COLUMNS=['plot_lat','plot_lon','altitude_m','height_m','ground_speed_mps','vertical_speed_mps','roll_deg','wind_mps','wind_u_mps','wind_v_mps','wind_w_mps','air_temp_degC','rel_humidity_pct']
+# Angles, which cannot be averaged the way the rest are: the median of 359 and 1
+# is 180, pointing south for a wind blowing from the north. Both are resampled
+# through the unit circle instead, and neither belongs in NAVIGATION_COLUMNS
+# because that list is passed straight to .median().
+CIRCULAR_NAVIGATION_COLUMNS=['heading_deg','wind_dir_deg']
+
+def interpolate_circular_deg(values, limit=2):
+    """Fill short gaps in a bearing without going the long way round.
+
+    Interpolating 359 to 1 in degrees passes through 180, so a wind from the
+    north is briefly recorded as a wind from the south. The components are
+    interpolated instead and the angle recovered from them.
+    """
+    radians=np.deg2rad(values.astype(float))
+    across=np.sin(radians).interpolate(limit=limit)
+    along=np.cos(radians).interpolate(limit=limit)
+    return np.rad2deg(np.arctan2(across,along))%360
 
 def resample_navigation(data, rule='1s'):
-    """Navigation columns on a fixed grid; heading averaged through north."""
+    """Navigation columns on a fixed grid; angles averaged through north."""
     x=data.set_index('time')
     out=x[[c for c in NAVIGATION_COLUMNS if c in x.columns]].resample(rule).median()
-    if 'heading_deg' in x.columns:
-        out['heading_deg']=x['heading_deg'].resample(rule).apply(circular_mean_deg)
-    out=out.interpolate(limit=2).dropna(subset=['plot_lat','plot_lon']); out.index.name='time'; return out
+    out=out.interpolate(limit=2)
+    for column in CIRCULAR_NAVIGATION_COLUMNS:
+        if column in x.columns:
+            out[column]=interpolate_circular_deg(
+                x[column].resample(rule).apply(circular_mean_deg)
+            )
+    out=out.dropna(subset=['plot_lat','plot_lon']); out.index.name='time'; return out
 
 def one_hz(data):
     return resample_navigation(data,'1s')
