@@ -262,6 +262,24 @@ def test_bundled_science_differs_from_the_original_only_where_recorded():
         # spreadsheet - with no position, and ID was written with eight decimals
         # where R writes an integer key.
         "write_dbf",
+        # Flight_CC0807's FULL channel holds 1 310 blocks, of which three are
+        # truncated. Each of the three fields they leave blank broke something
+        # different, and all three are repairs rather than science changes:
+        #
+        # * No CPU pair. R adds NA and carries on; timedelta(seconds=nan) raises
+        #   "cannot convert float NaN to integer", so one row ended a run three
+        #   minutes in.
+        # * Coordinates that parse as latitude 2495 and 2601. They were the only
+        #   rows that looked like a fix, so fill_bad_gps copied 2495 over all
+        #   1 307 rows that held 0.00000 and the exported solar zenith angle
+        #   reached 156 degrees at midday.
+        # * A blank coordinate. NaN is not equal to zero, so testing finite and
+        #   non-zero separately let it answer "this file has a position", and
+        #   the Noseboom recomputation that would have corrected the angle never
+        #   ran.
+        "cpu_time_offsets",   # new: R's (CPU2-CPU1)/1000, NaN-tolerant
+        "process_common",     # already listed above; uses the two guards
+        "fill_bad_gps",       # already listed above; rejects an off-globe pair
     }
 
     mine = _top_level_definitions(BUNDLED / "airflox_sif_automation.py")

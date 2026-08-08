@@ -152,6 +152,24 @@ def r_round_half_even(values,digits=4):
 
 def fill_bad_gps(lat,lon,*,r_getcoordinates=True):
     lat=np.asarray(lat,float).copy(); lon=np.asarray(lon,float).copy()
+    # A coordinate off the globe is not a position. Two truncated blocks in
+    # Flight_CC0807's FULL channel parse as latitude 2495 and 2601, and without
+    # this they were the only rows that looked good: the fill below then copied
+    # 2495 into all 1 307 rows that held 0.00000, the file appeared to carry a
+    # fix, the Noseboom recomputation never ran, and the exported solar zenith
+    # angle reached 156 degrees at midday. gps_position_mask already rejects
+    # these; this is the same judgement applied where the value is used.
+    off_globe=(np.abs(lat)>90)|(np.abs(lon)>180)
+    rejected=int(np.count_nonzero(off_globe))
+    if rejected:
+        print(f'warning=The AirFloX receiver reported {rejected} coordinate(s) outside '
+              'the globe; they are treated as no fix rather than as a position.')
+    # Cleared, not merely flagged. Marking them bad only decides which rows get
+    # overwritten, and when every row is bad there is nothing to overwrite them
+    # with - so 2495 stayed in the array and still answered "this file has a
+    # position", which is the judgement that decides whether the Noseboom
+    # recomputation runs at all.
+    lat[off_globe]=np.nan; lon[off_globe]=np.nan
     bad=(~np.isfinite(lat))|(~np.isfinite(lon))|(lat==0)|(lon==0)
     good=~bad
     if good.any():
@@ -763,6 +781,28 @@ def apply_time_window(m,r,start_utc=None,end_utc=None):
     r['E']=r['E'][:,keep]; r['L']=r['L'][:,keep]; r['Ref']=r['Ref'][:,keep]
     return m,r
 
+def cpu_time_offsets(raw):
+    """Seconds between the GPS read and the spectrum, per block.
+
+    R writes CPU1sec<-(CPU2-CPU1)/1000 and adds it, so a block whose CPU fields
+    are empty simply carries NA through. Python's timedelta refuses: it answers
+    "cannot convert float NaN to integer", and one truncated block took the
+    whole channel with it - Flight_CC0807 failed three minutes into a 1 310
+    block FULL file on a single row whose metadata fields were blank.
+
+    The correction is sub-second and refines a time that is already known, so a
+    block that lacks it keeps its own time rather than ending the flight.
+    """
+    offsets=(np.asarray(raw.cpu2,dtype=float)-np.asarray(raw.cpu1,dtype=float))/1000.0
+    missing=~np.isfinite(offsets)
+    count=int(np.count_nonzero(missing))
+    if count:
+        print(f'warning=The CPU timestamp pair is missing or unreadable on {count} of '
+              f'{len(offsets)} spectra, so the sub-second offset between the GPS read and '
+              'the spectrum is unknown there. Those blocks keep their recorded time; '
+              'everything else about them is unchanged.')
+    return np.where(missing,0.0,offsets)
+
 def process_common(raw_path,cal,index_path,mode,apply_nl=False,spectral_shift_correction=False,retain_zero_gps=False):
     wl=cal['wl'].to_numpy(float); raw=read_drox_full(raw_path,len(wl),drop_e500_zero=(mode=='FLUO'),drop_zero_gps=not retain_zero_gps)
     de,de2,dl=dark_subtracted_signals(raw,cal,apply_nl)
@@ -770,7 +810,8 @@ def process_common(raw_path,cal,index_path,mode,apply_nl=False,spectral_shift_co
     if mode=='FULL':
         e,e2,l,_shift_nm=apply_full_spectral_shift(wl,e,e2,l,spectral_shift_correction)
     with np.errstate(divide='ignore',invalid='ignore'): ref=l/e
-    lat=parse_gps_coord(raw.gps_lat,'N','S'); lon=parse_gps_coord(raw.gps_lon,'E','W'); lat,lon=fill_bad_gps(lat,lon); base=get_gps_utc(raw); utc=[dt+timedelta(seconds=float(o)) for dt,o in zip(base,(raw.cpu2-raw.cpu1)/1000)]
+    lat=parse_gps_coord(raw.gps_lat,'N','S'); lon=parse_gps_coord(raw.gps_lon,'E','W'); lat,lon=fill_bad_gps(lat,lon); base=get_gps_utc(raw)
+    utc=[dt+timedelta(seconds=float(o)) for dt,o in zip(base,cpu_time_offsets(raw))]
     ein750=stats_mean(wl,e,748,750); lin750=stats_mean(wl,l,748,750); e2in750=stats_mean(wl,e2,748,750)
     with np.errstate(divide='ignore',invalid='ignore'): est=np.abs(ein750-e2in750)*100/ein750
     idx={}
@@ -795,8 +836,13 @@ def process_common(raw_path,cal,index_path,mode,apply_nl=False,spectral_shift_co
     # computed at latitude 0, longitude 0 and read 101 degrees at 05:20 UTC
     # instead of 75. process_to_files() recomputes it from the Noseboom position
     # once the telemetry match has supplied one.
-    position_usable=bool(np.isfinite(lat).any() and np.isfinite(lon).any()
-                         and np.any((lat!=0)|(lon!=0)))
+    # One row has to be finite and non-zero at once. Testing the two separately
+    # let NaN answer the second: an unreadable coordinate is not equal to zero,
+    # so Flight_CC0807's single truncated block made a file of 1 310 zeroes look
+    # as though the receiver had a position. The recomputation never ran and the
+    # solar zenith angle, taken at latitude 0, reached 156 degrees at midday.
+    position_usable=bool(np.any(np.isfinite(lat)&np.isfinite(lon)
+                                &((lat!=0)|(lon!=0))))
     return {'out':pd.DataFrame(out),'wl':wl,'E':e,'L':l,'Ref':ref,
             'utc_base':list(base),'position_usable':position_usable}
 def process_full(raw,cal,idx,apply_nonlinearity_correction=False,spectral_shift_correction=False,retain_zero_gps=False): return process_common(raw,read_full_calibration(cal),idx,'FULL',apply_nonlinearity_correction,spectral_shift_correction,retain_zero_gps)
