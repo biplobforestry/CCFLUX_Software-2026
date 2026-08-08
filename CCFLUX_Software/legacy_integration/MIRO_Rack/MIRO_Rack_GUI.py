@@ -890,20 +890,17 @@ async function renderMiro(m){
  app.miroResult=m;
  const s=m.series,u=m.unit,cutoff=Number(m.smooth_seconds);
  miroResidualTitle.textContent=`High-pass residual after ${Number.isInteger(cutoff)?cutoff:n(cutoff,2)} s detrending`;
- const nav=await navigationSeries();
+ // No altitude on these two. They are read for the instrument's own behaviour
+ // - the ambient level and what the detrending leaves - and a second scale on
+ // each was clutter over that. The Source Investigation is where a species is
+ // read against height, on axes chosen for the purpose.
  const ambientLayout=baseLayout('Recorded time',`${m.gas} (${u})`);
  ambientLayout.hovermode='x';
- const ambientTraces=[{x:s.time,y:s.ambient,type:'scatter',mode:'lines',name:'Stable ambient',connectgaps:false,line:{color:colors.blue,width:1},hovertemplate:'%{x}<br>%{y:.6g} '+u+'<extra></extra>'}];
- altitudeOverlay(ambientLayout,ambientTraces,s.time,nav);
- await Plotly.react('miroRaw',ambientTraces,ambientLayout,config);
+ await Plotly.react('miroRaw',[{x:s.time,y:s.ambient,type:'scatter',mode:'lines',name:'Stable ambient',connectgaps:false,line:{color:colors.blue,width:1},hovertemplate:'%{x}<br>%{y:.6g} '+u+'<extra></extra>'}],ambientLayout,config);
  const residualLayout=baseLayout('Recorded time',`High-pass residual (${u})`);
  residualLayout.hovermode='x';
  residualLayout.shapes=[{type:'line',xref:'paper',x0:0,x1:1,y0:0,y1:0,line:{color:'#555',width:1,dash:'dash'}}];
- const residualTraces=[{x:s.time,y:s.residual,type:'scatter',mode:'lines',name:'Mathematically detrended residual',connectgaps:false,line:{color:colors.blue,width:1},hovertemplate:'%{x}<br>%{y:.6g} '+u+'<extra></extra>'}];
- // The residual is where a height-dependent artefact shows itself, so it is
- // the panel that most needs the profile beside it.
- altitudeOverlay(residualLayout,residualTraces,s.time,nav);
- await Plotly.react('miroResidual',residualTraces,residualLayout,config);
+ await Plotly.react('miroResidual',[{x:s.time,y:s.residual,type:'scatter',mode:'lines',name:'Mathematically detrended residual',connectgaps:false,line:{color:colors.blue,width:1},hovertemplate:'%{x}<br>%{y:.6g} '+u+'<extra></extra>'}],residualLayout,config);
  await renderMiroAllanMode();
  const p=m.psd,psdLayout=baseLayout('Frequency (Hz)',`Power spectral density (${u}²/Hz)`);
  psdLayout.xaxis.type='log';psdLayout.xaxis.dtick=1;psdLayout.yaxis.type='log';psdLayout.yaxis.dtick=1;psdLayout.margin={l:82,r:25,t:88,b:68};psdLayout.showlegend=false;

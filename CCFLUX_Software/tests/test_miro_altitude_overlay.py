@@ -174,11 +174,16 @@ class TestTheFiguresCarryIt:
         signature = inspect.signature(rack_export.picarro_figure)
         assert signature.parameters["navigation"].default is None
 
-    def test_the_miro_gas_page_is_offered_navigation(self):
+    def test_the_miro_gas_page_carries_none(self):
+        """It is read for the instrument's own behaviour - the ambient level
+        and what the detrending leaves - and a second scale on each of its two
+        time panels was clutter over that. A species is read against height on
+        the Source Investigation, on axes chosen for the purpose."""
         import inspect
 
-        signature = inspect.signature(rack_export.miro_figure)
-        assert signature.parameters["navigation"].default is None
+        assert "navigation" not in inspect.signature(rack_export.miro_figure).parameters
+        source = inspect.getsource(rack_export.miro_figure)
+        assert "altitude_overlay(" not in source
 
     def test_the_comparison_is_not(self):
         import inspect
@@ -186,7 +191,7 @@ class TestTheFiguresCarryIt:
         signature = inspect.signature(rack_export.comparison_figure)
         assert "navigation" not in signature.parameters
 
-    def test_the_export_offers_it_and_passes_it_down(self):
+    def test_the_export_offers_it_and_passes_it_to_the_picarro_series(self):
         import inspect
 
         source = inspect.getsource(rack_export.export_figures)
@@ -195,16 +200,13 @@ class TestTheFiguresCarryIt:
             .parameters["navigation"].default is None
         )
         assert "picarro_figure(pdata, params, progress, navigation=navigation)" in source
-        assert "navigation=navigation," in source
 
     def test_the_margin_is_reserved_for_the_second_scale(self):
         """Left at the full width, the altitude ticks and name were drawn off
         the edge of the page."""
         import inspect
 
-        for function in (rack_export.picarro_figure, rack_export.miro_figure):
-            source = inspect.getsource(function)
-            assert "if drawn else" in source, function.__name__
+        assert "if drawn else" in inspect.getsource(rack_export.picarro_figure)
 
 
 class TestTheWorkspacePageServesIt:
@@ -310,15 +312,25 @@ class TestThePagePlotsIt:
         assert "\"'/api/\", \"'/api/miro-rack/\"" in bridge
         assert "'/api/navigation'" in self._script()
 
-    def test_all_three_time_series_carry_it(self):
+    def test_the_picarro_series_carries_it(self):
         """Anchored on the render call: the ids also appear in the list the page
         purges, which would satisfy a looser search without plotting anything."""
         script = self._script()
-        for plot in ("miroRaw", "miroResidual", "picarroTime"):
+        marker = "Plotly.react('picarroTime'"
+        assert marker in script
+        block = script[script.index(marker) - 700: script.index(marker)]
+        assert "altitudeOverlay(" in block
+
+    def test_the_miro_gas_panels_do_not(self):
+        """Taken back off at the operator's request. Those two are read for the
+        instrument's own behaviour - the ambient level, and what the detrending
+        leaves - and a second scale on each was clutter over that."""
+        script = self._script()
+        for plot in ("miroRaw", "miroResidual"):
             marker = f"Plotly.react('{plot}'"
             assert marker in script, plot
             block = script[script.index(marker) - 700: script.index(marker)]
-            assert "altitudeOverlay(" in block, plot
+            assert "altitudeOverlay(" not in block, plot
 
     def test_the_histogram_does_not(self):
         """It counts values, not moments, so it has no time axis to share."""

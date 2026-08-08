@@ -376,7 +376,6 @@ def miro_figure(
     page_number: int | None = None,
     total_pages: int | None = None,
     pdf_page: bool = False,
-    navigation: pd.DataFrame | None = None,
 ) -> plt.Figure:
     """Build one publication page containing the four MIRO quick-look plots."""
     _style()
@@ -403,7 +402,6 @@ def miro_figure(
     residual_axis.set_title(f"Residual after {cutoff} s detrending", loc="left",
                             fontweight="bold")
     residual_axis.set_ylabel(f"Residual ({unit})", color=MIRO_COLOUR)
-    drawn = False
     for axis in (ambient_axis, residual_axis):
         axis.tick_params(axis="y", colors=MIRO_COLOUR)
         axis.set_xlabel("Recorded time")
@@ -413,10 +411,8 @@ def miro_figure(
         locator = mdates.AutoDateLocator(minticks=3, maxticks=4)
         axis.xaxis.set_major_locator(locator)
         axis.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d\n%H:%M"))
-        # Both time panels, not one. The residual is where a height-dependent
-        # artefact shows itself, so it is the panel that most needs the profile
-        # beside it.
-        drawn = altitude_overlay(axis, navigation) is not None or drawn
+        # No altitude here. The gas page is read for the instrument's own
+        # behaviour, and the exported figure must show what the page showed.
 
     allan = result["allan"]
     tau = np.asarray(allan.get("tau", []), dtype=float)
@@ -456,14 +452,12 @@ def miro_figure(
         _figure_footer(fig, start, end, f"Page {page_number} of {total_pages}")
     elif flight_no:
         fig.suptitle(f"{flight_no} - {gas}", fontweight="bold", y=0.985)
-    # The altitude scale needs its labels on the right of both time panels: the
-    # residual's fall at the page edge, the ambient's between the columns.
     fig.subplots_adjust(
         left=0.125,
-        right=0.885 if drawn else 0.98,
+        right=0.98,
         bottom=0.135 if pdf_page else 0.115,
         top=0.925 if (pdf_page or flight_no) else 0.96,
-        wspace=0.60 if drawn else 0.34,
+        wspace=0.34,
         hspace=0.42,
     )
     figure_standard.finalise(fig)
@@ -484,7 +478,6 @@ def _export_miro_figures(
     stamp: str,
     flight_component: str,
     progress: Progress,
-    navigation: pd.DataFrame | None = None,
 ) -> list[str]:
     gases = list(miro.GAS_COLUMNS)
     missing = [gas for gas in gases if gas not in mdata.columns]
@@ -510,7 +503,6 @@ def _export_miro_figures(
                 page_number=index,
                 total_pages=len(gases),
                 pdf_page=True,
-                navigation=navigation,
             )
             if pdf is not None:
                 pdf.savefig(fig, dpi=dpi, facecolor="white", bbox_inches=None)
@@ -555,9 +547,10 @@ def export_figures(
     if scope == "miro":
         if mdata is None:
             raise RuntimeError("MIRO data are required for MIRO export.")
+        # The gas pages carry no altitude; only the Picarro series does.
         return _export_miro_figures(
             output, selected, dpi, mdata, params, stamp, flight_component,
-            progress, navigation=navigation,
+            progress,
         )
     if scope == "comparison":
         if mdata is None or pdata is None:
