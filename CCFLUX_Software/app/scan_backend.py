@@ -23,7 +23,7 @@ from typing import Any, Callable, Mapping, Sequence
 import pandas as pd
 from uuid import uuid4
 
-from core.browser_payload import decimate_for_view
+from core.browser_payload import decimate_for_view, write_text_atomic
 from core.noseboom_full_export import export_full_table
 from core.configuration import load_detection_configuration
 from core.detector import InputCandidate
@@ -4438,12 +4438,10 @@ class DashboardScanBackend:
             quicklook_path = project.flight_output_root / "quicklooks" / "noseboom_browser.json"
             project.output_locations["noseboom_quicklook"] = quicklook_path
         quicklook_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = quicklook_path.with_suffix(".json.temporary")
-        temporary.write_text(
+        write_text_atomic(
+            quicklook_path,
             json.dumps(preview, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
-            encoding="utf-8",
         )
-        temporary.replace(quicklook_path)
         project_file = self.save_project()
         self.logger.log(
             LogLevel.SUCCESS,
@@ -7016,12 +7014,10 @@ class DashboardScanBackend:
         quicklook = dict(result.metadata.get("map", {}))
         quicklook_path = project.flight_output_root / "quicklooks" / "noseboom_browser.json"
         quicklook_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = quicklook_path.with_suffix(".json.temporary")
-        temporary.write_text(
+        write_text_atomic(
+            quicklook_path,
             json.dumps(quicklook, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
-            encoding="utf-8",
         )
-        temporary.replace(quicklook_path)
         with self._lock:
             state = self._instruments["noseboom"]
             state.output_files = [str(value.path) for value in outputs]
@@ -7752,8 +7748,8 @@ class DashboardScanBackend:
             project.flight_output_root / "quicklooks" / "flir_browser.json"
         )
         quicklook_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = quicklook_path.with_suffix(".json.temporary")
-        temporary.write_text(
+        write_text_atomic(
+            quicklook_path,
             json.dumps(
                 browser_payload,
                 ensure_ascii=False,
@@ -7761,9 +7757,7 @@ class DashboardScanBackend:
                 allow_nan=False,
             )
             + "\n",
-            encoding="utf-8",
         )
-        temporary.replace(quicklook_path)
         with self._lock:
             state = self._instruments["flir"]
             state.output_files = [
@@ -7823,13 +7817,11 @@ class DashboardScanBackend:
             }
             self._instruments["flir"].quicklook = payload
         try:
-            temporary = quicklook_path.with_suffix(".json.temporary")
-            temporary.write_text(
+            write_text_atomic(
+                quicklook_path,
                 json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
                 + "\n",
-                encoding="utf-8",
             )
-            temporary.replace(quicklook_path)
         except OSError:
             # The acquisition metadata is already on disk and the job still
             # reports the warning; failing to annotate it must not lose that.
@@ -8479,13 +8471,11 @@ class DashboardScanBackend:
             project.flight_output_root / "quicklooks" / "flir_browser.json"
         )
         quicklook_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = quicklook_path.with_suffix(".json.temporary")
-        temporary.write_text(
+        write_text_atomic(
+            quicklook_path,
             json.dumps(browser_payload, ensure_ascii=False, indent=2, allow_nan=False)
             + "\n",
-            encoding="utf-8",
         )
-        temporary.replace(quicklook_path)
 
         produced = [
             output_root / name for name in (
@@ -8621,15 +8611,13 @@ class DashboardScanBackend:
             project.flight_output_root / "quicklooks" / "gopro_browser.json"
         )
         quicklook_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = quicklook_path.with_suffix(".json.temporary")
-        temporary.write_text(
+        write_text_atomic(
+            quicklook_path,
             json.dumps(
                 _gopro_project_payload(payload),
                 ensure_ascii=False, indent=2, allow_nan=False,
             ) + "\n",
-            encoding="utf-8",
         )
-        temporary.replace(quicklook_path)
         with self._lock:
             state = self._instruments["gopro"]
             state.quicklook = payload

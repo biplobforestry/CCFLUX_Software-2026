@@ -19,6 +19,54 @@ view only.
 
 from __future__ import annotations
 
+import os
+import time
+from pathlib import Path
+from uuid import uuid4
+
+# Windows refuses to rename over, or away from, a file any process holds open,
+# and answers WinError 32. It is transient and not the writer's doing: Defender
+# opens a freshly written file to scan it, Explorer and the search indexer read
+# what appears in a watched folder, and a workspace page may be fetching the
+# payload being replaced. On Flight_CC0807 that surfaced as OPC HBX-4 failing
+# with "cannot access the file because it is being used by another process"
+# while HBX-5, written a moment apart, completed - which is why it looked
+# random.
+REPLACE_ATTEMPTS = 8
+REPLACE_BACKOFF_SECONDS = 0.05
+
+
+def write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> Path:
+    """Write a file so a reader sees the old copy or the new one, never a part.
+
+    The temporary carries this process and a fresh token, because two writers
+    sharing one ".tmp" name will overwrite each other's half-written file and
+    then race to rename it. The rename is retried, because on Windows it fails
+    for reasons that have nothing to do with this program and pass in
+    milliseconds.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(
+        f".{target.name}.{os.getpid()}.{uuid4().hex}.writing"
+    )
+    temporary.write_text(text, encoding=encoding)
+    try:
+        for attempt in range(REPLACE_ATTEMPTS):
+            try:
+                os.replace(temporary, target)
+                return target
+            except PermissionError:
+                if attempt == REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(REPLACE_BACKOFF_SECONDS * (attempt + 1))
+    except BaseException:
+        # A temporary left behind would be published by the project bundler as
+        # if it were a product.
+        temporary.unlink(missing_ok=True)
+        raise
+    return target
+
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 

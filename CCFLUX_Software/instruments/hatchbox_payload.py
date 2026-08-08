@@ -4,25 +4,21 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
 
+from core.browser_payload import write_text_atomic
+
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> Path:
     """Write finite JSON atomically so project reload never sees a partial file."""
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(target.suffix + ".tmp")
-    temporary.write_text(
+    return write_text_atomic(
+        Path(path),
         json.dumps(_json_value(payload), indent=2, allow_nan=False),
-        encoding="utf-8",
     )
-    os.replace(temporary, target)
-    return target
 
 
 def opc_sensor_payload(
