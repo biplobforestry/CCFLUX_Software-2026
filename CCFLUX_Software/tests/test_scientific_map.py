@@ -50,28 +50,34 @@ class TestTheFigureStandard:
         width, _height = _rendered(written[0])
         assert width / 100 == pytest.approx(7.0, abs=0.02)
 
-    def test_a_portrait_track_is_not_cropped_narrower(self, tmp_path):
-        """bbox="tight" trimmed a north-south flight to 6.02 inches, so it no
-        longer matched the column it was drawn for."""
+    def test_a_portrait_track_is_narrower_rather_than_stretched(self, tmp_path):
+        """A map is sized to the ground it covers. Filling a seven-inch frame
+        with a north-south flight means widening the extent to a hundred
+        kilometres of countryside the Zeppelin never flew over."""
         latitudes = np.linspace(50.4, 51.4, 40)
         longitudes = np.linspace(6.6, 6.7, 40)
         written = scientific_map.render_track_map(
             latitudes, longitudes, None, tmp_path, "portrait",
             title="Portrait", formats=("png",), dpi=100,
+            allow_rotation=False,
         )
         width, height = _rendered(written[0])
-        assert width / 100 == pytest.approx(7.0, abs=0.02)
+        assert width / 100 < scientific_map.MAP_MAXIMUM_WIDTH_INCHES
         assert height > width
 
-    def test_the_height_stays_on_a_page(self, tmp_path):
-        latitudes = np.linspace(45.0, 55.0, 40)
-        longitudes = np.linspace(6.60, 6.62, 40)
-        written = scientific_map.render_track_map(
-            latitudes, longitudes, None, tmp_path, "tall",
-            title="Tall", formats=("png",), dpi=100,
-        )
-        _width, height = _rendered(written[0])
-        assert height / 100 <= scientific_map.MAXIMUM_FIGURE_HEIGHT_INCHES + 0.02
+    def test_the_page_budget_is_never_exceeded(self, tmp_path):
+        for name, latitudes, longitudes in (
+            ("tall", np.linspace(45.0, 55.0, 40), np.linspace(6.60, 6.62, 40)),
+            ("wide", np.linspace(51.00, 51.02, 40), np.linspace(4.0, 9.0, 40)),
+            ("square", np.linspace(50.4, 51.4, 40), np.linspace(6.0, 7.4, 40)),
+        ):
+            written = scientific_map.render_track_map(
+                latitudes, longitudes, None, tmp_path, name,
+                title=name, formats=("png",), dpi=100,
+            )
+            width, height = _rendered(written[0])
+            assert width / 100 <= scientific_map.MAP_MAXIMUM_WIDTH_INCHES + 0.02
+            assert height / 100 <= scientific_map.MAP_MAXIMUM_HEIGHT_INCHES + 0.02
 
     def test_a_wide_transect_stays_landscape(self, tmp_path):
         latitudes = np.linspace(51.00, 51.02, 40)
@@ -146,6 +152,88 @@ class TestTheFigureStandard:
             title="Gaps", formats=("png",), dpi=100,
         )
         assert written[0].is_file()
+
+
+class TestTheLayoutIsPlannedForTheTrack:
+    """The exported map was a photograph of a browser window, so its extent was
+    wherever someone had left the map: a flight covering 80 km by 83 km came
+    out inside 315 km of Rhineland, the track a fifth of the frame, with the
+    colour bar drawn over the ground it described."""
+
+    def test_a_square_track_is_not_stretched_to_the_full_width(self):
+        plan = scientific_map.plan_layout(1.15, 1.19, True)
+
+        assert plan["figure_width"] < scientific_map.MAP_MAXIMUM_WIDTH_INCHES
+        assert plan["map_height"] / plan["map_width"] == pytest.approx(
+            1.19 / 1.15, rel=0.02
+        )
+
+    def test_the_bar_goes_where_the_layout_has_slack(self):
+        """Beside a tall map, beneath a wide one - whichever draws more map."""
+        tall = scientific_map.plan_layout(0.4, 1.2, True, allow_rotation=False)
+        wide = scientific_map.plan_layout(1.4, 0.28, True)
+
+        assert tall["colourbar"] == "right"
+        assert wide["colourbar"] == "bottom"
+
+    def test_no_bar_is_reserved_for_a_track_without_values(self):
+        plan = scientific_map.plan_layout(1.0, 1.0, False)
+
+        assert plan["colourbar"] == "none"
+        assert plan["figure_width"] == pytest.approx(
+            plan["map_width"] + scientific_map.YAXIS_WIDTH_INCHES
+        )
+
+    def test_a_north_south_transect_is_turned_to_fill_the_page(self):
+        upright = scientific_map.plan_layout(0.22, 1.30, True, allow_rotation=False)
+        free = scientific_map.plan_layout(0.22, 1.30, True)
+
+        assert free["rotated"] is True
+        assert free["area"] > upright["area"] * scientific_map.ROTATION_GAIN
+
+    def test_a_map_is_not_turned_for_a_marginal_gain(self):
+        """North not being up costs a reader something."""
+        plan = scientific_map.plan_layout(1.15, 1.19, True)
+
+        assert plan["rotated"] is False
+
+    def test_a_wide_track_is_already_the_right_way_round(self):
+        plan = scientific_map.plan_layout(1.40, 0.28, True)
+
+        assert plan["rotated"] is False
+
+    def test_rotation_can_be_refused(self):
+        plan = scientific_map.plan_layout(0.1, 1.6, True, allow_rotation=False)
+
+        assert plan["rotated"] is False
+
+    def test_the_map_always_fits_inside_the_budget(self):
+        for span_x, span_y in ((1.0, 1.0), (5.0, 0.1), (0.1, 5.0), (0.3, 0.31)):
+            plan = scientific_map.plan_layout(span_x, span_y, True)
+
+            assert plan["figure_width"] <= scientific_map.MAP_MAXIMUM_WIDTH_INCHES + 1e-9
+            assert plan["figure_height"] <= scientific_map.MAP_MAXIMUM_HEIGHT_INCHES + 1e-9
+
+
+class TestRotationIsARotationNotAMirror:
+    def test_north_still_points_at_north(self, tmp_path):
+        """A transpose would swap east for west, which is worse than a badly
+        proportioned figure: it would put the source on the wrong side."""
+        latitudes = np.linspace(50.4, 51.4, 60)
+        longitudes = np.linspace(6.60, 6.66, 60)
+        values = np.linspace(1.0, 2.0, 60)
+
+        written = scientific_map.render_track_map(
+            latitudes, longitudes, values, tmp_path, "turned",
+            title="Turned", formats=("png",), dpi=100,
+        )
+
+        assert written[0].is_file()
+
+    def test_the_ticks_follow_the_turn(self):
+        """Turned a quarter, the horizontal axis carries latitude."""
+        plan = scientific_map.plan_layout(0.22, 1.30, True)
+        assert plan["rotated"] is True
 
 
 class TestTheProjection:

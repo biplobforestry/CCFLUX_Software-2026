@@ -50,14 +50,27 @@ MAXIMUM_TILES = 64
 TILE_TIMEOUT_SECONDS = 5
 USER_AGENT = "CC-FLUX-PostFlightReview/1.0 (Forschungszentrum Juelich)"
 
-# The height follows the track's own shape - a west-east transect is landscape,
-# a north-south one is portrait - inside bounds that keep the figure on a page.
-# The width is always seven inches: where the track does not fill it, the margin
-# stays white rather than the figure being cropped narrower than a column.
-MINIMUM_FIGURE_HEIGHT_INCHES = 3.2
-MAXIMUM_FIGURE_HEIGHT_INCHES = 8.6
-# Room for the title, the axis labels and the colour bar's own tick labels.
-FURNITURE_HEIGHT_INCHES = 1.15
+# A map is sized to the ground it covers, not to a column. Both numbers are
+# ceilings: the figure is whatever the track's own shape needs inside them, so a
+# square flight comes out square rather than being stretched to fill a wide
+# frame. The extent is always the track plus a margin - a map that fills its
+# frame by widening to a hundred kilometres of countryside the Zeppelin never
+# flew over is a picture of the Rhineland, not of the flight.
+MAP_MAXIMUM_WIDTH_INCHES = 7.0
+MAP_MAXIMUM_HEIGHT_INCHES = 5.0
+# Below this the basemap has no legible detail and the track is a scribble.
+MINIMUM_MAP_INCHES = 2.4
+
+# What has to fit around the drawn map, measured at nine point.
+TITLE_HEIGHT_INCHES = 0.42
+XAXIS_HEIGHT_INCHES = 0.52
+YAXIS_WIDTH_INCHES = 0.62
+# A colour bar and its label, on whichever side it goes.
+COLOURBAR_WIDTH_INCHES = 0.78
+COLOURBAR_HEIGHT_INCHES = 0.62
+# Rotating a map is a real cost to a reader, so it has to buy something: a
+# quarter more drawn map than the upright orientation manages.
+ROTATION_GAIN = 1.25
 
 
 def _mercator_y(latitude: float) -> float:
@@ -187,7 +200,14 @@ def _degree_ticks(low: float, high: float, target: int = 6) -> list[float]:
     return ticks
 
 
-def _scale_bar(axis, west: float, east: float, latitude: float) -> None:
+def _tick_target(inches: float) -> int:
+    """How many labels that many inches of axis can hold at nine point."""
+    return max(2, min(7, int(round(inches * 1.4))))
+
+
+def _scale_bar(
+    axis, west: float, east: float, latitude: float, rotated: bool = False
+) -> None:
     """A bar whose length is a round number of kilometres at this latitude."""
     metres_per_degree = 111_320.0 * math.cos(math.radians(latitude))
     span_metres = (east - west) * metres_per_degree
@@ -200,15 +220,34 @@ def _scale_bar(axis, west: float, east: float, latitude: float) -> None:
     if length > span_metres * 0.8:
         length = magnitude
     degrees = length / metres_per_degree
-    x0 = west + (east - west) * 0.04
-    y = 0.055
+    label = f"{length / 1000:g} km" if length >= 1000 else f"{length:g} m"
+    # Bottom right, because the attribution has the bottom left and a scale bar
+    # drawn through it made both unreadable.
+    start = east - (east - west) * 0.04 - degrees
+    if rotated:
+        # Longitude runs up the page, so the bar does too - down the right-hand
+        # edge, where neither the north arrow nor the attribution is.
+        transform = _blend(axis, along="y")
+        low = west + (east - west) * 0.04
+        axis.plot(
+            [0.955, 0.955], [low, low + degrees], transform=transform,
+            color="#111111", linewidth=2.6, solid_capstyle="butt", zorder=6,
+        )
+        axis.text(
+            0.937, low + degrees / 2, label, transform=transform,
+            ha="center", va="center", rotation=90,
+            fontsize=MINIMUM_FONT_POINTS, color="#111111", zorder=6,
+            bbox={"boxstyle": "round,pad=0.18", "facecolor": "white",
+                  "edgecolor": "none", "alpha": 0.75},
+        )
+        return
+    transform = _blend(axis, along="x")
     axis.plot(
-        [x0, x0 + degrees], [y, y], transform=_blend(axis),
+        [start, start + degrees], [0.055, 0.055], transform=transform,
         color="#111111", linewidth=2.6, solid_capstyle="butt", zorder=6,
     )
-    label = f"{length / 1000:g} km" if length >= 1000 else f"{length:g} m"
     axis.text(
-        x0 + degrees / 2, y + 0.018, label, transform=_blend(axis),
+        start + degrees / 2, 0.073, label, transform=transform,
         ha="center", va="bottom", fontsize=MINIMUM_FONT_POINTS, color="#111111",
         zorder=6,
         bbox={"boxstyle": "round,pad=0.18", "facecolor": "white",
@@ -216,19 +255,33 @@ def _scale_bar(axis, west: float, east: float, latitude: float) -> None:
     )
 
 
-def _blend(axis):
+def _blend(axis, along: str = "x"):
     import matplotlib.transforms as transforms
 
+    if along == "y":
+        return transforms.blended_transform_factory(axis.transAxes, axis.transData)
     return transforms.blended_transform_factory(axis.transData, axis.transAxes)
 
 
-def _north_arrow(axis) -> None:
+def _north_arrow(axis, rotated: bool = False) -> None:
+    """Which way north is - the whole reason a map may be turned at all.
+
+    Kept inside the top-right corner rather than the top-left, where it used to
+    sit on the first latitude label.
+    """
+    if rotated:
+        # A quarter turn anticlockwise puts north to the left.
+        tail, head = (0.135, 0.93), (0.035, 0.93)
+    else:
+        tail, head = (0.965, 0.79), (0.965, 0.90)
     axis.annotate(
-        "N", xy=(0.965, 0.90), xytext=(0.965, 0.79),
+        "N", xy=head, xytext=tail,
         xycoords="axes fraction", textcoords="axes fraction",
         ha="center", va="center", fontsize=MINIMUM_FONT_POINTS + 1,
         fontweight="bold", color="#111111", zorder=6,
         arrowprops={"arrowstyle": "-|>", "color": "#111111", "linewidth": 1.5},
+        bbox={"boxstyle": "circle,pad=0.16", "facecolor": "white",
+              "edgecolor": "none", "alpha": 0.75},
     )
 
 
@@ -238,6 +291,86 @@ def rc_parameters() -> dict[str, Any]:
     # A map's ground is the basemap; a graticule over it would be a second grid.
     parameters["axes.grid"] = False
     return parameters
+
+
+def plan_layout(
+    span_x: float,
+    span_y: float,
+    has_colourbar: bool,
+    *,
+    allow_rotation: bool = True,
+    maximum_width: float = MAP_MAXIMUM_WIDTH_INCHES,
+    maximum_height: float = MAP_MAXIMUM_HEIGHT_INCHES,
+) -> dict[str, Any]:
+    """Decide the figure size, the colour bar's side, and whether to rotate.
+
+    The map keeps the ground's true proportions, so the only question is how
+    large it can be drawn inside the budget and which way round. Three things
+    are chosen together because they trade against each other:
+
+    * A colour bar on the right takes width; one underneath takes height. It
+      goes on whichever side the layout has slack, which is the side that
+      leaves the drawn map larger.
+    * A track taller than it is wide cannot fill a landscape budget upright.
+      Turned a quarter, it can - so the orientation that draws more map wins,
+      but only by a clear margin, because north not being up costs a reader
+      something and a marginal gain is not worth it.
+    * Everything else - title, tick labels, axis names - is fixed furniture
+      subtracted before the map is fitted, so the map never overruns it.
+    """
+    span_x = max(float(span_x), 1e-9)
+    span_y = max(float(span_y), 1e-9)
+    best: dict[str, Any] | None = None
+    orientations = (False, True) if allow_rotation else (False,)
+    for rotated in orientations:
+        # A quarter turn swaps which way the ground is long.
+        width_span = span_y if rotated else span_x
+        height_span = span_x if rotated else span_y
+        aspect = height_span / width_span
+        for side in ("right", "bottom") if has_colourbar else ("none",):
+            available_width = maximum_width - YAXIS_WIDTH_INCHES - (
+                COLOURBAR_WIDTH_INCHES if side == "right" else 0.0
+            )
+            available_height = maximum_height - TITLE_HEIGHT_INCHES - (
+                XAXIS_HEIGHT_INCHES
+            ) - (COLOURBAR_HEIGHT_INCHES if side == "bottom" else 0.0)
+            if available_width <= 0 or available_height <= 0:
+                continue
+            map_width = min(available_width, available_height / aspect)
+            map_height = map_width * aspect
+            candidate = {
+                "rotated": rotated,
+                "colourbar": side,
+                "map_width": map_width,
+                "map_height": map_height,
+                "area": map_width * map_height,
+                "figure_width": map_width + YAXIS_WIDTH_INCHES + (
+                    COLOURBAR_WIDTH_INCHES if side == "right" else 0.0
+                ),
+                "figure_height": map_height + TITLE_HEIGHT_INCHES
+                + XAXIS_HEIGHT_INCHES
+                + (COLOURBAR_HEIGHT_INCHES if side == "bottom" else 0.0),
+            }
+            if best is None:
+                best = candidate
+                continue
+            # Rotation has to clear the bar; a different colour bar side does
+            # not, because neither orientation of the bar costs the reader
+            # anything.
+            threshold = (
+                best["area"] * ROTATION_GAIN
+                if candidate["rotated"] != best["rotated"] and candidate["rotated"]
+                else best["area"]
+            )
+            if candidate["area"] > threshold:
+                best = candidate
+    if best is None:  # pragma: no cover - only if the budget is degenerate
+        raise ValueError("No map fits inside the given page budget")
+    if min(best["map_width"], best["map_height"]) < MINIMUM_MAP_INCHES:
+        # A very elongated track: let it run to the budget rather than shrink
+        # the long side to keep a short one legible.
+        best["too_thin"] = True
+    return best
 
 
 def render_track_map(
@@ -255,8 +388,14 @@ def render_track_map(
     dpi: int = 300,
     cache_directory: Path | None = None,
     log_scale: bool = False,
+    allow_rotation: bool = True,
 ) -> list[Path]:
-    """One flight track, drawn to the campaign's figure standard."""
+    """One flight track, drawn to the campaign's figure standard.
+
+    The extent is the track and a margin, never the window someone happened to
+    leave a browser map on, and the page is sized to the ground's own
+    proportions inside seven inches by five.
+    """
     import matplotlib
 
     matplotlib.use("Agg")
@@ -296,13 +435,9 @@ def render_track_map(
     south, north = latitude.min() - pad_y, latitude.max() + pad_y
 
     y_low, y_high = _mercator_y(south), _mercator_y(north)
-    aspect = (y_high - y_low) / max(1e-9, east - west)
-    height = max(
-        MINIMUM_FIGURE_HEIGHT_INCHES,
-        min(
-            MAXIMUM_FIGURE_HEIGHT_INCHES,
-            FIGURE_WIDTH_INCHES * aspect + FURNITURE_HEIGHT_INCHES,
-        ),
+    layout = plan_layout(
+        east - west, y_high - y_low, colour is not None,
+        allow_rotation=allow_rotation,
     )
 
     written: list[Path] = []
@@ -311,25 +446,41 @@ def render_track_map(
 
     with plt.rc_context(rc_parameters()):
         figure, axis = plt.subplots(
-            figsize=(FIGURE_WIDTH_INCHES, height), constrained_layout=True
+            figsize=(layout["figure_width"], layout["figure_height"]),
+            constrained_layout=True,
         )
         zoom = choose_zoom(
-            west, east, south, north, FIGURE_WIDTH_INCHES * min(resolution, 300)
+            west, east, south, north,
+            layout["map_width"] * min(resolution, 300),
         )
         mosaic, extent = (None, None)
         if cache_directory is not None:
             mosaic, extent = basemap(west, east, south, north, zoom,
                                      Path(cache_directory))
+        # A quarter turn anticlockwise, applied to the ground and everything
+        # drawn on it: east goes up the page and north goes to the left. It is a
+        # rotation, not a transpose - a transpose would mirror the map and swap
+        # east for west, which is worse than a badly proportioned figure.
+        rotated = bool(layout["rotated"])
+
+        def place(x, y):
+            return (-np.asarray(y), np.asarray(x)) if rotated else (x, y)
+
         if mosaic is not None:
+            picture = np.asarray(mosaic)
+            left, right, bottom, top = extent
+            if rotated:
+                picture = np.rot90(picture, k=1)
+                left, right, bottom, top = -top, -bottom, left, right
             axis.imshow(
-                np.asarray(mosaic), extent=extent, origin="upper",
+                picture, extent=(left, right, bottom, top), origin="upper",
                 interpolation="bilinear", zorder=0,
             )
         else:
             axis.set_facecolor("#f2f2ef")
 
         points = np.column_stack(
-            [longitude, [_mercator_y(value) for value in latitude]]
+            place(longitude, np.array([_mercator_y(value) for value in latitude]))
         )
         segments = np.stack([points[:-1], points[1:]], axis=1)
         if colour is not None:
@@ -348,7 +499,14 @@ def render_track_map(
             )
             collection.set_array(midpoint)
             axis.add_collection(collection)
-            bar = figure.colorbar(collection, ax=axis, pad=0.015, fraction=0.045)
+            # Outside the map, on the side the layout left room on. Drawn over
+            # the map it hides the ground it is describing.
+            horizontal = layout["colourbar"] == "bottom"
+            bar = figure.colorbar(
+                collection, ax=axis, pad=0.02, fraction=0.05,
+                location="bottom" if horizontal else "right",
+                orientation="horizontal" if horizontal else "vertical",
+            )
             if value_label:
                 bar.set_label(value_label)
             bar.outline.set_linewidth(0.8)
@@ -357,20 +515,38 @@ def render_track_map(
                 LineCollection(segments, colors="#1565c0", linewidths=2.2, zorder=3)
             )
 
-        axis.set_xlim(west, east)
-        axis.set_ylim(y_low, y_high)
+        # Tick density from the drawn size, not a fixed count: six labels on a
+        # one-inch axis is a smear, and an elongated map has one of each.
+        # Rotated, latitude runs along the wide axis and longitude up the short
+        # one; upright it is the other way about.
+        longitude_inches = layout["map_height"] if rotated else layout["map_width"]
+        latitude_inches = layout["map_width"] if rotated else layout["map_height"]
+        longitude_ticks = _degree_ticks(west, east, _tick_target(longitude_inches))
+        latitude_ticks = _degree_ticks(south, north, _tick_target(latitude_inches))
+        merc_ticks = [_mercator_y(value) for value in latitude_ticks]
+        if rotated:
+            axis.set_xlim(-y_high, -y_low)
+            axis.set_ylim(west, east)
+            axis.set_xticks([-value for value in merc_ticks])
+            axis.set_xticklabels([f"{value:g}" for value in latitude_ticks])
+            axis.set_yticks(longitude_ticks)
+            axis.set_xlabel("Latitude (°)")
+            axis.set_ylabel("Longitude (°)")
+        else:
+            axis.set_xlim(west, east)
+            axis.set_ylim(y_low, y_high)
+            axis.set_xticks(longitude_ticks)
+            axis.set_yticks(merc_ticks)
+            axis.set_yticklabels([f"{value:g}" for value in latitude_ticks])
+            axis.set_xlabel("Longitude (°)")
+            axis.set_ylabel("Latitude (°)")
+        # The ground keeps its proportions; the box was sized for them, so this
+        # neither stretches the map nor leaves the frame part empty.
         axis.set_aspect("equal", adjustable="box")
-
-        axis.set_xticks(_degree_ticks(west, east))
-        latitude_ticks = _degree_ticks(south, north)
-        axis.set_yticks([_mercator_y(value) for value in latitude_ticks])
-        axis.set_yticklabels([f"{value:g}" for value in latitude_ticks])
-        axis.set_xlabel("Longitude (°)")
-        axis.set_ylabel("Latitude (°)")
         axis.tick_params(direction="out", length=3.5, width=0.8)
 
-        _scale_bar(axis, west, east, float(latitude.mean()))
-        _north_arrow(axis)
+        _scale_bar(axis, west, east, float(latitude.mean()), rotated=rotated)
+        _north_arrow(axis, rotated=rotated)
         axis.text(
             0.012, 0.012, TILE_ATTRIBUTION if mosaic is not None
             else "Basemap unavailable; track drawn from recorded positions",
