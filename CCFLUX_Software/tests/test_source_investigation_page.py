@@ -144,6 +144,27 @@ class TestWhatTheOperatorAskedFor:
         assert "plotly_selected" in SCRIPT
         assert "dragmode: 'select'" in SCRIPT
 
+    def test_clicking_a_curve_reads_the_moment_clicked(self):
+        """The faster gesture when a feature is narrow: a drag across a plume a
+        few pixels wide is awkward, a click on it is not."""
+        assert "plotly_click" in SCRIPT
+        assert "function setRegionAround(" in SCRIPT
+        block = SCRIPT[SCRIPT.index("element.on('plotly_click'"):]
+        assert "loadRegion()" in block[:400]
+
+    def test_a_click_inside_an_existing_selection_keeps_it(self):
+        """Otherwise a click to inspect a chosen region would silently shrink
+        it to two minutes."""
+        assert "withinRegion(point.x)" in SCRIPT
+
+    def test_the_click_window_does_not_pick_up_a_timezone(self):
+        """The record is naive UTC; a Date built without one shifts every bound
+        by an hour in summer."""
+        block = SCRIPT[SCRIPT.index("function setRegionAround("):]
+        block = block[: block.index("function setRegion(")]
+        assert "}Z`" in block
+        assert "toISOString()" in block
+
     def test_right_clicking_the_selection_asks_where_it_was(self):
         block = SCRIPT[SCRIPT.index("element.oncontextmenu"):]
         assert "loadRegion()" in block[:300]

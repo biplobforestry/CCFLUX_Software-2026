@@ -289,9 +289,11 @@
   }
 
   function bandFor(entry, axis) {
-    // The excursion of the samples each drawn point stands for. Drawn as a
-    // filled band behind the line so a spike that fell between two plotted
-    // points is still visible - the whole reason this page exists.
+    // The excursion of the samples each drawn point stands for, off by default:
+    // behind several series at once it reads as scribble over the traces, and
+    // the line is what the page is for. Turned on, it is how a spike that fell
+    // between two plotted points stays visible.
+    if (!$('showBand') || !$('showBand').checked) return null;
     const band = state.data.envelope && state.data.envelope[entry.key];
     if (!band) return null;
     const times = state.data.time;
@@ -388,8 +390,40 @@
           nativeEvent.preventDefault();
           loadRegion();
         };
+        // And a plain click on the curve, which is the faster gesture when a
+        // feature is narrow: it takes a window around the point clicked rather
+        // than asking for a drag that would be a few pixels wide.
+        element.on('plotly_click', (event) => {
+          const point = event && event.points && event.points[0];
+          if (!point) return;
+          if (state.region && withinRegion(point.x)) { loadRegion(); return; }
+          setRegionAround(point.x);
+          loadRegion();
+        });
       });
     });
+  }
+
+  // A click asks about the moment clicked, so the region is a window around it.
+  // Two minutes is about what a Zeppelin covers while flying through a plume,
+  // and it is wide enough that the wind rose has samples to count.
+  const CLICK_WINDOW_SECONDS = 120;
+
+  function withinRegion(value) {
+    if (!state.region) return false;
+    const at = String(forInput(value));
+    return at >= state.region.start && at <= state.region.end;
+  }
+
+  function setRegionAround(value) {
+    // Built through Date only to add and subtract seconds, then written back
+    // as plain text: the record is naive UTC and must not pick up a zone here.
+    const middle = new Date(`${forInput(value)}Z`).getTime();
+    if (!Number.isFinite(middle)) return;
+    const half = CLICK_WINDOW_SECONDS * 500;
+    const asText = (millis) =>
+      new Date(millis).toISOString().slice(0, 19);
+    setRegion(asText(middle - half), asText(middle + half));
   }
 
   function setRegion(start, end) {
@@ -635,6 +669,9 @@
   }
 
   $('update').onclick = update;
+  // Redrawn rather than refetched: the band is already in the payload, so
+  // turning it on must not cost a round trip.
+  $('showBand').onchange = drawRows;
   $('exportFigures').onclick = exportFigures;
   $('resetRegion').onclick = () => {
     state.region = null; state.analysis = null;

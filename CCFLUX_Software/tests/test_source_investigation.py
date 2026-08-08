@@ -161,6 +161,87 @@ class TestSmoothingNeverReachesTheNumbers:
         assert any(value is None for value in drawn)
 
 
+class TestNoSmootherInventsData:
+    """A polynomial fitted across a sharp spike rings on both sides of it, and
+    the undershoot goes below everything measured. On Flight_CC0806 that put
+    718 CO values under the record's own minimum with Savitzky-Golay and 1 442
+    with the spline; on Flight_CC0807 the spline reached -500 ppb. A negative
+    concentration is not a smoothed measurement, and a reader comparing this
+    page against the MIRO workspace saw two different flights.
+    """
+
+    @pytest.fixture()
+    def spiky(self):
+        """A quiet baseline with one sharp plume, which is what rings."""
+        times = pd.Series(pd.date_range("2026-08-06 12:00", periods=1200, freq="1s"))
+        values = np.full(1200, 120.0)
+        values[600:604] = 7800.0
+        return times, values
+
+    @pytest.mark.parametrize("method", ["savgol", "moving", "spline"])
+    def test_the_curve_stays_inside_the_measured_range(self, spiky, method):
+        times, values = spiky
+
+        smoothed = engine.smooth_values(times, values, method, 15, 2)
+
+        finite = smoothed[np.isfinite(smoothed)]
+        assert finite.min() >= values.min() - 1e-9, f"{method} drew below the data"
+        assert finite.max() <= values.max() + 1e-9, f"{method} drew above the data"
+
+    @pytest.mark.parametrize("method", ["savgol", "moving", "spline"])
+    def test_a_concentration_never_goes_negative(self, spiky, method):
+        times, values = spiky
+
+        smoothed = engine.smooth_values(times, values, method, 15, 2)
+
+        assert np.nanmin(smoothed) >= 0.0
+
+    def test_the_clamp_leaves_an_unspiked_record_alone(self):
+        """It is a floor and a ceiling, not a filter of its own."""
+        times = pd.Series(pd.date_range("2026-08-06 12:00", periods=300, freq="1s"))
+        values = 120.0 + 5.0 * np.sin(np.arange(300) / 20.0)
+
+        smoothed = engine.smooth_values(times, values, "moving", 9, 2)
+
+        assert np.nanmax(np.abs(smoothed - values)) < 2.0
+
+    def test_the_window_is_the_seconds_it_is_labelled_with(self):
+        """astype("int64") returns whatever unit the column is stored in. The
+        campaign files parse to nanoseconds and worked; a microsecond column
+        made a 15 s window 15 001 samples wide, and a rolling mean wider than
+        the flight returns nothing at all."""
+        for unit in ("ns", "us", "ms", "s"):
+            times = pd.Series(
+                pd.date_range("2026-08-06 12:00", periods=200, freq="1s").astype(
+                    f"datetime64[{unit}]"
+                )
+            )
+
+            assert engine._window_samples(times, 15) == 15, unit
+
+    def test_a_smoother_returns_something_whatever_the_time_unit(self):
+        for unit in ("ns", "us", "ms", "s"):
+            times = pd.Series(
+                pd.date_range("2026-08-06 12:00", periods=400, freq="1s").astype(
+                    f"datetime64[{unit}]"
+                )
+            )
+            values = 120.0 + np.sin(np.arange(400) / 12.0)
+
+            smoothed = engine.smooth_values(times, values, "moving", 15, 2)
+
+            assert np.isfinite(smoothed).all(), unit
+
+    def test_the_raw_record_is_never_clamped(self):
+        """'none' is the measurement, and must come back untouched."""
+        times = pd.Series(pd.date_range("2026-08-06 12:00", periods=50, freq="1s"))
+        values = np.linspace(-3.0, 900.0, 50)
+
+        assert np.array_equal(
+            engine.smooth_values(times, values, "none", 5, 2), values
+        )
+
+
 class TestTheSpikeSurvivesDecimation:
     """43 431 samples drawn as 6 000 points means seven in eight are not drawn,
     and a one-second plume is one sample."""

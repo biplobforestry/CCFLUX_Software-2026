@@ -276,20 +276,48 @@ def smooth_values(
     if not finite.any():
         return values
     if method == "savgol":
-        return _savitzky_golay(values, finite, window, order)
-    if method == "moving":
-        return _moving_average(values, window)
-    if method == "spline":
-        return _spline(values, finite, window)
-    return values
+        smoothed = _savitzky_golay(values, finite, window, order)
+    elif method == "moving":
+        smoothed = _moving_average(values, window)
+    elif method == "spline":
+        smoothed = _spline(values, finite, window)
+    else:
+        return values
+    return _within_measured_range(smoothed, values[finite])
+
+
+def _within_measured_range(smoothed: np.ndarray, measured: np.ndarray) -> np.ndarray:
+    """A drawn curve may not leave the range the instrument reported.
+
+    A polynomial fitted across a sharp spike rings on both sides of it, and the
+    undershoot goes below everything measured: on Flight_CC0806, Savitzky-Golay
+    put 718 CO values and the spline 1 442 under the record's own minimum, and
+    on Flight_CC0807 the spline reached -500 ppb. A negative concentration is
+    not a smoothed measurement, it is an artefact of the filter, and a reader
+    comparing this page against the workspace sees two different flights.
+
+    Clamping is a floor and a ceiling, not a fix for ringing inside the range;
+    what it guarantees is that nothing is drawn that was never measured.
+    """
+    if not len(measured):
+        return smoothed
+    return np.clip(smoothed, float(np.min(measured)), float(np.max(measured)))
 
 
 def _window_samples(times: pd.Series, seconds: int) -> int:
-    """How many samples that many seconds is, on this record's own spacing."""
+    """How many samples that many seconds is, on this record's own spacing.
+
+    The spacing is taken through total_seconds rather than astype("int64"),
+    which returns whatever unit the column happens to be stored in. The
+    campaign files parse to nanoseconds and worked; a microsecond column made
+    a fifteen-second window come out as 15 001 samples, and a rolling mean
+    wider than the flight returns nothing at all.
+    """
     stamps = pd.to_datetime(pd.Series(times), errors="coerce").dropna()
     if len(stamps) < 2:
         return 0
-    step = float(np.median(np.diff(stamps.astype("int64").to_numpy())) / 1e9)
+    deltas = stamps.diff().dt.total_seconds().dropna()
+    step = float(np.median(deltas)) if len(deltas) else 0.0
     if not np.isfinite(step) or step <= 0:
         return 0
     window = int(round(seconds / step))

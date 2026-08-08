@@ -114,6 +114,12 @@ main{padding:16px 20px 40px;display:flex;flex-direction:column;gap:16px}
     <label for="polyOrder">Order</label>
     <input type="number" id="polyOrder" min="1" max="5" value="2">
   </div>
+  <div class="control">
+    <label for="showBand">Raw excursion</label>
+    <label style="display:flex;align-items:center;gap:6px;font-size:12.5px">
+      <input type="checkbox" id="showBand"> show band behind the line
+    </label>
+  </div>
   <button type="button" id="update">Update</button>
   <button type="button" class="secondary" id="resetRegion">Clear region</button>
   <button type="button" class="secondary" id="exportFigures">Export figures</button>
@@ -125,8 +131,9 @@ main{padding:16px 20px 40px;display:flex;flex-direction:column;gap:16px}
   <section class="panel">
     <h2>Gas rows</h2>
     <p class="hint">Right-click an axis chip to choose what it carries, and the
-      colour and line width of each series. Drag across a plot to select a
-      region, then right-click inside the selection for its location.</p>
+      colour and line width of each series. <strong>Click a curve</strong> to
+      read the two minutes around that point, or drag across a plot to select a
+      longer region and right-click inside it.</p>
     <div class="rows" id="rows"></div>
     <p class="note" id="drawNote"></p>
   </section>
